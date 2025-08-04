@@ -1,4 +1,5 @@
 #include "cpu/interrupts.h"
+#include "cpu/pic.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
 #include "drivers/console.h"
@@ -58,10 +59,31 @@ static void dump_frame(struct interrupt_frame *f) {
     kprintf("cs=%02lx ss=%02lx err=%lx\n", f->cs, f->ss, f->error_code);
 }
 
+static void (*irq_handlers[16])(struct interrupt_frame *);
+
+void irq_register(uint8_t irq, void (*handler)(struct interrupt_frame *)) {
+    if (irq < 16) {
+        irq_handlers[irq] = handler;
+    }
+}
+
 void interrupt_dispatch(struct interrupt_frame *f) {
+    if (f->vector >= PIC_IRQ_BASE && f->vector < PIC_IRQ_BASE + 16) {
+        uint8_t irq = f->vector - PIC_IRQ_BASE;
+        if (pic_is_spurious(irq)) {
+            return;
+        }
+        if (irq_handlers[irq]) {
+            irq_handlers[irq](f);
+        } else {
+            kprintf("irq %u fired with nobody listening\n", irq);
+        }
+        pic_send_eoi(irq);
+        return;
+    }
+
     if (f->vector >= 32) {
-        /* hardware interrupt territory. no pic configured yet so this
-         * really shouldnt fire, but if it does, dont die over it */
+        /* not an exception, not a pic line. shouldnt happen, dont die over it */
         kprintf("stray interrupt %lu, ignoring\n", f->vector);
         return;
     }

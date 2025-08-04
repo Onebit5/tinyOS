@@ -18,4 +18,8 @@ struct interrupt_frame {
 
 void interrupt_dispatch(struct interrupt_frame *frame);
 
+/* hook a handler onto one of the 16 pic irq lines (0 = pit, 1 = keyboard...).
+ * dispatch takes care of spurious irqs and the eoi, handlers just do their thing */
+void irq_register(uint8_t irq, void (*handler)(struct interrupt_frame *));
+
 #endif
