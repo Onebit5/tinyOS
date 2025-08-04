@@ -2,12 +2,14 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "limine.h"
+#include "cpu/gdt.h"
+#include "cpu/idt.h"
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
 
-#define VERSION "0.0.3"
+#define VERSION "0.0.4"
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a
@@ -42,6 +44,8 @@ void kmain(void) {
     }
 
     serial_init();
+    gdt_init();
+    idt_init();
 
     if (framebuffer_request.response == NULL
         || framebuffer_request.response->framebuffer_count < 1) {
@@ -56,14 +60,30 @@ void kmain(void) {
 
     /* the banner. green name because we earned it */
     console_set_colors(0x45e653, 0x101018);
-    kprintf("tinyOS v%s\n", VERSION);
-    console_set_colors(0xc8c8d0, 0x101018);
-    kprintf("hello from long mode, higher half edition\n\n");
+    kprintf("tinyOS v%s\n\n", VERSION);
 
+    /* velvet room blue, obviously */
+    console_set_colors(0x7b8ce0, 0x101018);
+    kprintf("Thou art I... And I am thou...\n");
+    kprintf("Thou hast established a new bond...\n\n");
+    kprintf("Thou shalt be blessed when creating\n");
+    kprintf("Personas of the Computer's Arcana...\n\n");
+
+    console_set_colors(0xc8c8d0, 0x101018);
     kprintf("framebuffer : %lux%lu @ %u bpp, pitch %lu bytes, at %p\n",
             fb->width, fb->height, fb->bpp, fb->pitch, fb->address);
     kprintf("font        : spleen 8x16 (bsd 2-clause)\n");
+    kprintf("gdt         : loaded, tss slot reserved for later\n");
+    kprintf("idt         : 256 gates armed, exceptions get caught now\n");
     kprintf("kernel      : loaded at %p\n\n", (void *)kmain);
+
+#ifdef FAULT_DEMO
+    /* poke memory we very much dont own, to show off the exception
+     * handler. build with `make clean && make FAULT_DEMO=1 iso` */
+    kprintf("FAULT_DEMO: dereferencing 0xdeadbeef on purpose...\n");
+    volatile uint64_t *bad = (volatile uint64_t *)0xdeadbeef;
+    kprintf("read back %lx (if you see this something is very wrong)\n", *bad);
+#endif
 
     kprintf("nothing else to do yet. parking the cpu, bye\n");
     hcf();

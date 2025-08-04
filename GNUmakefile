@@ -25,6 +25,13 @@ LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld
 
 NASMFLAGS := -f elf64 -g
 
+# make FAULT_DEMO=1 -> kernel pokes a bad pointer at boot to show off the
+# exception handler. remember to `make clean` first when toggling this,
+# the makefile isnt smart enough to notice the flag changed
+ifeq ($(FAULT_DEMO),1)
+CFLAGS += -DFAULT_DEMO
+endif
+
 CSRC := $(shell find kernel/src -name '*.c')
 ASRC := $(shell find kernel/src -name '*.asm')
 OBJ  := $(patsubst kernel/src/%.c,obj/%.c.o,$(CSRC)) \
