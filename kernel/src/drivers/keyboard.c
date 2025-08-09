@@ -1,8 +1,9 @@
 #include "drivers/keyboard.h"
+#include "drivers/input.h"
 #include "cpu/io.h"
 #include "cpu/pic.h"
 #include "cpu/interrupts.h"
-#include "sched/sched.h"
+#include <stdbool.h>
 
 #define KBD_DATA   0x60
 #define KBD_STATUS 0x64
@@ -41,25 +42,9 @@ static const char keymap_shift[128] = {
     0,
 };
 
-/* single producer (the irq), single consumer, single core. head and tail
- * only ever move forward on their own side, so no locking gymnastics.
- * 16 bits wide because arrow keys dont fit in a char */
-#define KBUF_SIZE 256
-static uint16_t kbuf[KBUF_SIZE];
-static volatile unsigned int khead, ktail;
-
 static bool lshift, rshift, caps;
 static bool lctrl, rctrl;
 static bool e0_prefix;
-
-static void buf_push(uint16_t key) {
-    unsigned int next = (khead + 1) % KBUF_SIZE;
-    if (next == ktail) {
-        return;     /* buffer full, the keystroke returns to the sea of souls */
-    }
-    kbuf[khead] = key;
-    khead = next;
-}
 
 /* the e0-prefixed keys we care about. everything else with an e0 in
  * front still gets quietly dropped */
@@ -72,11 +57,11 @@ static void feed_extended(uint8_t code, bool release) {
         return;
     }
     switch (code) {
-    case 0x48: buf_push(KEY_UP);     break;
-    case 0x50: buf_push(KEY_DOWN);   break;
-    case 0x4b: buf_push(KEY_LEFT);   break;
-    case 0x4d: buf_push(KEY_RIGHT);  break;
-    case 0x53: buf_push(KEY_DELETE); break;
+    case 0x48: input_push(KEY_UP);     break;
+    case 0x50: input_push(KEY_DOWN);   break;
+    case 0x4b: input_push(KEY_LEFT);   break;
+    case 0x4d: input_push(KEY_RIGHT);  break;
+    case 0x53: input_push(KEY_DELETE); break;
     default: break;
     }
 }
@@ -121,9 +106,9 @@ void keyboard_feed(uint8_t sc) {
      * has since forever. ctrl+anything-else we simply drop */
     if (lctrl || rctrl) {
         if (c >= 'a' && c <= 'z') {
-            buf_push(c - 'a' + 1);
+            input_push(c - 'a' + 1);
         } else if (c >= 'A' && c <= 'Z') {
-            buf_push(c - 'A' + 1);
+            input_push(c - 'A' + 1);
         }
         return;
     }
@@ -137,21 +122,12 @@ void keyboard_feed(uint8_t sc) {
         }
     }
 
-    buf_push((uint16_t)c);
+    input_push((uint16_t)c);
 }
-
-/* whoever is waiting for a keystroke. only the shell ever is, but the
- * queue costs one pointer so it may as well be general */
-static struct waitq kbd_waiters;
 
 static void keyboard_irq(struct interrupt_frame *f) {
     (void)f;
     keyboard_feed(inb(KBD_DATA));
-    /* wake unconditionally, even for a shift press that produced no
-     * character. a spurious wakeup just means the sleeper looks at an
-     * empty buffer and goes back to sleep, which is cheap and much
-     * safer than trying to be clever about it */
-    waitq_wake_all(&kbd_waiters);
 }
 
 void keyboard_init(void) {
@@ -161,40 +137,4 @@ void keyboard_init(void) {
     }
     irq_register(KBD_IRQ, keyboard_irq);
     pic_unmask(KBD_IRQ);
-}
-
-/* the raw pop, no locking. callers below hold interrupts down */
-static int buf_pop(void) {
-    if (ktail == khead) {
-        return -1;
-    }
-    int c = kbuf[ktail];
-    ktail = (ktail + 1) % KBUF_SIZE;
-    return c;
-}
-
-int keyboard_getchar(void) {
-    uint64_t flags = irq_save();
-    int c = buf_pop();
-    irq_restore(flags);
-    return c;
-}
-
-int keyboard_getchar_blocking(void) {
-    uint64_t flags = irq_save();
-
-    int c;
-    while ((c = buf_pop()) < 0) {
-        /* nothing there. sleep with interrupts still off so the irq
-         * cant slip a key past us in the gap between looking and
-         * sleeping -- waitq_block hands them back on the way out */
-        waitq_block(&kbd_waiters);
-    }
-
-    irq_restore(flags);
-    return c;
-}
-
-bool keyboard_haskey(void) {
-    return ktail != khead;
 }

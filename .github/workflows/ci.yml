@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install the toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            nasm xorriso qemu-system-x86
+
+      - name: versions, for when something inevitably breaks
+        run: |
+          gcc --version | head -1
+          nasm -v
+          qemu-system-x86_64 --version | head -1
+
+      # the fast feedback first: these are ordinary linux programs and
+      # they catch most of what a boot test would, in about a second
+      - name: host tests
+        run: make test
+
+      - name: build the kernel
+        run: make
+
+      - name: build the iso
+        run: make iso
+
+      # the real thing: boot it and type at it
+      - name: boot test
+        run: ./tools/boottest.sh tinyos.iso
+
+      - name: keep the iso
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinyos-iso
+          path: tinyos.iso
+          if-no-files-found: warn

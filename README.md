@@ -1,10 +1,12 @@
 # tinyOS
 
+![ci](https://github.com/USERNAME/tinyOS/actions/workflows/ci.yml/badge.svg)
+
 a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https://github.com/limine-bootloader/limine).
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.0.9** (milestone 6 — it is a machine you can actually use. there is a prompt with history and ctrl+c, it takes commands, it tells you about itself, it can summon personas as background threads, and when you tell it to crash you can press a key to come back)
+**version: 0.0.10** (milestone 7 — the shell answers over the serial line as well as the keyboard, which means ci can boot the iso and *type at it*. plus six host test suites that run as ordinary linux programs)
 
 ## scope
 
@@ -18,7 +20,7 @@ roughly in order, this is where the project is going:
 - [x] physical page allocator + kmalloc heap on top
 - [x] pit timer + preemptive round-robin scheduler with kernel threads
 - [x] a small interactive shell (help, mem, uptime, ps, the classics)
-- [ ] ci that builds the iso and boot-tests it in qemu on every push
+- [x] ci that builds the iso and boot-tests it in qemu on every push
 
 non-goals for now: usermode (maybe someday), networking, filesystems, being useful in any practical sense
 
@@ -36,7 +38,11 @@ then:
 make        # just the kernel elf
 make iso    # bootable iso (fetches limine binaries on first run)
 make run    # boot it in qemu
+make test   # run the host test suites (no qemu needed, takes a second)
+make boottest   # boot the iso and drive the shell over serial
 ```
+
+`make run` gives you a qemu window *and* a serial console in your terminal -- and since com1 is wired into the input queue, you can type at either one. the shell cannot tell the difference.
 
 ## layout
 
@@ -48,6 +54,8 @@ kernel/src/lib/       kprintf, panic, string.h stuff
 kernel/src/mm/        physical frame allocator, kernel heap
 kernel/src/sched/     threads, the run queue, the context switch
 kernel/src/shell/     the velvet room terminal
+tests/                host test suites, run with `make test`
+tools/                font converter, boot test script
 kernel/linker.ld
 tools/font2c.py       bdf -> C array converter for the console font
 limine.conf           bootloader config
@@ -80,6 +88,27 @@ cancelling them with ctrl+c is cooperative, not forceful -- we have no signals a
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
 
+## testing
+
+most of this kernel can be tested without booting anything, because the parts that think are deliberately kept separate from the parts that touch hardware. `pmm_init_from_map()` takes a memory map rather than asking limine for one, `keyboard_feed()` takes a scancode rather than reading port 0x60, `serial_feed()` takes a byte, `run_line()` takes a string. so the test suites compile the *real* kernel sources as ordinary linux programs and poke at them:
+
+```
+$ make test
+  kprintf    ok        formatting vs the real printf, 21 cases
+  mm         ok        pmm + heap, incl. draining ram dry
+  keyboard   ok        scancodes, ctrl, arrows, 20 cases
+  serial     ok        terminal dialect + escape sequences
+  shell      ok        parsing, dispatch, history, 32 cases
+  switch     ok        a real context switch, in userspace
+  all suites passed
+```
+
+the switch one is the interesting one: it runs the actual `switch.asm`, fabricates a stack the same way `thread_create()` does, switches into it, resumes it, and checks all six callee-saved registers came home. that code is miserable to debug inside qemu and trivial to debug when a mistake is just a segfault.
+
+host builds define `TINYOS_HOSTED`, which turns `irq_save`/`irq_restore` into no-ops -- userspace gets shot for saying `cli`.
+
+then there is `make boottest`, which builds the iso, boots it headless, and **types commands at the shell over the serial port**, checking the answers. that is only possible because com1 feeds the same input queue the keyboard does. ci runs both on every push.
+
 ## notes on memory
 
 the kernel is still running on the page tables limine set up for us, on purpose. we use limine's hhdm (higher half direct map) to reach physical frames, which means the pmm can hand out any frame and we can immediately touch it without mapping anything ourselves. building our own pml4 is a later milestone. until that lands we also never reclaim the bootloader-reclaimable regions, because thats the memory our page tables live in.
@@ -98,6 +127,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.0.10** — milestone 7. serial input on irq4, with a translation layer for the terminal dialect (cr means enter, del means backspace, `ESC[A` means up) so the shell is drivable over the wire. keyboard and serial now feed one shared input queue in `drivers/input.c` instead of the keyboard owning the buffer privately. six host test suites moved into `tests/` behind `make test`, plus `tools/boottest.sh` which boots the iso and types at it. github actions runs the lot on every push. panics can now be escaped over serial too, not just from the keyboard.
 - **0.0.9** — the shell grew the things you immediately miss when you sit down at it. the keyboard driver now decodes ctrl as a modifier (ctrl+letter arrives as a control code, so ctrl+c is 3) and stops throwing away the e0-prefixed arrow keys, which meant widening the ring buffer to 16 bits so arrows cant be mistaken for characters. on top of that: 16 lines of command history on up/down, ctrl+c to abandon a line and recall running personas, and a panic you can escape -- it polls the 8042 by hand and resets on any keypress instead of halting forever and making you kill qemu. keyboard and shell tests grew to 20 and 32 cases.
 - **0.0.8** — milestone 6. an interactive shell with line editing and nine commands, running as a real thread (the boot thread renames itself `shell` and takes the job). a waitq in the scheduler plus a blocking `keyboard_getchar_blocking()`, so the prompt costs nothing while it waits instead of spinning on hlt. `summon` spawns persona threads on demand, which replaces the m5 demo threads that used to print forever and made the console unusable. the `FAULT_DEMO` build flag is gone -- the `crash` command does the same job better, and from thread context rather than early boot. shell parsing and dispatch are host-tested (20 cases, incl. argv clamping and empty lines).
 - **0.0.7** — milestone 5. the pit ticks at 100hz on irq0 with a global tick counter and uptime. threads: kernel stacks from the pmm, a fabricated initial stack so a brand new thread can be "resumed" into existence, and a 16-instruction context switch in asm. preemptive round-robin scheduling on a 50ms quantum, blocking `sleep_ms()`, `thread_exit()` with a reaper that frees dead threads' stacks (from a different thread's stack, which is the only safe way). an idle thread that hlts so theres always somebody to hand the cpu to. the allocators and kprintf take interrupts down while they work, since a half-updated free list is nobodys friend. demo: pixie and jack-frost count at different rates, the herald says its piece and dies to give the reaper something to do, and typing still works throughout. the context switch is host-tested, including whether all six callee-saved registers actually survive a round trip.
