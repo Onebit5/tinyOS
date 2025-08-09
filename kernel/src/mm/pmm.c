@@ -24,6 +24,7 @@ static uint64_t bitmap_frames;  /* how many frames the bitmap tracks */
 static uint64_t total_frames;   /* usable frames overall */
 static uint64_t free_frames;
 static uint64_t search_hint;    /* frame index to start scanning from */
+static uint64_t highest_addr;   /* top of the direct map, see pmm.h */
 
 static const char *memmap_type_name(uint64_t type) {
     switch (type) {
@@ -50,10 +51,16 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
     /* pass 1: how far up does usable ram go, and how much is there */
     uint64_t highest = 0;
     total_frames = 0;
+    highest_addr = 0;
     for (size_t i = 0; i < count; i++) {
         struct limine_memmap_entry *e = entries[i];
         kprintf("  %016lx - %016lx  %s\n", e->base, e->base + e->length,
                 memmap_type_name(e->type));
+        if (e->type != LIMINE_MEMMAP_RESERVED
+            && e->type != LIMINE_MEMMAP_BAD_MEMORY
+            && e->base + e->length > highest_addr) {
+            highest_addr = e->base + e->length;
+        }
         if (e->type == LIMINE_MEMMAP_USABLE) {
             total_frames += e->length / PAGE_SIZE;
             if (e->base + e->length > highest) {
@@ -188,6 +195,9 @@ void     pmm_free(uint64_t phys) { pmm_free_pages(phys, 1); }
 void *pmm_phys_to_virt(uint64_t phys) {
     return (void *)(phys + hhdm_offset);
 }
+
+uint64_t pmm_hhdm_offset(void)    { return hhdm_offset; }
+uint64_t pmm_highest_address(void) { return highest_addr; }
 
 uint64_t pmm_total_bytes(void) { return total_frames * PAGE_SIZE; }
 uint64_t pmm_free_bytes(void)  { return free_frames * PAGE_SIZE; }

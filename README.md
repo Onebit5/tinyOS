@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.0.10** (milestone 7 — the shell answers over the serial line as well as the keyboard, which means ci can boot the iso and *type at it*. plus six host test suites that run as ordinary linux programs)
+**version: 0.0.11** (the kernel builds and runs on its own page tables now. W^X on the kernel image, NX everywhere it belongs, and a guard page under every thread stack so running off the end faults cleanly instead of eating the neighbours)
 
 ## scope
 
@@ -21,6 +21,7 @@ roughly in order, this is where the project is going:
 - [x] pit timer + preemptive round-robin scheduler with kernel threads
 - [x] a small interactive shell (help, mem, uptime, ps, the classics)
 - [x] ci that builds the iso and boot-tests it in qemu on every push
+- [x] our own page tables: W^X, NX, guard pages under thread stacks
 
 non-goals for now: usermode (maybe someday), networking, filesystems, being useful in any practical sense
 
@@ -51,13 +52,12 @@ kernel/src/           main.c and friends
 kernel/src/cpu/       gdt, idt, isr stubs, irq dispatch, the 8259 pic, port io
 kernel/src/drivers/   serial, framebuffer console, the font, ps/2 keyboard, pit
 kernel/src/lib/       kprintf, panic, string.h stuff
-kernel/src/mm/        physical frame allocator, kernel heap
+kernel/src/mm/        physical frame allocator, kernel heap, page tables
 kernel/src/sched/     threads, the run queue, the context switch
 kernel/src/shell/     the velvet room terminal
+kernel/linker.ld      higher half layout + the section symbols the vmm maps by
 tests/                host test suites, run with `make test`
-tools/                font converter, boot test script
-kernel/linker.ld
-tools/font2c.py       bdf -> C array converter for the console font
+tools/                font2c.py (bdf -> C array), boottest.sh
 limine.conf           bootloader config
 GNUmakefile
 ```
@@ -76,9 +76,13 @@ mem       frames and heap, honestly counted
 uptime    how long since the bond was formed
 ps        the threads that walk this realm
 summon    call forth a persona thread
+vmm       what the page tables say about an address
 crash     tempt fate with a wild pointer
+smash     run off the end of the stack on purpose
 reboot    sever the bond and begin anew
 ```
+
+`vmm` with no argument points at one thing of each kind -- code, a string constant, the heap, your stack, and an address nobody lives at -- so you can read the permission column and see W^X actually holding. give it a hex address to look that up instead.
 
 line editing: **backspace** deletes, **up/down** walk through the last 16 commands, **ctrl+c** abandons the line you're typing (and recalls any personas that are currently running). adjacent duplicates and empty lines dont make it into the history.
 
@@ -94,8 +98,10 @@ most of this kernel can be tested without booting anything, because the parts th
 
 ```
 $ make test
-  kprintf    ok        formatting vs the real printf, 21 cases
+  checkfmt   ok        every format string vs what kprintf implements
+  kprintf    ok        formatting vs the real printf, 33 cases
   mm         ok        pmm + heap, incl. draining ram dry
+  vmm        ok        page tables built and walked, 40+ cases
   keyboard   ok        scancodes, ctrl, arrows, 20 cases
   serial     ok        terminal dialect + escape sequences
   shell      ok        parsing, dispatch, history, 32 cases
@@ -103,7 +109,11 @@ $ make test
   all suites passed
 ```
 
+the vmm suite is worth a word too: it hands `vmm.c` a malloc'd arena and calls offsets into it "physical addresses", then builds real four-level page tables in it and walks them back -- huge pages, huge-page splitting, misaligned ranges, and running out of frames mid-map. no cpu involved.
+
 the switch one is the interesting one: it runs the actual `switch.asm`, fabricates a stack the same way `thread_create()` does, switches into it, resumes it, and checks all six callee-saved registers came home. that code is miserable to debug inside qemu and trivial to debug when a mistake is just a segfault.
+
+`make test` also runs `tools/checkfmt.py`, which exists because of a bug that cost an afternoon. gcc's `format(printf)` attribute checks our format strings against *real* printf, so it happily accepts any flag the C standard allows -- including ones our little formatter never implemented. a `%-7s` slipped through, got printed literally, and every argument after it was read into the wrong slot; the kernel ended up printing its own machine code as a string and then page faulting a long way from the mistake. the checker compares every `kprintf`/`panic` format string against what `lib/kprintf.c` can actually do, and fails the build otherwise.
 
 host builds define `TINYOS_HOSTED`, which turns `irq_save`/`irq_restore` into no-ops -- userspace gets shot for saying `cli`.
 
@@ -111,7 +121,27 @@ then there is `make boottest`, which builds the iso, boots it headless, and **ty
 
 ## notes on memory
 
-the kernel is still running on the page tables limine set up for us, on purpose. we use limine's hhdm (higher half direct map) to reach physical frames, which means the pmm can hand out any frame and we can immediately touch it without mapping anything ourselves. building our own pml4 is a later milestone. until that lands we also never reclaim the bootloader-reclaimable regions, because thats the memory our page tables live in.
+the kernel builds its own four-level page tables at boot and moves onto them. the direct map (limine's hhdm, rebuilt as ours) covers all physical memory with 2MiB pages so the pmm can hand out any frame and we can touch it immediately, and the kernel image is mapped a section at a time with only the rights each one needs:
+
+```
+  hhdm    0xffff800000000000 ..  rw-   all of physical memory, 2MiB pages
+  limine  0xffffffff80000000 ..  r--   the request markers
+  text    0xffffffff80001000 ..  r-x   executable, not writable
+  rodata  0xffffffff80008000 ..  r--   neither
+  data    0xffffffff8000c000 ..  rw-   writable, never executable
+```
+
+that split is only worth anything with two bits set that are easy to forget: `EFER.NXE`, without which the NX bit is a *reserved bit* and faults on every access rather than doing nothing (so whether we set it is a runtime decision, never a constant), and `CR0.WP`, without which ring 0 may scribble on read-only pages regardless of what the tables say.
+
+switching cr3 is the one operation in this kernel with no diagnostics when it goes wrong -- a bad entry is a triple fault, no message, no register dump, no debugger. so `vmm_init()` walks its own tables in software first and refuses to load cr3 unless the kernel, the direct map, the framebuffer, the page tables themselves and **the stack we are standing on** all resolve to the addresses they should, with the permissions they should. panicking with an explanation beats rebooting in silence.
+
+we still dont reclaim the bootloader-reclaimable regions, and now for a sharper reason than before: the stack this all runs on lives there. freeing it would be the last thing this cpu ever did.
+
+### guard pages
+
+every thread stack is allocated one page larger than it needs, and that bottom page is then unmapped. a thread that runs off the end of its stack hits the hole and takes a page fault naming itself, instead of quietly chewing through whatever the pmm handed out next -- which, in a kernel with no protection between threads, is some other thread's stack and a bug you would chase for a week. try it with the shell's `smash` command.
+
+punching a 4KiB hole into a 2MiB direct-map page means splitting that page into 512 small ones with identical flags first, which `vmm_unmap_page()` does on demand. the stack has to be handed back the same way round: the guard page gets re-mapped before the frames go back to the pmm, because whoever gets them next will expect to be able to reach them.
 
 the pmm and the heap are both written so their guts can be tested on a normal linux host: `pmm_init_from_map()` takes a memory map + hhdm offset instead of reaching for limine, so a test can fabricate one over a malloc'd arena. same trick as `keyboard_feed()`. host builds define `TINYOS_HOSTED`, which turns `irq_save()`/`irq_restore()` into no-ops (userspace isnt allowed to `cli`, and has nothing to lock out anyway).
 
@@ -127,6 +157,8 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.0.12** — kprintf learned the `-` (left justify) flag, which it had been claiming to support by virtue of gcc's format checking without ever implementing. the vmm's boot log used `%-7s`, so the specifier printed literally, every following argument landed in the wrong slot, and the kernel read `__data_end` as a string and page faulted. added `tools/checkfmt.py` to `make test` so no format string can outrun the formatter again.
+- **0.0.11** — our own page tables. four levels built at boot, direct map in 2MiB pages, kernel mapped per-section with W^X, NX enabled properly via EFER (and treated as a runtime capability, since a hardcoded NX bit faults on a cpu that lacks it), CR0.WP set so read-only means read-only even in ring 0. `vmm_init` verifies the whole thing by walking its own tables in software -- including the current stack -- before daring to load cr3. guard pages under every thread stack, which needed 2MiB page splitting to punch a hole in the direct map. exception dumps now name the thread that died and say when the address is a guard page. new shell commands: `vmm` to look up any address, `smash` to run off the end of the stack on purpose. 40-odd host assertions for the page table code, because a mistake there is a triple fault with nothing to read.
 - **0.0.10** — milestone 7. serial input on irq4, with a translation layer for the terminal dialect (cr means enter, del means backspace, `ESC[A` means up) so the shell is drivable over the wire. keyboard and serial now feed one shared input queue in `drivers/input.c` instead of the keyboard owning the buffer privately. six host test suites moved into `tests/` behind `make test`, plus `tools/boottest.sh` which boots the iso and types at it. github actions runs the lot on every push. panics can now be escaped over serial too, not just from the keyboard.
 - **0.0.9** — the shell grew the things you immediately miss when you sit down at it. the keyboard driver now decodes ctrl as a modifier (ctrl+letter arrives as a control code, so ctrl+c is 3) and stops throwing away the e0-prefixed arrow keys, which meant widening the ring buffer to 16 bits so arrows cant be mistaken for characters. on top of that: 16 lines of command history on up/down, ctrl+c to abandon a line and recall running personas, and a panic you can escape -- it polls the 8042 by hand and resets on any keypress instead of halting forever and making you kill qemu. keyboard and shell tests grew to 20 and 32 cases.
 - **0.0.8** — milestone 6. an interactive shell with line editing and nine commands, running as a real thread (the boot thread renames itself `shell` and takes the job). a waitq in the scheduler plus a blocking `keyboard_getchar_blocking()`, so the prompt costs nothing while it waits instead of spinning on hlt. `summon` spawns persona threads on demand, which replaces the m5 demo threads that used to print forever and made the console unusable. the `FAULT_DEMO` build flag is gone -- the `crash` command does the same job better, and from thread context rather than early boot. shell parsing and dispatch are host-tested (20 cases, incl. argv clamping and empty lines).

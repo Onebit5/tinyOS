@@ -91,12 +91,14 @@ run-uefi: iso
 HOSTCC    := gcc
 HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 
-TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/keyboard \
+TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/keyboard \
              bin/tests/serial bin/tests/shell bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
 bin/tests/mm:       tests/test_mm.c       kernel/src/mm/pmm.c \
                     kernel/src/mm/kmalloc.c kernel/src/lib/string.c
+bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
+                    kernel/src/lib/string.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
                     kernel/src/drivers/input.c
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
@@ -118,7 +120,7 @@ bin/tests/switch: tests/test_switch.c obj/tests/switch.asm.o
 	$(HOSTCC) $(HOSTFLAGS) -no-pie $^ -o $@
 
 .PHONY: test
-test: $(TEST_BINS)
+test: checkfmt $(TEST_BINS)
 	@fail=0; \
 	for t in $(TEST_BINS); do \
 		printf '  %-10s ' "$$(basename $$t)"; \
@@ -129,6 +131,13 @@ test: $(TEST_BINS)
 		fi; \
 	done; \
 	if [ $$fail -eq 0 ]; then echo '  all suites passed'; else exit 1; fi
+
+# gcc checks our format strings against real printf, which accepts far
+# more than our kprintf implements. this catches the difference.
+.PHONY: checkfmt
+checkfmt:
+	@printf '  %-10s ' checkfmt
+	@python3 tools/checkfmt.py kernel/src && echo 'ok'
 
 # boot the iso and drive the shell over serial. needs qemu
 .PHONY: boottest

@@ -1,6 +1,7 @@
 #include "sched/thread.h"
 #include "sched/sched.h"
 #include "mm/pmm.h"
+#include "mm/vmm.h"
 #include "mm/kmalloc.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
@@ -52,14 +53,21 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
         return NULL;
     }
 
-    uint64_t phys = pmm_alloc_pages(THREAD_STACK_PAGES);
+    /* one extra page at the bottom, which we then unmap. a thread that
+     * runs off the end of its stack lands on that hole and takes a
+     * clean page fault naming the address, instead of quietly chewing
+     * through whatever the pmm handed out next -- which, on a kernel
+     * with no memory protection between threads, would be some other
+     * thread's stack and a bug you would chase for a week */
+    uint64_t phys = pmm_alloc_pages(THREAD_STACK_PAGES + 1);
     if (phys == 0) {
         kfree(t);
         return NULL;
     }
 
     t->stack_phys  = phys;
-    t->stack_pages = THREAD_STACK_PAGES;
+    t->stack_pages = THREAD_STACK_PAGES + 1;
+
     t->state       = THREAD_READY;
     t->wake_at     = 0;
     t->entry       = entry;
@@ -70,13 +78,22 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
 
     thread_set_name(t, name);
 
+    /* punch the hole. the vmm may not exist yet if somebody creates a
+     * thread before vmm_init, in which case the stack is merely
+     * unguarded rather than broken */
+    uint64_t guard = (uint64_t)pmm_phys_to_virt(phys);
+    if (vmm_kernel_pml4() != 0) {
+        vmm_unmap_page(vmm_kernel_pml4(), guard);
+        vmm_flush_page(guard);
+    }
+
     /* fabricate a stack that looks exactly like a thread which is
      * sitting inside switch_context waiting to be resumed. the pops
      * over there will eat our six zeroes, and its `ret` will land on
      * thread_bootstrap. stack top is page aligned, so the return
      * address slot ends up 16-aligned and bootstrap gets the stack
      * alignment the abi promises it */
-    uint8_t *stack = pmm_phys_to_virt(phys);
+    uint8_t *stack = pmm_phys_to_virt(phys + PAGE_SIZE);   /* past the guard */
     uint64_t *sp = (uint64_t *)(stack + THREAD_STACK_PAGES * PAGE_SIZE);
 
     *--sp = 0;                              /* bootstrap never returns, but if
@@ -110,4 +127,22 @@ void thread_exit(void) {
     for (;;) {
         sched_yield();
     }
+}
+
+/* give a dead thread's stack back. the guard page has to be put back in
+ * the direct map first: the pmm is about to hand that frame to somebody
+ * else, and they will expect to be able to reach it */
+void thread_free_stack(struct thread *t) {
+    if (t->stack_phys == 0) {
+        return;     /* the boot thread's stack came from limine, not us */
+    }
+
+    uint64_t guard = (uint64_t)pmm_phys_to_virt(t->stack_phys);
+    if (vmm_kernel_pml4() != 0) {
+        vmm_map_range(vmm_kernel_pml4(), guard, t->stack_phys, PAGE_SIZE,
+                      PTE_WRITE | vmm_nx());
+        vmm_flush_page(guard);
+    }
+
+    pmm_free_pages(t->stack_phys, t->stack_pages);
 }

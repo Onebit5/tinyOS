@@ -30,6 +30,15 @@ void     pmm_free(uint64_t phys);
 /* phys -> usable pointer, through the hhdm */
 void *pmm_phys_to_virt(uint64_t phys);
 
+/* where limine mirrored physical memory for us */
+uint64_t pmm_hhdm_offset(void);
+
+/* top of everything worth having in the direct map: the highest address
+ * across every memmap entry that isnt reserved or broken. the reserved
+ * holes way up at the 1TiB mark are deliberately excluded, mapping them
+ * would cost megabytes of page tables for nothing */
+uint64_t pmm_highest_address(void);
+
 uint64_t pmm_total_bytes(void);
 uint64_t pmm_free_bytes(void);
 uint64_t pmm_used_bytes(void);
