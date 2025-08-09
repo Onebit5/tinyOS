@@ -11,6 +11,7 @@ enum thread_state {
     THREAD_READY,       /* wants the cpu */
     THREAD_RUNNING,     /* has the cpu */
     THREAD_SLEEPING,    /* waiting for a tick to come around */
+    THREAD_BLOCKED,     /* parked on a waitq until somebody says otherwise */
     THREAD_DEAD,        /* finished, waiting to be reaped */
 };
 
@@ -32,9 +33,14 @@ struct thread {
     char name[THREAD_NAME_MAX];
 
     struct thread *next;        /* circular run queue */
+    struct thread *wait_next;   /* the waitq we're parked on, if any */
 };
 
 const char *thread_state_name(enum thread_state s);
+
+/* rename a thread in place. exists because the boot thread grows up to
+ * become the shell and `ps` should say so */
+void thread_set_name(struct thread *t, const char *name);
 
 /* build a thread that will start life inside entry(arg). it lands in the
  * run queue ready to go. returns NULL if memory says no */

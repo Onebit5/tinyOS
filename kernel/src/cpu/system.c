@@ -25,11 +25,14 @@ void reboot(void) {
     /* let the words hang there for a moment. we have a real timer now,
      * so no more counting to a made up number and hoping */
     pit_busy_wait(3000);
+    system_reset();
+}
 
+void system_reset(void) {
     asm volatile ("cli");
-    outb(0x64, 0xfe);   /* pulse the reset line */
+    outb(0x64, 0xfe);   /* pulse the 8042 reset line, the traditional way */
 
-    /* if that didnt do it, just sit here in the dark */
+    /* if that didnt take, sit here in the dark */
     for (;;) {
         asm volatile ("hlt");
     }

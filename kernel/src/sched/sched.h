@@ -26,6 +26,23 @@ struct thread *sched_current(void);
  * this for you, you probably want that instead */
 void sched_add(struct thread *t);
 
+/* a place for threads to wait for something that isnt a clock.
+ * the keyboard uses one so the shell can sleep until you press a key
+ * instead of spinning asking "any keys yet? any keys yet?" */
+struct waitq {
+    struct thread *head;
+};
+
+/* park the running thread until somebody wakes this queue.
+ * MUST be entered with interrupts off, and returns with them still off
+ * -- thats what makes "check the buffer, then sleep" atomic. without
+ * that, a key landing between the check and the sleep is lost and the
+ * thread waits forever for something that already happened */
+void waitq_block(struct waitq *q);
+
+/* wake everyone parked on the queue. safe to call from an irq */
+void waitq_wake_all(struct waitq *q);
+
 /* walk the run queue (for the `ps` command in m6) */
 void sched_dump(void);
 
