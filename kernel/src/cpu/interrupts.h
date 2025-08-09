@@ -22,4 +22,27 @@ void interrupt_dispatch(struct interrupt_frame *frame);
  * dispatch takes care of spurious irqs and the eoi, handlers just do their thing */
 void irq_register(uint8_t irq, void (*handler)(struct interrupt_frame *));
 
+/* our entire locking story, and on one core it genuinely is enough:
+ * turn interrupts off, do the delicate thing, put them back exactly how
+ * they were. save/restore rather than blind sti so these can nest */
+
+#ifdef TINYOS_HOSTED
+/* host tests run in userspace where cli gets you shot on sight, and
+ * theres nothing to lock out anyway */
+static inline uint64_t irq_save(void) { return 0; }
+static inline void irq_restore(uint64_t flags) { (void)flags; }
+#else
+static inline uint64_t irq_save(void) {
+    uint64_t flags;
+    asm volatile ("pushfq\n\tpopq %0\n\tcli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static inline void irq_restore(uint64_t flags) {
+    if (flags & (1 << 9)) {     /* IF was set, so put it back */
+        asm volatile ("sti" : : : "memory");
+    }
+}
+#endif
+
 #endif

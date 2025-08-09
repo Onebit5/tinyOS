@@ -1,6 +1,7 @@
 #include "mm/kmalloc.h"
 #include "mm/pmm.h"
 #include "lib/panic.h"
+#include "cpu/interrupts.h"
 
 #define KMALLOC_MAGIC   0xa110c8ed
 #define CHUNK_MIN_PAGES 4           /* dont bother the pmm for crumbs */
@@ -86,24 +87,34 @@ static void *carve(struct block *b, uint64_t need) {
     return (uint8_t *)b + sizeof(struct block);
 }
 
+/* the free list is walked and rewritten on every call, so a thread
+ * preempted halfway through would hand the next one a heap in pieces.
+ * interrupts off for the duration -- these are short */
+
 void *kmalloc(size_t size) {
     if (size == 0) {
         return NULL;
     }
 
     uint64_t need = ALIGN16(size) + sizeof(struct block);
+    uint64_t flags = irq_save();
 
     for (struct block *cur = head; cur; cur = cur->next) {
         if (cur->free && cur->size >= need) {
-            return carve(cur, need);
+            void *p = carve(cur, need);
+            irq_restore(flags);
+            return p;
         }
     }
 
     struct block *fresh = grow(need);
     if (fresh == NULL) {
+        irq_restore(flags);
         return NULL;    /* memory hath forsaken us */
     }
-    return carve(fresh, need);
+    void *p = carve(fresh, need);
+    irq_restore(flags);
+    return p;
 }
 
 void kfree(void *ptr) {
@@ -115,13 +126,15 @@ void kfree(void *ptr) {
     if (b->magic != KMALLOC_MAGIC) {
         panic("kfree: %p knows not this heap. whence came it?", ptr);
     }
+
+    uint64_t flags = irq_save();
     if (b->free) {
         panic("kfree: %p hath already been returned. a bond broken twice", ptr);
     }
-
     b->free = 1;
     heap_used -= b->size;
     coalesce();
+    irq_restore(flags);
 }
 
 uint64_t kheap_total_bytes(void) { return heap_total; }
