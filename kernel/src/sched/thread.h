@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #define THREAD_NAME_MAX  16
 #define THREAD_STACK_PAGES 4        /* 16k of kernel stack each, plenty */
@@ -31,6 +32,10 @@ struct thread {
 
     int  id;
     char name[THREAD_NAME_MAX];
+
+    /* the boot thread is a static, everything else came from kmalloc.
+     * the reaper needs to know which, or it tries to free a global */
+    bool from_heap;
 
     struct thread *next;        /* circular run queue */
     struct thread *wait_next;   /* the waitq we're parked on, if any */

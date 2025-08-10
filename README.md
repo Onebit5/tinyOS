@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.0.11** (the kernel builds and runs on its own page tables now. W^X on the kernel image, NX everywhere it belongs, and a guard page under every thread stack so running off the end faults cleanly instead of eating the neighbours)
+**version: 0.0.13** (a tss with an IST stack, so stack overflow is survivable instead of a silent reboot, and the kernel finally hands limine its memory back)
 
 ## scope
 
@@ -102,6 +102,7 @@ $ make test
   kprintf    ok        formatting vs the real printf, 33 cases
   mm         ok        pmm + heap, incl. draining ram dry
   vmm        ok        page tables built and walked, 40+ cases
+  gdt        ok        the tss descriptor, decoded back apart
   keyboard   ok        scancodes, ctrl, arrows, 20 cases
   serial     ok        terminal dialect + escape sequences
   shell      ok        parsing, dispatch, history, 32 cases
@@ -135,7 +136,23 @@ that split is only worth anything with two bits set that are easy to forget: `EF
 
 switching cr3 is the one operation in this kernel with no diagnostics when it goes wrong -- a bad entry is a triple fault, no message, no register dump, no debugger. so `vmm_init()` walks its own tables in software first and refuses to load cr3 unless the kernel, the direct map, the framebuffer, the page tables themselves and **the stack we are standing on** all resolve to the addresses they should, with the permissions they should. panicking with an explanation beats rebooting in silence.
 
-we still dont reclaim the bootloader-reclaimable regions, and now for a sharper reason than before: the stack this all runs on lives there. freeing it would be the last thing this cpu ever did.
+### giving limine its memory back
+
+the bootloader's page tables, its structures and its stack all sit in memory it marks reclaimable -- about a megabyte. taking it needs three things to be true first: we must be on our own page tables (done at boot), we must have copied anything we still care about out of limine's structures, and **nothing may still be standing on limine's stack**.
+
+that last one is why the shell is its own thread now. `kmain` runs on the stack limine handed it, so it creates the shell on a pmm-allocated stack and then genuinely exits -- the boot thread dies and the scheduler moves on, and only then is that memory free. the shell reclaims it as its first act. this also meant teaching the reaper that the boot thread is a global rather than a `kmalloc` allocation, so it unlinks it without trying to free it.
+
+the sharp edge is that limine's *responses* live in that memory too, so every `*_request.response` becomes a dangling pointer the moment the reclaim returns. everything that needs them reads them during early boot, long before.
+
+one thing that is easy to get wrong: the reclaimable regions sit *above* the last usable one on a typical pc, so a bitmap sized only to cover usable ram has no bits for those frames and reclaiming them silently does nothing at all. the bitmap covers both.
+
+### stack overflow, and why the tss exists
+
+a guard page is only half the story. when a thread runs off its stack, `rsp` is already inside the unmapped page by the time the fault happens -- so when the cpu tries to push an exception frame to report the page fault, *that push faults too*. the second failure is a double fault, and with nowhere to push that either, it becomes a triple fault, which on real hardware means the machine simply reboots. no message, no dump.
+
+the fix is the tss, whose slot has been sitting reserved in the gdt since the very first exception handler. its interrupt stack table gives the double fault vector a stack of its own that the cpu switches to unconditionally, healthy or not. cr2 still holds the address of the original fault, so the handler can look at it, notice it lands in the faulting thread's guard page, and say plainly that the thread ran out of stack. try `smash` in the shell.
+
+the tss also carries `rsp0`, the stack the cpu switches to on a ring 3 -> ring 0 trap. nothing uses it yet; when usermode arrives it will have to become per-thread, or two threads trapping at once would land on the same stack.
 
 ### guard pages
 
@@ -157,6 +174,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.0.13** — a tss at last, with an IST stack for the double fault vector. that turns stack overflow from a silent triple-fault reboot into a report naming the thread and its guard page, because the cpu can always find a good stack for that vector even when `rsp` is in the hole. and the pmm now reclaims limine's memory (~1 MiB): the shell moved onto its own pmm-backed thread so the boot thread can exit and stop standing on limine's stack, and the bitmap grew to cover the reclaimable regions, which sit above the last usable one and were previously off the end of the map entirely. new test suite for the tss descriptor encoding, which scatters a base address across two qwords and fails silently when you get it wrong.
 - **0.0.12** — kprintf learned the `-` (left justify) flag, which it had been claiming to support by virtue of gcc's format checking without ever implementing. the vmm's boot log used `%-7s`, so the specifier printed literally, every following argument landed in the wrong slot, and the kernel read `__data_end` as a string and page faulted. added `tools/checkfmt.py` to `make test` so no format string can outrun the formatter again.
 - **0.0.11** — our own page tables. four levels built at boot, direct map in 2MiB pages, kernel mapped per-section with W^X, NX enabled properly via EFER (and treated as a runtime capability, since a hardcoded NX bit faults on a cpu that lacks it), CR0.WP set so read-only means read-only even in ring 0. `vmm_init` verifies the whole thing by walking its own tables in software -- including the current stack -- before daring to load cr3. guard pages under every thread stack, which needed 2MiB page splitting to punch a hole in the direct map. exception dumps now name the thread that died and say when the address is a guard page. new shell commands: `vmm` to look up any address, `smash` to run off the end of the stack on purpose. 40-odd host assertions for the page table code, because a mistake there is a triple fault with nothing to read.
 - **0.0.10** — milestone 7. serial input on irq4, with a translation layer for the terminal dialect (cr means enter, del means backspace, `ESC[A` means up) so the shell is drivable over the wire. keyboard and serial now feed one shared input queue in `drivers/input.c` instead of the keyboard owning the buffer privately. six host test suites moved into `tests/` behind `make test`, plus `tools/boottest.sh` which boots the iso and types at it. github actions runs the lot on every push. panics can now be escaped over serial too, not just from the keyboard.

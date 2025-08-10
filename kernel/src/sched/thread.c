@@ -75,6 +75,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     t->id          = next_id++;
     t->next        = NULL;
     t->wait_next   = NULL;
+    t->from_heap   = true;
 
     thread_set_name(t, name);
 

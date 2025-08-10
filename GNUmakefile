@@ -91,14 +91,15 @@ run-uefi: iso
 HOSTCC    := gcc
 HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 
-TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/keyboard \
-             bin/tests/serial bin/tests/shell bin/tests/switch
+TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
+             bin/tests/keyboard bin/tests/serial bin/tests/shell bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
 bin/tests/mm:       tests/test_mm.c       kernel/src/mm/pmm.c \
                     kernel/src/mm/kmalloc.c kernel/src/lib/string.c
 bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
                     kernel/src/lib/string.c
+bin/tests/gdt:      tests/test_gdt.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
                     kernel/src/drivers/input.c
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \

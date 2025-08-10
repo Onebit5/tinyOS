@@ -26,6 +26,12 @@ static uint64_t free_frames;
 static uint64_t search_hint;    /* frame index to start scanning from */
 static uint64_t highest_addr;   /* top of the direct map, see pmm.h */
 
+/* limine's own memory, noted down at init because the memmap we would
+ * otherwise read it from is itself sitting in that memory */
+#define MAX_RECLAIM 16
+static struct { uint64_t base, length; } reclaim[MAX_RECLAIM];
+static size_t reclaim_count;
+
 static const char *memmap_type_name(uint64_t type) {
     switch (type) {
     case LIMINE_MEMMAP_USABLE:                 return "usable";
@@ -63,9 +69,21 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
         }
         if (e->type == LIMINE_MEMMAP_USABLE) {
             total_frames += e->length / PAGE_SIZE;
+        }
+        /* the bitmap has to cover limine's memory too, or we would have
+         * nowhere to record those frames when we reclaim them later --
+         * they sit above the last usable region on most machines */
+        if (e->type == LIMINE_MEMMAP_USABLE
+            || e->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE) {
             if (e->base + e->length > highest) {
                 highest = e->base + e->length;
             }
+        }
+        if (e->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE
+            && reclaim_count < MAX_RECLAIM) {
+            reclaim[reclaim_count].base = e->base;
+            reclaim[reclaim_count].length = e->length;
+            reclaim_count++;
         }
     }
 
@@ -194,6 +212,38 @@ void     pmm_free(uint64_t phys) { pmm_free_pages(phys, 1); }
 
 void *pmm_phys_to_virt(uint64_t phys) {
     return (void *)(phys + hhdm_offset);
+}
+
+uint64_t pmm_reclaim_bootloader(void) {
+    uint64_t flags = irq_save();
+    uint64_t gained = 0;
+
+    for (size_t i = 0; i < reclaim_count; i++) {
+        uint64_t first = (reclaim[i].base + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint64_t last  = (reclaim[i].base + reclaim[i].length) / PAGE_SIZE;
+
+        for (uint64_t f = first; f < last; f++) {
+            /* frame 0 is ours forever so that phys 0 can mean "no" */
+            if (f == 0 || f >= bitmap_frames || !bit_test(f)) {
+                continue;
+            }
+            bit_clear(f);
+            free_frames++;
+            total_frames++;     /* it counts as ram from now on */
+            gained += PAGE_SIZE;
+        }
+    }
+
+    /* forget the ranges, so a second call cant double free them */
+    reclaim_count = 0;
+    search_hint = 0;            /* theres cheap memory down low again */
+
+    irq_restore(flags);
+    return gained;
+}
+
+bool pmm_translate_is_tracked(uint64_t phys) {
+    return phys / PAGE_SIZE < bitmap_frames;
 }
 
 uint64_t pmm_hhdm_offset(void)    { return hhdm_offset; }

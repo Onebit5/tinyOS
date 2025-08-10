@@ -59,7 +59,9 @@ static void reap_dead(void) {
         if (t->state == THREAD_DEAD) {
             prev->next = t->next;
             thread_free_stack(t);
-            kfree(t);
+            if (t->from_heap) {
+                kfree(t);   /* the boot thread is a global, leave it be */
+            }
             t = prev->next;
         } else {
             prev = t;
@@ -217,6 +219,7 @@ void sched_init(void) {
     boot_thread.stack_pages = 0;
     boot_thread.next = &boot_thread;    /* a ring of one, for now */
     boot_thread.wait_next = NULL;
+    boot_thread.from_heap = false;      /* it lives in .bss */
 
     current = &boot_thread;
     quantum_left = QUANTUM_TICKS;

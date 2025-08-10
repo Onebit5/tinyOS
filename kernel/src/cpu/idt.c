@@ -46,3 +46,7 @@ void idt_init(void) {
     };
     asm volatile ("lidt %0" : : "m"(idtr));
 }
+
+void idt_set_ist(uint8_t vector, uint8_t ist) {
+    idt[vector].ist = ist & 0x7;
+}

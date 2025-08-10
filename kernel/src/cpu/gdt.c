@@ -13,9 +13,21 @@ static uint64_t gdt[] = {
     0,                      /* null descriptor, mandatory tribute */
     0x00af9a000000ffff,     /* 0x08 kernel code: present, exec, long mode */
     0x00af92000000ffff,     /* 0x10 kernel data: present, rw */
-    0, 0,                   /* user code + data, reserved for the distant future */
-    0, 0,                   /* tss descriptor, takes two slots, also future */
+    0, 0,                   /* 0x18/0x20 user data + code, for the distant future */
+    0, 0,                   /* 0x28 tss descriptor, filled in by gdt_set_tss */
 };
+
+/* a 64-bit tss descriptor is twice the width of a normal one and its
+ * fields are scattered across it in the least convenient order the
+ * 1980s could devise. type 9 is "available 64-bit tss" */
+void gdt_set_tss(uint64_t base, uint32_t limit) {
+    gdt[GDT_TSS / 8] = (uint64_t)(limit & 0xffff)
+                     | ((base & 0xffffff) << 16)
+                     | (0x89ull << 40)                      /* present, type 9 */
+                     | ((uint64_t)((limit >> 16) & 0xf) << 48)
+                     | (((base >> 24) & 0xff) << 56);
+    gdt[GDT_TSS / 8 + 1] = base >> 32;
+}
 
 struct __attribute__((packed)) gdtr {
     uint16_t limit;

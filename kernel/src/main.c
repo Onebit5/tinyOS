@@ -5,6 +5,7 @@
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "cpu/pic.h"
+#include "cpu/tss.h"
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "drivers/keyboard.h"
@@ -20,7 +21,7 @@
 #include "sched/thread.h"
 #include "shell/shell.h"
 
-#define VERSION "0.0.11"
+#define VERSION "0.0.13"
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a
@@ -103,6 +104,19 @@ static void memory_selftest(void) {
     }
 }
 
+/* the shell runs here rather than on the boot thread, because this
+ * stack came from the pmm. that is what lets the boot thread walk away
+ * from limine's stack and lets us hand limine's memory back */
+static void shell_thread(void *arg) {
+    (void)arg;
+
+    uint64_t gained = pmm_reclaim_bootloader();
+    kprintf("reclaimed %lu KiB of bootloader memory (%lu MiB usable now)\n\n",
+            gained / 1024, pmm_total_bytes() / (1024 * 1024));
+
+    shell_run();
+}
+
 void kmain(void) {
     /* too early to even panic() properly, so just park */
     if (LIMINE_BASE_REVISION_SUPPORTED == false) {
@@ -161,13 +175,19 @@ void kmain(void) {
 
     kprintf("building our own page tables:\n");
     vmm_init();
-    kprintf("\n");
 
-    /* from here on this function is a thread like any other, and its
-     * career is to be the shell */
+    /* needs the pmm for its stacks, so it waits until now */
+    tss_init();
+    idt_set_ist(8, IST_DOUBLE_FAULT);
+    kprintf("  -> tss loaded, double faults land on their own stack\n\n");
+
+    /* from here on this function is a thread like any other */
     sched_init();
     pit_init();
-    thread_set_name(sched_current(), "shell");
+
+    if (thread_create("shell", shell_thread, NULL) == NULL) {
+        panic("no memory for a shell. there is nobody left to talk to");
+    }
 
     kprintf("threads     : the wheel turns, %ums quantum\n\n",
             5 * (1000 / PIT_HZ));
@@ -177,6 +197,10 @@ void kmain(void) {
     console_set_colors(0x7b8ce0, 0x101018);
     kprintf("The contract hath been sealed.\n");
     kprintf("Speak thy will, and it shall be written...\n\n");
+    console_set_colors(0xc8c8d0, 0x101018);
 
-    shell_run();
+    /* the boot thread's work is finished. it has to actually leave --
+     * its stack is limine's, sitting in the memory the shell is about
+     * to reclaim, and you cannot free the ground you are standing on */
+    thread_exit();
 }

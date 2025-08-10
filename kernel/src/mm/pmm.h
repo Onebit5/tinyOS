@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "limine.h"
 
 /* physical memory manager. a bitmap over every 4k frame of usable ram,
@@ -38,6 +39,22 @@ uint64_t pmm_hhdm_offset(void);
  * holes way up at the 1TiB mark are deliberately excluded, mapping them
  * would cost megabytes of page tables for nothing */
 uint64_t pmm_highest_address(void);
+
+/* hand back the memory limine was using for itself: its page tables,
+ * its stack, its structures. only safe once nothing of ours is still
+ * standing on any of it -- in particular the boot thread has to be
+ * gone, since its stack is in there.
+ *
+ * WARNING: this also frees the memory limine's *responses* live in, so
+ * every `*_request.response` becomes a dangling pointer the moment
+ * this returns. read what you need before calling it.
+ *
+ * returns how many bytes were recovered. calling twice is harmless. */
+uint64_t pmm_reclaim_bootloader(void);
+
+/* does the bitmap have a bit for this address at all? only interesting
+ * to the tests, which check that limine's memory is inside the map */
+bool pmm_translate_is_tracked(uint64_t phys);
 
 uint64_t pmm_total_bytes(void);
 uint64_t pmm_free_bytes(void);

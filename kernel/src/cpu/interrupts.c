@@ -101,6 +101,31 @@ void interrupt_dispatch(struct interrupt_frame *f) {
     console_set_colors(0xe64553, 0x101018);
 
     struct thread *me = sched_current();
+
+    /* a double fault means the cpu couldnt even deliver the first
+     * exception -- almost always because rsp was already somewhere
+     * unusable. we are only alive to say so because the idt sends this
+     * vector to its own IST stack. cr2 still holds whatever address
+     * the original fault was about, which is the useful part */
+    if (f->vector == 8) {
+        uint64_t cr2 = read_cr2();
+        kprintf("\n\ndouble fault: the cpu could not deliver an exception\n");
+        if (me != NULL) {
+            kprintf("in thread %d (%s)\n", me->id, me->name);
+            if (me->stack_phys != 0) {
+                uint64_t guard = (uint64_t)pmm_phys_to_virt(me->stack_phys);
+                if (cr2 >= guard && cr2 < guard + PAGE_SIZE) {
+                    kprintf("the first fault was at %p, this thread's stack "
+                            "guard page.\nit ran out of stack -- the guard did "
+                            "its job, and the IST caught the fallout\n",
+                            (void *)cr2);
+                }
+            }
+        }
+        kprintf("first fault was about %p\n", (void *)cr2);
+        dump_frame(f);
+        panic("double fault (running on the IST stack)");
+    }
     kprintf("\n\ncpu exception %lu: %s\n", f->vector, exception_names[f->vector]);
     if (me != NULL) {
         kprintf("in thread %d (%s)\n", me->id, me->name);

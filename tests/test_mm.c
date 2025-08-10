@@ -124,6 +124,43 @@ int main(void) {
     CHECK(after != NULL, "heap still works after an oom");
     kfree(after);
 
+    /* ---- reclaiming limine's memory ----
+     * a fresh map with a bootloader-reclaimable region ABOVE the last
+     * usable one, which is where it really sits on a pc -- if the
+     * bitmap is only sized to cover usable ram, those frames fall off
+     * the end and reclaiming them silently does nothing */
+    struct limine_memmap_entry r0 = { .base = 0x1000, .length = MiB - 0x1000,
+                                      .type = LIMINE_MEMMAP_USABLE };
+    struct limine_memmap_entry r1 = { .base = 2 * MiB, .length = 4 * MiB,
+                                      .type = LIMINE_MEMMAP_USABLE };
+    struct limine_memmap_entry r2 = { .base = 6 * MiB, .length = MiB,
+                                      .type = LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE };
+    struct limine_memmap_entry *rmap[3] = { &r0, &r1, &r2 };
+
+    pmm_init_from_map(rmap, 3, hhdm);
+
+    uint64_t total_before = pmm_total_bytes();
+    uint64_t free_before  = pmm_free_bytes();
+    CHECK(total_before == (MiB - 0x1000) + 4 * MiB,
+          "reclaimable memory is not counted as ram until we take it");
+    /* it must be beyond the usable regions but still inside the bitmap */
+    CHECK(pmm_translate_is_tracked(6 * MiB), "the bitmap reaches limine's memory");
+
+    uint64_t gained = pmm_reclaim_bootloader();
+    CHECK(gained == MiB, "the whole reclaimable region came back");
+    CHECK(pmm_total_bytes() == total_before + MiB, "and now counts as ram");
+    CHECK(pmm_free_bytes()  == free_before + MiB,  "and is free to hand out");
+
+    /* the recovered frames have to actually be usable */
+    uint64_t rf = pmm_alloc_pages(256);      /* 1 MiB worth */
+    CHECK(rf != 0, "we can allocate out of the reclaimed region");
+    memset(pmm_phys_to_virt(rf), 0x5a, 256 * PAGE_SIZE);
+    pmm_free_pages(rf, 256);
+
+    /* calling twice must not double-count */
+    CHECK(pmm_reclaim_bootloader() == 0, "a second reclaim finds nothing");
+    CHECK(pmm_total_bytes() == total_before + MiB, "and changes no numbers");
+
     if (failures == 0) printf("all good\n");
     return failures;
 }
