@@ -19,7 +19,7 @@ NASM := nasm
 CFLAGS := -g -Wall -Wextra -std=gnu11 \
 	-ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-PIC \
 	-m64 -march=x86-64 -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone \
-	-mcmodel=kernel -Ikernel/src -MMD -MP
+	-mcmodel=kernel -Ikernel/src -MMD -MP -fno-omit-frame-pointer
 
 LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld
 
@@ -34,9 +34,23 @@ OBJ  := $(patsubst kernel/src/%.c,obj/%.c.o,$(CSRC)) \
 
 all: bin/$(KERNEL)
 
-bin/$(KERNEL): $(OBJ) kernel/linker.ld
-	@mkdir -p $(@D)
-	$(LD) $(LDFLAGS) $(OBJ) -o $@
+# two passes, because the symbol table describes addresses and linking
+# it in changes them. .ksyms sits after .text in the linker script, so
+# folding it in shifts .data but cannot move a single function -- and
+# gensyms --check proves that held instead of us just hoping.
+bin/$(KERNEL): $(OBJ) kernel/linker.ld tools/gensyms.py
+	@mkdir -p $(@D) obj
+	@python3 tools/gensyms.py --stub > obj/ksyms.c
+	@$(CC) $(CFLAGS) -c obj/ksyms.c -o obj/ksyms.o
+	@echo '  LD      pass 1 (to find out where everything landed)'
+	@$(LD) $(LDFLAGS) $(OBJ) obj/ksyms.o -o $@.pass1
+	@echo '  GENSYMS obj/ksyms.c'
+	@python3 tools/gensyms.py $@.pass1 > obj/ksyms.c
+	@$(CC) $(CFLAGS) -c obj/ksyms.c -o obj/ksyms.o
+	@echo '  LD      pass 2 (with the symbols folded in)'
+	@$(LD) $(LDFLAGS) $(OBJ) obj/ksyms.o -o $@
+	@python3 tools/gensyms.py --check $@ obj/ksyms.c
+	@rm -f $@.pass1
 
 obj/%.c.o: kernel/src/%.c
 	@mkdir -p $(@D)
@@ -92,23 +106,32 @@ HOSTCC    := gcc
 HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 
 TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
-             bin/tests/keyboard bin/tests/serial bin/tests/shell bin/tests/switch
+             bin/tests/ksyms bin/tests/keyboard bin/tests/serial \
+             bin/tests/shell bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
 bin/tests/mm:       tests/test_mm.c       kernel/src/mm/pmm.c \
                     kernel/src/mm/kmalloc.c kernel/src/lib/string.c
 bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
                     kernel/src/lib/string.c
-bin/tests/gdt:      tests/test_gdt.c
+bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c
+bin/tests/gdt:      tests/test_gdt.c      kernel/src/cpu/gdt.c
+bin/tests/gdt:      SRCS = tests/test_gdt.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
                     kernel/src/drivers/input.c
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
                     kernel/src/drivers/input.c
-bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c
+bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c \
+                    kernel/src/shell/shell.c
+bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c
 
+# SRCS overrides what gets compiled, for tests that #include a kernel
+# .c file directly -- that file still belongs in the prerequisites so
+# make rebuilds when it changes, but compiling it twice would give us
+# duplicate symbols
 $(filter-out bin/tests/switch,$(TEST_BINS)):
 	@mkdir -p $(@D)
-	$(HOSTCC) $(HOSTFLAGS) $^ -o $@
+	$(HOSTCC) $(HOSTFLAGS) $(if $(SRCS),$(SRCS),$^) -o $@
 
 # the switch test calls into the real switch.asm, and needs -no-pie so
 # the `callq switch_context` in its inline asm resolves

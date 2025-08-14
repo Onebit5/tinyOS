@@ -32,6 +32,7 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'summon pixie\r'; sleep 3
     printf 'ps\r';     sleep 2
     printf 'vmm\r';    sleep 2
+    printf 'bt\r';     sleep 2
 } | timeout 60 qemu-system-x86_64 \
         -M q35 -m 2G -cdrom "$ISO" \
         -display none -serial stdio -no-reboot \
@@ -70,6 +71,8 @@ check 'ps works'      'idle'
 check 'summon works'  'has answered thy call'
 check 'thread ran'    '[pixie]'
 check 'vmm works'     'pml4 at'
+check 'bt works'      'call trace:'
+check 'symbols work'  'shell_run+'
 
 # and did it stay alive rather than falling over
 if grep -qF 'KERNEL PANIC' "$LOG"; then

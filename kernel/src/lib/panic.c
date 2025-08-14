@@ -1,5 +1,6 @@
 #include "lib/panic.h"
 #include "lib/kprintf.h"
+#include "lib/backtrace.h"
 #include "drivers/console.h"
 #include "cpu/system.h"
 #include "cpu/io.h"
@@ -20,7 +21,10 @@ void panic(const char *fmt, ...) {
     kvprintf(fmt, ap);
     va_end(ap);
 
-    kprintf("\n\nThe Computer Arcana hath fallen to ruin.\n");
+    kprintf("\n\n");
+    kbacktrace(0, 0);
+
+    kprintf("\nThe Computer Arcana hath fallen to ruin.\n");
     kprintf("Yet death is not the end.\n\n");
     kprintf("Press any key to return to the Velvet Room...\n");
 

@@ -2,6 +2,7 @@
 #include "cpu/pic.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
+#include "lib/backtrace.h"
 #include "mm/pmm.h"
 #include "drivers/console.h"
 #include "sched/sched.h"
@@ -124,6 +125,7 @@ void interrupt_dispatch(struct interrupt_frame *f) {
         }
         kprintf("first fault was about %p\n", (void *)cr2);
         dump_frame(f);
+        kbacktrace(f->rbp, f->rip);
         panic("double fault (running on the IST stack)");
     }
     kprintf("\n\ncpu exception %lu: %s\n", f->vector, exception_names[f->vector]);
@@ -153,6 +155,11 @@ void interrupt_dispatch(struct interrupt_frame *f) {
     }
 
     dump_frame(f);
+
+    /* the interesting stack is the one that faulted, not ours. rip
+     * goes in separately: the faulting instruction never made it onto
+     * the frame chain */
+    kbacktrace(f->rbp, f->rip);
 
     panic("%s at rip=%016lx", exception_names[f->vector], f->rip);
 }

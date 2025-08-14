@@ -38,6 +38,7 @@ uint64_t kheap_total_bytes(void) { return 36 * 1024; }
 uint64_t kheap_used_bytes(void) { return 512; }
 void sched_dump(void) { kprintf("<PS>"); }
 void vmm_dump(uint64_t v) { kprintf("<VMM %#lx>", v); }
+void kbacktrace(uint64_t rbp, uint64_t rip) { (void)rbp; (void)rip; kprintf("<BT>"); }
 uint64_t vmm_kernel_pml4(void) { return 0x1000; }
 void *kmalloc(size_t n) { return malloc(n); }
 void kfree(void *p) { free(p); }
@@ -131,6 +132,9 @@ int main(void) {
     run("mem");
     CHECK(strstr(out, "2046") && strstr(out, "36"),
           "mem reports both pmm and heap");
+
+    run("bt");
+    CHECK(strcmp(out, "<BT>") == 0, "bt reaches the stack walker");
 
     run("nonsense");
     CHECK(strstr(out, "nonsense") && strstr(out, "help"),

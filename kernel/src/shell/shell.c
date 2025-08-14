@@ -8,6 +8,7 @@
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
 #include "mm/vmm.h"
+#include "lib/backtrace.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include <stdint.h>
@@ -237,6 +238,12 @@ static void cmd_stackoverflow(int argc, char **argv) {
     kprintf("returned %lu, which should have been impossible\n", eat_stack(0));
 }
 
+static void cmd_bt(int argc, char **argv) {
+    (void)argc; (void)argv;
+    /* the same walker a panic uses, just with nothing on fire */
+    kbacktrace(0, 0);
+}
+
 static void cmd_crash(int argc, char **argv) {
     (void)argc; (void)argv;
     console_set_colors(COLOR_WARN, 0x101018);
@@ -263,6 +270,7 @@ static const struct command commands[] = {
     { "ps",     "the threads that walk this realm",     cmd_ps     },
     { "summon", "call forth a persona thread",          cmd_summon },
     { "vmm",    "what the page tables say about an address", cmd_vmm },
+    { "bt",     "who called whom to get here",          cmd_bt     },
     { "crash",  "tempt fate with a wild pointer",       cmd_crash  },
     { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow },
     { "reboot", "sever the bond and begin anew",        cmd_reboot },

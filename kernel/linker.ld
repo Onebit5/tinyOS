@@ -46,6 +46,16 @@ SECTIONS
         *(.rodata .rodata.*)
     } :rodata
 
+    /* the symbol table, generated from a first link pass and folded in
+     * by a second. it sits after .text deliberately: growing it shifts
+     * .data around but can never move a function, which is the whole
+     * reason a two-pass build is sound rather than a fixed point we
+     * have to iterate towards. read-only and non-executable like the
+     * rest of rodata. */
+    .ksyms : {
+        *(.ksyms)
+    } :rodata
+
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     __rodata_end = .;
     __data_start = .;
