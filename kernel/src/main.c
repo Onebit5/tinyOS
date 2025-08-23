@@ -21,7 +21,7 @@
 #include "sched/thread.h"
 #include "shell/shell.h"
 
-#define VERSION "0.0.14"
+#define VERSION "0.0.15"
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a

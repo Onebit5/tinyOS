@@ -28,6 +28,25 @@ void reboot(void) {
     system_reset();
 }
 
+void system_poweroff(void) {
+    console_set_colors(0x7b8ce0, 0x101018);
+    kprintf("\nThe Velvet Room fades...\n");
+    kprintf("Till we meet again.\n");
+
+    pit_busy_wait(1500);
+    asm volatile ("cli");
+
+    outw(0x604,  0x2000);   /* qemu, and anything modern enough */
+    outw(0xb004, 0x2000);   /* older qemu / bochs */
+    outw(0x4004, 0x3400);   /* virtualbox */
+
+    /* still here? then nobody was listening */
+    kprintf("nothing answered. halting instead -- close the window\n");
+    for (;;) {
+        asm volatile ("hlt");
+    }
+}
+
 void system_reset(void) {
     asm volatile ("cli");
     outb(0x64, 0xfe);   /* pulse the 8042 reset line, the traditional way */

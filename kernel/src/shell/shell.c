@@ -9,6 +9,7 @@
 #include "mm/kmalloc.h"
 #include "mm/vmm.h"
 #include "lib/backtrace.h"
+#include "drivers/rtc.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include <stdint.h>
@@ -29,6 +30,7 @@ struct command {
 };
 
 static const struct command commands[];    /* defined below, after the handlers */
+static void run_argv(int argc, char **argv);
 
 /* ---- the personas one may summon ---------------------------------- */
 
@@ -244,6 +246,114 @@ static void cmd_bt(int argc, char **argv) {
     kbacktrace(0, 0);
 }
 
+static void cmd_date(int argc, char **argv) {
+    (void)argc; (void)argv;
+    static const char *months[] = { "", "january", "february", "march",
+        "april", "may", "june", "july", "august", "september", "october",
+        "november", "december" };
+
+    struct rtc_time t;
+    rtc_read(&t);
+    kprintf("%02u:%02u:%02u on the %u%s of %s, %u\n",
+            t.hour, t.minute, t.second, t.day,
+            (t.day / 10 == 1) ? "th"
+              : (t.day % 10 == 1) ? "st"
+              : (t.day % 10 == 2) ? "nd"
+              : (t.day % 10 == 3) ? "rd" : "th",
+            months[t.month <= 12 ? t.month : 0], t.year);
+}
+
+static void cmd_hexdump(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("hexdump <hex address> [bytes]\n");
+        return;
+    }
+    uint64_t addr, count = 64;
+    if (!parse_hex(argv[1], &addr)) {
+        kprintf("'%s' is not a hex address\n", argv[1]);
+        return;
+    }
+    if (argc >= 3 && !parse_hex(argv[2], &count)) {
+        kprintf("'%s' is not a hex length\n", argv[2]);
+        return;
+    }
+    if (count > 1024) {
+        count = 1024;       /* you did not mean that */
+    }
+
+    for (uint64_t off = 0; off < count; off += 16) {
+        uint64_t base = addr + off;
+
+        /* ask the page tables before touching anything. a hexdump that
+         * page faults on a typo would be a poor debugging tool */
+        if (vmm_translate(vmm_kernel_pml4(), base) == VMM_NO_MAPPING) {
+            kprintf("%p  <not mapped>\n", (void *)base);
+            continue;
+        }
+
+        const unsigned char *p = (const unsigned char *)base;
+        kprintf("%p ", (void *)base);
+        for (int i = 0; i < 16; i++) {
+            kprintf(" %02x", p[i]);
+        }
+        kprintf("  ");
+        for (int i = 0; i < 16; i++) {
+            kprintf("%c", (p[i] >= ' ' && p[i] <= '~') ? p[i] : '.');
+        }
+        kprintf("\n");
+    }
+}
+
+static void cmd_kill(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("kill <thread id> -- see `ps`\n");
+        return;
+    }
+    uint64_t id = 0;
+    for (const char *p = argv[1]; *p; p++) {
+        if (*p < '0' || *p > '9') {
+            kprintf("'%s' is not a thread id\n", argv[1]);
+            return;
+        }
+        id = id * 10 + (uint64_t)(*p - '0');
+    }
+    switch (sched_kill((int)id)) {
+    case SCHED_KILL_OK:
+        kprintf("thread %lu returns to the sea of souls\n", id);
+        break;
+    case SCHED_KILL_NO_SUCH:
+        kprintf("no thread %lu walks this realm\n", id);
+        break;
+    case SCHED_KILL_SELF:
+        kprintf("i will not unmake myself while thou art still speaking\n");
+        break;
+    case SCHED_KILL_PROTECTED:
+        kprintf("that one keeps the wheel turning. leave it be\n");
+        break;
+    case SCHED_KILL_BLOCKED:
+        kprintf("thread %lu is waiting on something and cannot be freed\n"
+                "safely -- we have no way to take it off the queue yet\n", id);
+        break;
+    }
+}
+
+static void cmd_history(int argc, char **argv);   /* needs the history array */
+
+static void cmd_time(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("time <command> -- how long it takes\n");
+        return;
+    }
+    uint64_t start = pit_uptime_ms();
+    run_argv(argc - 1, argv + 1);
+    kprintf("[%lums]\n", pit_uptime_ms() - start);
+}
+
+static void cmd_poweroff(int argc, char **argv) {
+    (void)argc; (void)argv;
+    system_poweroff();
+}
+
 static void cmd_crash(int argc, char **argv) {
     (void)argc; (void)argv;
     console_set_colors(COLOR_WARN, 0x101018);
@@ -271,9 +381,15 @@ static const struct command commands[] = {
     { "summon", "call forth a persona thread",          cmd_summon },
     { "vmm",    "what the page tables say about an address", cmd_vmm },
     { "bt",     "who called whom to get here",          cmd_bt     },
+    { "date",   "what the battery-backed clock believes", cmd_date  },
+    { "hexdump","look at memory, safely",                cmd_hexdump },
+    { "kill",   "end a thread by id",                    cmd_kill   },
+    { "history","what thou hast said before",            cmd_history },
+    { "time",   "how long a command takes",              cmd_time   },
     { "crash",  "tempt fate with a wild pointer",       cmd_crash  },
     { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow },
     { "reboot", "sever the bond and begin anew",        cmd_reboot },
+    { "poweroff","let the velvet room fade",             cmd_poweroff },
     { NULL, NULL, NULL },
 };
 
@@ -303,14 +419,12 @@ static int split(char *line, char **argv, int max) {
     return argc;
 }
 
-static void run_line(char *line) {
-    char *argv[ARGV_MAX];
-    int argc = split(line, argv, ARGV_MAX);
-
+/* dispatch an already-split command. separate from run_line so `time`
+ * can hand us its own argv without re-parsing anything */
+static void run_argv(int argc, char **argv) {
     if (argc == 0) {
-        return;     /* they just pressed enter, thats allowed */
+        return;
     }
-
     for (const struct command *c = commands; c->name; c++) {
         if (strcmp(argv[0], c->name) == 0) {
             c->fn(argc, argv);
@@ -318,6 +432,12 @@ static void run_line(char *line) {
         }
     }
     kprintf("'%s' means nothing to me. try 'help'\n", argv[0]);
+}
+
+static void run_line(char *line) {
+    char *argv[ARGV_MAX];
+    int argc = split(line, argv, ARGV_MAX);
+    run_argv(argc, argv);   /* argc 0 just means they pressed enter */
 }
 
 static void prompt(void) {
@@ -358,37 +478,121 @@ static void history_add(const char *line) {
     hist_count++;
 }
 
-/* wipe what's on screen and put something else there instead */
-static void replace_line(char *line, size_t *len, const char *with) {
-    while (*len > 0) {
-        kprintf("\b \b");
-        (*len)--;
+static void cmd_history(int argc, char **argv) {
+    (void)argc; (void)argv;
+    for (int i = 0; i < hist_count; i++) {
+        kprintf("  %2d  %s\n", i + 1, history[i]);
     }
+}
+
+/* ---- the visible cursor --------------------------------------------
+ * the console treats \b as pure cursor-left now, same as any terminal,
+ * so these work identically on the framebuffer and down the wire */
+
+static void move_left(size_t n) {
+    while (n-- > 0) {
+        kprintf("\b");
+    }
+}
+
+/* reprint everything from pos onward, plus a space to cover a character
+ * that just shifted off the end, then come back to where we were */
+static void redraw_tail(const char *line, size_t len, size_t pos) {
+    for (size_t i = pos; i < len; i++) {
+        kprintf("%c", line[i]);
+    }
+    kprintf(" ");
+    move_left(len - pos + 1);
+}
+
+/* throw away what is on screen and put something else there. used by
+ * the history keys, which replace the whole line at once */
+static void replace_line(char *line, size_t *len, size_t *pos, const char *with) {
+    move_left(*pos);                    /* back to the start of the line */
+    size_t old = *len;
 
     size_t n = 0;
     while (with[n] && n < LINE_MAX - 1) {
         line[n] = with[n];
+        kprintf("%c", with[n]);
         n++;
     }
     line[n] = '\0';
-    *len = n;
 
-    if (n > 0) {
-        kprintf("%s", line);
+    for (size_t i = n; i < old; i++) {  /* cover whatever was longer */
+        kprintf(" ");
     }
+    move_left(old > n ? old - n : 0);
+
+    *len = n;
+    *pos = n;
+}
+
+static bool is_word_char(char c) {
+    return c != ' ';
+}
+
+/* ---- tab completion ------------------------------------------------ */
+
+/* complete the command name, but only when it is the first word --
+ * nothing here takes a filename yet, so anything later is not ours */
+static void complete(char *line, size_t *len, size_t *pos) {
+    for (size_t i = 0; i < *pos; i++) {
+        if (line[i] == ' ') {
+            return;
+        }
+    }
+
+    const struct command *match = NULL;
+    int matches = 0;
+    for (const struct command *c = commands; c->name; c++) {
+        bool same = true;
+        for (size_t i = 0; i < *pos; i++) {
+            if (c->name[i] != line[i]) { same = false; break; }
+        }
+        if (same && strlen(c->name) >= *pos) {
+            match = c;
+            matches++;
+        }
+    }
+
+    if (matches == 1) {
+        replace_line(line, len, pos, match->name);
+        return;
+    }
+    if (matches == 0) {
+        return;
+    }
+
+    /* several. show them and put the prompt back underneath */
+    kprintf("\n");
+    for (const struct command *c = commands; c->name; c++) {
+        bool same = true;
+        for (size_t i = 0; i < *pos; i++) {
+            if (c->name[i] != line[i]) { same = false; break; }
+        }
+        if (same && strlen(c->name) >= *pos) {
+            kprintf("  %s", c->name);
+        }
+    }
+    kprintf("\n");
+    prompt();
+    for (size_t i = 0; i < *len; i++) {
+        kprintf("%c", line[i]);
+    }
+    move_left(*len - *pos);
 }
 
 void shell_run(void) {
     char line[LINE_MAX];
 
     console_set_colors(COLOR_TEXT, 0x101018);
-    kprintf("type 'help' if thou art lost. ctrl+c abandons a line,\n");
-    kprintf("up and down walk through what thou hast said before.\n\n");
+    kprintf("type 'help' if thou art lost, or press tab to be reminded.\n");
+    kprintf("arrows move and recall, ctrl+c abandons a line.\n\n");
 
     for (;;) {
-        size_t len = 0;
-        /* where we are looking in history. == hist_count means "the
-         * line im typing right now", which is the bottom of the list */
+        size_t len = 0;     /* characters in the line */
+        size_t pos = 0;     /* where the cursor sits within them */
         int hist_pos = hist_count;
 
         prompt();
@@ -397,56 +601,135 @@ void shell_run(void) {
             int c = input_getchar_blocking();
 
             if (c == '\n') {
+                /* print the tail we were sitting in front of, so the
+                 * finished line reads properly before we move on */
+                for (size_t i = pos; i < len; i++) {
+                    kprintf("%c", line[i]);
+                }
                 kprintf("\n");
                 break;
             }
 
             if (c == KEY_CTRL_C) {
+                for (size_t i = pos; i < len; i++) {
+                    kprintf("%c", line[i]);
+                }
                 kprintf("^C\n");
                 len = 0;
                 cancel_generation++;    /* and call back any personas */
                 break;
             }
 
-            if (c == KEY_UP) {
-                if (hist_pos > 0) {
-                    hist_pos--;
-                    replace_line(line, &len, history[hist_pos]);
-                }
+            /* ---- moving ---- */
+            if (c == KEY_LEFT || c == 0x02) {           /* ctrl+b */
+                if (pos > 0) { move_left(1); pos--; }
+                continue;
+            }
+            if (c == KEY_RIGHT || c == 0x06) {          /* ctrl+f */
+                if (pos < len) { kprintf("%c", line[pos]); pos++; }
+                continue;
+            }
+            if (c == 0x01) {                            /* ctrl+a, home */
+                move_left(pos);
+                pos = 0;
+                continue;
+            }
+            if (c == 0x05) {                            /* ctrl+e, end */
+                while (pos < len) { kprintf("%c", line[pos]); pos++; }
                 continue;
             }
 
+            /* ---- history ---- */
+            if (c == KEY_UP) {
+                if (hist_pos > 0) {
+                    hist_pos--;
+                    replace_line(line, &len, &pos, history[hist_pos]);
+                }
+                continue;
+            }
             if (c == KEY_DOWN) {
                 if (hist_pos < hist_count) {
                     hist_pos++;
-                    /* walking past the newest entry lands you back on
-                     * an empty line, ready to type something fresh */
-                    replace_line(line, &len,
+                    replace_line(line, &len, &pos,
                                  hist_pos == hist_count ? "" : history[hist_pos]);
                 }
                 continue;
             }
 
-            if (c == '\b') {
-                if (len > 0) {
+            /* ---- deleting ---- */
+            if (c == '\b') {                            /* backspace */
+                if (pos > 0) {
+                    for (size_t i = pos - 1; i < len - 1; i++) {
+                        line[i] = line[i + 1];
+                    }
+                    len--; pos--;
+                    move_left(1);
+                    redraw_tail(line, len, pos);
+                }
+                continue;
+            }
+            if (c == KEY_DELETE || c == 0x04) {         /* del, ctrl+d */
+                if (pos < len) {
+                    for (size_t i = pos; i < len - 1; i++) {
+                        line[i] = line[i + 1];
+                    }
                     len--;
-                    /* back up, paint over it, back up again. works on
-                     * the framebuffer and on a serial terminal alike */
-                    kprintf("\b \b");
+                    redraw_tail(line, len, pos);
+                }
+                continue;
+            }
+            if (c == 0x15) {                            /* ctrl+u, kill line */
+                replace_line(line, &len, &pos, "");
+                continue;
+            }
+            if (c == 0x0b) {                            /* ctrl+k, kill to end */
+                for (size_t i = pos; i < len; i++) { kprintf(" "); }
+                move_left(len - pos);
+                len = pos;
+                line[len] = '\0';
+                continue;
+            }
+            if (c == 0x17) {                            /* ctrl+w, kill a word */
+                size_t start = pos;
+                while (start > 0 && !is_word_char(line[start - 1])) start--;
+                while (start > 0 && is_word_char(line[start - 1]))  start--;
+                size_t removed = pos - start;
+                if (removed > 0) {
+                    for (size_t i = start; i + removed < len; i++) {
+                        line[i] = line[i + removed];
+                    }
+                    len -= removed;
+                    pos = start;
+                    move_left(removed);
+                    for (size_t i = pos; i < len; i++) kprintf("%c", line[i]);
+                    for (size_t i = 0; i < removed; i++) kprintf(" ");
+                    move_left(len - pos + removed);
                 }
                 continue;
             }
 
-            /* everything else non-printable (tab, arrows we dont use,
-             * stray control codes) gets quietly dropped rather than
-             * blitted as a garbage glyph */
-            if (c < ' ' || c > '~') {
+            if (c == '\t') {
+                complete(line, &len, &pos);
                 continue;
             }
 
+            /* ---- typing ---- */
+            if (c < ' ' || c > '~') {
+                continue;       /* anything else non-printable is not ours */
+            }
             if (len + 1 < LINE_MAX) {
-                line[len++] = (char)c;
-                kprintf("%c", (char)c);
+                for (size_t i = len; i > pos; i--) {
+                    line[i] = line[i - 1];
+                }
+                line[pos] = (char)c;
+                len++;
+                /* print from here to the end, then step back to just
+                 * after the character we inserted */
+                for (size_t i = pos; i < len; i++) {
+                    kprintf("%c", line[i]);
+                }
+                pos++;
+                move_left(len - pos);
             }
         }
 

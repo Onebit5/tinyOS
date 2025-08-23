@@ -207,6 +207,34 @@ void sched_dump(void) {
     irq_restore(flags);
 }
 
+enum sched_kill_result sched_kill(int id) {
+    uint64_t flags = irq_save();
+    enum sched_kill_result result = SCHED_KILL_NO_SUCH;
+
+    struct thread *t = current;
+    do {
+        if (t->id == id) {
+            if (t == current) {
+                result = SCHED_KILL_SELF;
+            } else if (t == idle_thread) {
+                result = SCHED_KILL_PROTECTED;
+            } else if (t->state == THREAD_BLOCKED) {
+                result = SCHED_KILL_BLOCKED;
+            } else if (t->state == THREAD_DEAD) {
+                result = SCHED_KILL_NO_SUCH;    /* already gone */
+            } else {
+                t->state = THREAD_DEAD;
+                result = SCHED_KILL_OK;
+            }
+            break;
+        }
+        t = t->next;
+    } while (t != current);
+
+    irq_restore(flags);
+    return result;
+}
+
 void sched_init(void) {
     boot_thread.id = 0;
     boot_thread.name[0] = 'b';

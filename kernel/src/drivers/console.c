@@ -14,6 +14,15 @@ static uint32_t fg = 0xc8c8d0;  /* soft grey on almost-black */
 static uint32_t bg = 0x101018;
 static bool ready = false;
 
+/* what character is in each cell. we need this the moment the cursor is
+ * allowed to sit on top of a character instead of always trailing the
+ * text: to move the cursor off a cell we have to put back whatever was
+ * underneath it, and the framebuffer cannot tell us that. statically
+ * sized because console_init runs long before the pmm exists */
+#define MAX_COLS 256
+#define MAX_ROWS 128
+static unsigned char cells[MAX_ROWS][MAX_COLS];
+
 static void fill_rect(size_t x, size_t y, size_t w, size_t h, uint32_t color) {
     for (size_t dy = 0; dy < h; dy++) {
         for (size_t dx = 0; dx < w; dx++) {
@@ -23,6 +32,9 @@ static void fill_rect(size_t x, size_t y, size_t w, size_t h, uint32_t color) {
 }
 
 static void draw_glyph(size_t col, size_t row, unsigned char c) {
+    if (row < MAX_ROWS && col < MAX_COLS) {
+        cells[row][col] = c;
+    }
     const uint8_t *glyph = console_font[c];
     size_t ox = col * FONT_WIDTH;
     size_t oy = row * FONT_HEIGHT;
@@ -35,14 +47,22 @@ static void draw_glyph(size_t col, size_t row, unsigned char c) {
     }
 }
 
-/* block cursor. the cell under the cursor is always empty (we erase it
- * before moving away), so erasing is just painting bg */
+/* block cursor. it covers whatever character is in the cell, so taking
+ * it away means redrawing that character rather than just painting
+ * over it -- which is what the shadow buffer is for */
 static void draw_cursor(void) {
     fill_rect(cur_col * FONT_WIDTH, cur_row * FONT_HEIGHT, FONT_WIDTH, FONT_HEIGHT, fg);
 }
 
 static void erase_cursor(void) {
-    fill_rect(cur_col * FONT_WIDTH, cur_row * FONT_HEIGHT, FONT_WIDTH, FONT_HEIGHT, bg);
+    unsigned char under = (cur_row < MAX_ROWS && cur_col < MAX_COLS)
+                        ? cells[cur_row][cur_col] : 0;
+    if (under == 0 || under == ' ') {
+        fill_rect(cur_col * FONT_WIDTH, cur_row * FONT_HEIGHT,
+                  FONT_WIDTH, FONT_HEIGHT, bg);
+    } else {
+        draw_glyph(cur_col, cur_row, under);
+    }
 }
 
 static void scroll(void) {
@@ -52,6 +72,10 @@ static void scroll(void) {
     size_t row_px = FONT_HEIGHT * stride;               /* pixels per char row */
     memmove((void *)px, (void *)(px + row_px), (rows - 1) * row_px * 4);
     fill_rect(0, (rows - 1) * FONT_HEIGHT, cols * FONT_WIDTH, FONT_HEIGHT, bg);
+
+    /* the shadow buffer scrolls with the pixels or it starts lying */
+    memmove(&cells[0][0], &cells[1][0], (MAX_ROWS - 1) * MAX_COLS);
+    memset(&cells[MAX_ROWS - 1][0], 0, MAX_COLS);
 }
 
 static void newline(void) {
@@ -75,6 +99,9 @@ void console_init(struct limine_framebuffer *fb) {
     pix_h = fb->height;
     cols = pix_w / FONT_WIDTH;
     rows = pix_h / FONT_HEIGHT;
+    if (cols > MAX_COLS) cols = MAX_COLS;   /* a very wide screen just
+                                             * gets an unused margin */
+    if (rows > MAX_ROWS) rows = MAX_ROWS;
     ready = true;
     console_clear();
 }
@@ -90,6 +117,7 @@ void console_set_colors(uint32_t new_fg, uint32_t new_bg) {
 
 void console_clear(void) {
     fill_rect(0, 0, pix_w, pix_h, bg);
+    memset(cells, 0, sizeof cells);
     cur_col = 0;
     cur_row = 0;
     draw_cursor();
@@ -110,10 +138,12 @@ void console_putchar(char c) {
         cur_col = 0;
         break;
     case '\b':
+        /* move only. every real terminal treats backspace as cursor-left
+         * and leaves the character alone, so "\b \b" erases and a bare
+         * "\b" is how you walk back over text you want to keep. the
+         * shell's line editor depends on both */
         if (cur_col > 0) {
             cur_col--;
-            fill_rect(cur_col * FONT_WIDTH, cur_row * FONT_HEIGHT,
-                      FONT_WIDTH, FONT_HEIGHT, bg);
         }
         break;
     case '\t':

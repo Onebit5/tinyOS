@@ -46,4 +46,21 @@ void waitq_wake_all(struct waitq *q);
 /* walk the run queue (for the `ps` command in m6) */
 void sched_dump(void);
 
+enum sched_kill_result {
+    SCHED_KILL_OK,
+    SCHED_KILL_NO_SUCH,
+    SCHED_KILL_SELF,        /* the caller asked to end itself */
+    SCHED_KILL_PROTECTED,   /* idle -- somebody has to take the cpu */
+    SCHED_KILL_BLOCKED,     /* parked on a waitq, see below */
+};
+
+/* mark a thread dead so the reaper collects it.
+ *
+ * a thread sitting on a waitq is refused, and that refusal is the
+ * honest answer rather than a limitation to paper over: the waitq
+ * holds a bare pointer to it, and reaping a thread that something else
+ * still has a pointer to is a use-after-free waiting to happen. giving
+ * threads a back-pointer to the queue they wait on would fix it */
+enum sched_kill_result sched_kill(int id);
+
 #endif

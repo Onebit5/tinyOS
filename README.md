@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.0.14** (panics name names now. the kernel carries its own symbol table, so a crash prints `cmd_smash+0x1c` and the chain of callers that got there, instead of a hex address you have to look up by hand)
+**version: 0.0.15** (the prompt behaves like a real one: a cursor you can move, edit in the middle of, and complete with tab. plus the commands you keep reaching for -- `poweroff`, `date`, `hexdump`, `kill`, `time`)
 
 ## scope
 
@@ -76,16 +76,38 @@ mem       frames and heap, honestly counted
 uptime    how long since the bond was formed
 ps        the threads that walk this realm
 bt        who called whom to get here
+date      what the battery-backed clock believes
+hexdump   look at memory, safely
+kill      end a thread by id
+history   what thou hast said before
+time      how long a command takes
 summon    call forth a persona thread
 vmm       what the page tables say about an address
 crash     tempt fate with a wild pointer
 smash     run off the end of the stack on purpose
 reboot    sever the bond and begin anew
+poweroff  let the velvet room fade
 ```
 
 `vmm` with no argument points at one thing of each kind -- code, a string constant, the heap, your stack, and an address nobody lives at -- so you can read the permission column and see W^X actually holding. give it a hex address to look that up instead.
 
-line editing: **backspace** deletes, **up/down** walk through the last 16 commands, **ctrl+c** abandons the line you're typing (and recalls any personas that are currently running). adjacent duplicates and empty lines dont make it into the history.
+line editing, as close to readline as a hobby kernel needs:
+
+| | |
+|---|---|
+| left / right, ctrl+b / ctrl+f | move the cursor, and you can type in the middle |
+| ctrl+a / ctrl+e | start and end of line |
+| backspace, del / ctrl+d | delete behind and ahead |
+| ctrl+w / ctrl+u / ctrl+k | kill a word, the line, or to the end |
+| up / down | the last 16 commands |
+| tab | complete a command name, or list the candidates |
+| ctrl+c | abandon the line, and recall any running personas |
+
+adjacent duplicates and empty lines dont make it into the history.
+
+all of that rests on one small change: the console used to treat `\b` as "move left and erase", which made `"\b \b"` work by accident. now it moves only, the way every real terminal does -- so `"\b \b"` still erases *and* a bare `\b` is non-destructive cursor movement that behaves identically on the framebuffer and down the serial line. the console grew a shadow buffer of what character is in each cell to go with it, because a block cursor sitting *on* a character has to put that character back when it moves away, and a framebuffer cannot tell you what used to be there.
+
+`hexdump` asks the page tables whether an address is mapped before reading it, so a typo prints `<not mapped>` instead of panicking. `kill` refuses to end a thread that is blocked on a waitq, and says why: the queue holds a bare pointer to it, and reaping something another structure still points at is a use-after-free waiting to happen.
 
 `summon pixie` and `summon jack-frost` spawn real kernel threads that count in the background while you keep typing -- that is the whole scheduler demo in one command. they speak eight times and then depart, which also gives the reaper something to clean up (watch `ps` before and after). they print over the top of your prompt while they run, which looks messy and is entirely honest: three threads are sharing one console and nobody is arbitrating.
 
@@ -124,6 +146,7 @@ $ make test
   vmm        ok        page tables built and walked, 40+ cases
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
+  rtc        ok        bcd, 12/24 hour, and midnight
   keyboard   ok        scancodes, ctrl, arrows, 20 cases
   serial     ok        terminal dialect + escape sequences
   shell      ok        parsing, dispatch, history, 32 cases
@@ -195,6 +218,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.0.15** — a real line editor. cursor movement and mid-line editing, ctrl+a/e/w/u/k, del, and tab completion. the enabling change was making the console's `\b` non-destructive like an actual terminal, which meant giving it a shadow buffer of the text on screen so the block cursor can sit on a character and put it back afterwards. new commands: `poweroff` (so you stop killing qemu), `date` off the cmos clock, `hexdump` that checks the page tables before reading, `kill`, `history` and `time`. the rtc's decoding is split from its io and tested -- bcd, the pm bit hiding in the top of the hour byte, and 12am being hour zero are each their own small trap.
 - **0.0.14** — symbolized backtraces. `tools/gensyms.py` turns the kernel's own `nm` output into a table baked into a `.ksyms` section, and panics, exception dumps and double faults all print a symbolized call chain. the section sits after `.text` so folding it in can never move a function, and the build verifies that rather than trusting it. found two things on the way: our `backtrace()` was colliding with glibc's in the host tests and being silently shadowed (now `kbacktrace`), and the test binaries had no prerequisite on the kernel sources they `#include`, so they were happily running against stale builds.
 - **0.0.13** — a tss at last, with an IST stack for the double fault vector. that turns stack overflow from a silent triple-fault reboot into a report naming the thread and its guard page, because the cpu can always find a good stack for that vector even when `rsp` is in the hole. and the pmm now reclaims limine's memory (~1 MiB): the shell moved onto its own pmm-backed thread so the boot thread can exit and stop standing on limine's stack, and the bitmap grew to cover the reclaimable regions, which sit above the last usable one and were previously off the end of the map entirely. new test suite for the tss descriptor encoding, which scatters a base address across two qwords and fails silently when you get it wrong.
 - **0.0.12** — kprintf learned the `-` (left justify) flag, which it had been claiming to support by virtue of gcc's format checking without ever implementing. the vmm's boot log used `%-7s`, so the specifier printed literally, every following argument landed in the wrong slot, and the kernel read `__data_end` as a string and page faulted. added `tools/checkfmt.py` to `make test` so no format string can outrun the formatter again.

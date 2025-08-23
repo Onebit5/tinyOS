@@ -39,6 +39,17 @@ uint64_t kheap_used_bytes(void) { return 512; }
 void sched_dump(void) { kprintf("<PS>"); }
 void vmm_dump(uint64_t v) { kprintf("<VMM %#lx>", v); }
 void kbacktrace(uint64_t rbp, uint64_t rip) { (void)rbp; (void)rip; kprintf("<BT>"); }
+void system_poweroff(void) { kprintf("<POWEROFF>"); exit(0); }
+uint64_t vmm_translate(uint64_t pml4, uint64_t v) { (void)pml4; (void)v; return v; }
+#include "drivers/rtc.h"
+void rtc_read(struct rtc_time *t) {
+    t->second = 5; t->minute = 4; t->hour = 3;
+    t->day = 2; t->month = 1; t->year = 2026;
+}
+#include "sched/sched.h"
+static enum sched_kill_result kill_answer = SCHED_KILL_OK;
+static int killed_id = -1;
+enum sched_kill_result sched_kill(int id) { killed_id = id; return kill_answer; }
 uint64_t vmm_kernel_pml4(void) { return 0x1000; }
 void *kmalloc(size_t n) { return malloc(n); }
 void kfree(void *p) { free(p); }
@@ -194,24 +205,109 @@ int main(void) {
     history_add(big);
     CHECK(strlen(history[0]) == LINE_MAX - 1, "overlong line truncated safely");
 
-    /* ---- replace_line (what the arrow keys do to the screen) ---- */
+    /* ---- replace_line: what the history keys do to the screen ---- */
     {
         char line[LINE_MAX] = "hello";
-        size_t len = 5;
+        size_t len = 5, pos = 5;
         out_reset();
-        replace_line(line, &len, "ps");
-        CHECK(strcmp(line, "ps") == 0 && len == 2, "replace_line swaps content");
-        /* five erases (3 chars each), then the new text */
-        CHECK(strncmp(out, "\b \b\b \b\b \b\b \b\b \b", 15) == 0,
-              "replace_line erases every old character first");
-        CHECK(strcmp(out, "\b \b\b \b\b \b\b \b\b \bps") == 0,
-              "replace_line output is exactly erases then new text");
-        CHECK(strstr(out, "ps") != NULL, "replace_line prints the new line");
+        replace_line(line, &len, &pos, "ps");
+        CHECK(strcmp(line, "ps") == 0 && len == 2 && pos == 2,
+              "replace_line swaps the content and leaves the cursor at the end");
+        /* walk back over the old text, print the new, blank the excess,
+         * then step back over the blanks */
+        CHECK(strcmp(out, "\b\b\b\b\b" "ps" "   " "\b\b\b") == 0,
+              "replace_line covers the longer line it replaced");
 
         out_reset();
-        replace_line(line, &len, "");
-        CHECK(line[0] == 0 && len == 0, "replace_line can clear the line");
+        replace_line(line, &len, &pos, "");
+        CHECK(line[0] == 0 && len == 0 && pos == 0,
+              "replace_line can clear the line entirely");
+
+        len = 0; pos = 0; line[0] = 0;
+        out_reset();
+        replace_line(line, &len, &pos, "uptime");
+        CHECK(strcmp(out, "uptime") == 0 && len == 6 && pos == 6,
+              "growing from an empty line just prints");
     }
+
+    /* ---- cursor helpers ---- */
+    {
+        out_reset();
+        move_left(3);
+        CHECK(strcmp(out, "\b\b\b") == 0, "move_left is pure backspaces");
+
+        char line[LINE_MAX] = "abcd";
+        out_reset();
+        redraw_tail(line, 4, 2);
+        CHECK(strcmp(out, "cd " "\b\b\b") == 0,
+              "redraw_tail reprints the tail, blanks one, and comes back");
+    }
+
+    /* ---- tab completion ---- */
+    {
+        char line[LINE_MAX]; size_t len, pos;
+
+        strcpy(line, "upt"); len = 3; pos = 3;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "uptime") == 0 && len == 6 && pos == 6,
+              "a unique prefix completes to the whole command");
+
+        strcpy(line, "c"); len = 1; pos = 1;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "c") == 0 && len == 1,
+              "an ambiguous prefix leaves the line alone");
+        CHECK(strstr(out, "clear") && strstr(out, "crash"),
+              "and shows what it could have meant");
+
+        strcpy(line, "zzz"); len = 3; pos = 3;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "zzz") == 0 && out_len == 0,
+              "an unmatchable prefix is left in peace");
+
+        strcpy(line, "echo up"); len = 7; pos = 7;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "echo up") == 0 && out_len == 0,
+              "completion does not fire on later words");
+    }
+
+    /* ---- the new commands ---- */
+    run("date");
+    CHECK(strstr(out, "03:04:05") && strstr(out, "january") && strstr(out, "2026"),
+          "date reports what the clock said");
+    CHECK(strstr(out, "2nd") != NULL, "and gets the ordinal right");
+
+    run("history");
+    CHECK(out_len > 0, "history prints something");
+
+    killed_id = -1; kill_answer = SCHED_KILL_OK;
+    run("kill 3");
+    CHECK(killed_id == 3 && strstr(out, "sea of souls"),
+          "kill passes the id through and reports success");
+
+    kill_answer = SCHED_KILL_BLOCKED;
+    run("kill 4");
+    CHECK(strstr(out, "waiting on something") != NULL,
+          "a blocked thread is refused, with a reason");
+
+    kill_answer = SCHED_KILL_PROTECTED;
+    run("kill 1");
+    CHECK(strstr(out, "wheel turning") != NULL, "idle is protected");
+
+    killed_id = -1;
+    run("kill notanumber");
+    CHECK(killed_id == -1 && strstr(out, "not a thread id"),
+          "a non-numeric id never reaches the scheduler");
+
+    run("time echo hi");
+    CHECK(strstr(out, "hi") && strstr(out, "ms]"),
+          "time runs the command and reports how long it took");
+
+    run("hexdump");
+    CHECK(strstr(out, "hexdump <hex address>") != NULL, "hexdump explains itself");
 
     if (!failures) printf("all good\n");
     return failures;
