@@ -10,6 +10,10 @@
 #include "mm/vmm.h"
 #include "lib/backtrace.h"
 #include "drivers/rtc.h"
+#include "cpu/cpuinfo.h"
+#include "fs/ramdisk.h"
+#include "lib/ksyms.h"
+#include "version.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include <stdint.h>
@@ -246,6 +250,136 @@ static void cmd_bt(int argc, char **argv) {
     kbacktrace(0, 0);
 }
 
+/* ---- the ramdisk ---------------------------------------------------- */
+
+static void cmd_ls(int argc, char **argv) {
+    (void)argc; (void)argv;
+    if (!ramdisk_present()) {
+        kprintf("no ramdisk was handed to us at boot\n");
+        return;
+    }
+    struct ramdisk_file f;
+    uint64_t total = 0;
+    for (size_t i = 0; ramdisk_stat(i, &f); i++) {
+        /* the archive holds the directory entries too. they have no
+         * bytes and nothing to show, so skip them */
+        size_t n = strlen(f.name);
+        if (n > 0 && f.name[n - 1] == '/') {
+            continue;
+        }
+        kprintf("  %6lu  %s\n", f.size, f.name);
+        total += f.size;
+    }
+    kprintf("  %lu bytes across %zu entries\n", total, ramdisk_count());
+}
+
+static void cmd_cat(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("cat <file> -- see `ls`\n");
+        return;
+    }
+    struct ramdisk_file f;
+    if (!ramdisk_open(argv[1], &f)) {
+        kprintf("no such file: %s\n", argv[1]);
+        return;
+    }
+    /* straight out of the archive, no copy, no allocation */
+    const char *p = f.data;
+    for (uint64_t i = 0; i < f.size; i++) {
+        kprintf("%c", p[i]);
+    }
+    if (f.size > 0 && p[f.size - 1] != '\n') {
+        kprintf("\n");
+    }
+}
+
+/* ---- who and what we are -------------------------------------------- */
+
+static void cmd_arcana(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    console_set_colors(COLOR_PROMPT, 0x101018);
+    kprintf("\nThou art I... And I am thou...\n\n");
+    console_set_colors(COLOR_TEXT, 0x101018);
+
+    kprintf("  THE COMPUTER ARCANA\n");
+    kprintf("  rank %s -- the bond deepens with every commit\n\n", VERSION);
+
+    kprintf("  version    tinyOS %s\n", VERSION);
+    kprintf("  forged     %s, %s\n", __DATE__, __TIME__);
+    kprintf("  by         gcc %s\n", __VERSION__);
+    kprintf("  known      %lu functions by name\n", ksym_count);
+    if (ramdisk_present()) {
+        kprintf("  carrying   %zu files in the ramdisk\n", ramdisk_count());
+    }
+    kprintf("\n");
+}
+
+/* fastfetch, if fastfetch had read a tarot deck */
+static void cmd_persona(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    static const char *mask[] = {
+        "     .-\"\"\"\"\"-.     ",
+        "   .'  _     _  '.   ",
+        "  /   (o)   (o)   \\  ",
+        " |       ---       | ",
+        " |    \\  ___  /    | ",
+        "  \\    '.___.'    /  ",
+        "   '.           .'   ",
+        "     '-._____.-'     ",
+    };
+
+    char brand[49];
+    cpu_brand(brand);
+
+    size_t cols = 0, rows = 0, w = 0, h = 0;
+    console_size(&cols, &rows, &w, &h);
+
+    uint64_t ms = pit_uptime_ms();
+    uint64_t total = pmm_total_bytes() / (1024 * 1024);
+    uint64_t used  = pmm_used_bytes() / (1024 * 1024);
+
+    /* the info column, one line per line of the mask */
+    const int LINES = 8;
+    for (int i = 0; i < LINES; i++) {
+        console_set_colors(COLOR_PROMPT, 0x101018);
+        kprintf("%s", mask[i]);
+        console_set_colors(COLOR_TEXT, 0x101018);
+
+        switch (i) {
+        case 0:
+            kprintf("velvet@tinyOS");
+            break;
+        case 1:
+            kprintf("-------------");
+            break;
+        case 2:
+            kprintf("arcana    the Computer, rank %s", VERSION);
+            break;
+        case 3:
+            kprintf("persona   %s", brand);
+            break;
+        case 4:
+            kprintf("awakened  %luh %lum %lus",
+                    ms / 3600000, (ms / 60000) % 60, (ms / 1000) % 60);
+            break;
+        case 5:
+            kprintf("souls     %zu threads bound to the wheel",
+                    sched_thread_count());
+            break;
+        case 6:
+            kprintf("memory    %lu / %lu MiB", used, total);
+            break;
+        case 7:
+            kprintf("vision    %zux%zu (%zux%zu of glyphs)", w, h, cols, rows);
+            break;
+        }
+        kprintf("\n");
+    }
+    kprintf("\n");
+}
+
 static void cmd_date(int argc, char **argv) {
     (void)argc; (void)argv;
     static const char *months[] = { "", "january", "february", "march",
@@ -375,6 +509,10 @@ static const struct command commands[] = {
     { "help",   "list what thou may command",           cmd_help   },
     { "clear",  "wipe the screen clean",                cmd_clear  },
     { "echo",   "say something back",                   cmd_echo   },
+    { "ls",     "what the ramdisk carries",             cmd_ls     },
+    { "cat",    "read a file aloud",                    cmd_cat    },
+    { "arcana", "the rank of this bond, and its making", cmd_arcana },
+    { "persona","the face this machine wears",          cmd_persona },
     { "mem",    "frames and heap, honestly counted",    cmd_mem    },
     { "uptime", "how long since the bond was formed",   cmd_uptime },
     { "ps",     "the threads that walk this realm",     cmd_ps     },
@@ -705,6 +843,19 @@ void shell_run(void) {
                     for (size_t i = 0; i < removed; i++) kprintf(" ");
                     move_left(len - pos + removed);
                 }
+                continue;
+            }
+
+            if (c == 0x0c) {                            /* ctrl+l */
+                /* wipe the screen and put the prompt back with whatever
+                 * was half-typed, cursor where it was. same as every
+                 * terminal, and it does not disturb the line */
+                console_clear();
+                prompt();
+                for (size_t i = 0; i < len; i++) {
+                    kprintf("%c", line[i]);
+                }
+                move_left(len - pos);
                 continue;
             }
 

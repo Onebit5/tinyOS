@@ -69,10 +69,22 @@ limine/limine:
 		https://github.com/limine-bootloader/limine.git limine
 	$(MAKE) -C limine
 
-iso: bin/$(KERNEL) limine/limine
+# the ramdisk is a plain tar. --format=ustar because thats the one the
+# kernel knows how to read, and the flags after it keep the archive
+# byte-identical between builds so the iso doesnt churn
+RAMDISK := bin/ramdisk.tar
+RAMDISK_FILES := $(shell find ramdisk -type f 2>/dev/null)
+
+$(RAMDISK): $(RAMDISK_FILES)
+	@mkdir -p $(@D)
+	tar --format=ustar --sort=name --owner=0 --group=0 --numeric-owner \
+		--mtime=@0 -cf $@ -C ramdisk .
+
+iso: bin/$(KERNEL) $(RAMDISK) limine/limine
 	rm -rf iso_root
 	mkdir -p iso_root/boot/limine iso_root/EFI/BOOT
 	cp bin/$(KERNEL) iso_root/boot/
+	cp $(RAMDISK) iso_root/boot/
 	cp limine.conf limine/limine-bios.sys limine/limine-bios-cd.bin \
 		limine/limine-uefi-cd.bin iso_root/boot/limine/
 	cp limine/BOOTX64.EFI iso_root/EFI/BOOT/
@@ -106,7 +118,8 @@ HOSTCC    := gcc
 HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 
 TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
-             bin/tests/ksyms bin/tests/rtc bin/tests/keyboard bin/tests/serial \
+             bin/tests/ksyms bin/tests/rtc bin/tests/ramdisk \
+             bin/tests/keyboard bin/tests/serial \
              bin/tests/shell bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
@@ -116,6 +129,8 @@ bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
                     kernel/src/lib/string.c
 bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c
 bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c
+bin/tests/ramdisk:  tests/test_ramdisk.c  kernel/src/fs/ramdisk.c \
+                    kernel/src/lib/string.c
 bin/tests/gdt:      tests/test_gdt.c      kernel/src/cpu/gdt.c
 bin/tests/gdt:      SRCS = tests/test_gdt.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
@@ -123,7 +138,7 @@ bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
                     kernel/src/drivers/input.c
 bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c \
-                    kernel/src/shell/shell.c
+                    kernel/src/shell/shell.c kernel/src/version.h
 bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c
 
 # SRCS overrides what gets compiled, for tests that #include a kernel
@@ -145,7 +160,7 @@ bin/tests/switch: tests/test_switch.c obj/tests/switch.asm.o
 	$(HOSTCC) $(HOSTFLAGS) -no-pie $^ -o $@
 
 .PHONY: test
-test: checkfmt $(TEST_BINS)
+test: checkfmt $(RAMDISK) $(TEST_BINS)
 	@fail=0; \
 	for t in $(TEST_BINS); do \
 		printf '  %-10s ' "$$(basename $$t)"; \

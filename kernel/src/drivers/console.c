@@ -115,6 +115,14 @@ void console_set_colors(uint32_t new_fg, uint32_t new_bg) {
     bg = new_bg;
 }
 
+void console_size(size_t *out_cols, size_t *out_rows,
+                  size_t *out_width, size_t *out_height) {
+    if (out_cols)   *out_cols = cols;
+    if (out_rows)   *out_rows = rows;
+    if (out_width)  *out_width = pix_w;
+    if (out_height) *out_height = pix_h;
+}
+
 void console_clear(void) {
     fill_rect(0, 0, pix_w, pix_h, bg);
     memset(cells, 0, sizeof cells);

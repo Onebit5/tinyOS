@@ -46,7 +46,34 @@ void rtc_read(struct rtc_time *t) {
     t->second = 5; t->minute = 4; t->hour = 3;
     t->day = 2; t->month = 1; t->year = 2026;
 }
+void cpu_brand(char *buf) { strcpy(buf, "Imaginary CPU @ 1 Hz"); }
+void console_size(size_t *c, size_t *r, size_t *w, size_t *h) {
+    if (c) *c = 160; if (r) *r = 50; if (w) *w = 1280; if (h) *h = 800;
+}
+const unsigned long ksym_count = 442;
+
+/* a tiny stand-in ramdisk */
+#include "fs/ramdisk.h"
+static bool rd_present = true;
+static const struct ramdisk_file rd_files[] = {
+    { "motd.txt", "hee-ho\n", 7 },
+    { "empty/",   "",          0 },
+};
+bool ramdisk_present(void) { return rd_present; }
+size_t ramdisk_count(void) { return 2; }
+uint64_t ramdisk_bytes(void) { return 1024; }
+bool ramdisk_stat(size_t i, struct ramdisk_file *out) {
+    if (i >= 2) return false;
+    *out = rd_files[i];
+    return true;
+}
+bool ramdisk_open(const char *name, struct ramdisk_file *out) {
+    if (strcmp(name, "motd.txt") == 0) { *out = rd_files[0]; return true; }
+    return false;
+}
+
 #include "sched/sched.h"
+size_t sched_thread_count(void) { return 4; }
 static enum sched_kill_result kill_answer = SCHED_KILL_OK;
 static int killed_id = -1;
 enum sched_kill_result sched_kill(int id) { killed_id = id; return kill_answer; }
@@ -308,6 +335,38 @@ int main(void) {
 
     run("hexdump");
     CHECK(strstr(out, "hexdump <hex address>") != NULL, "hexdump explains itself");
+
+    /* ---- the ramdisk ---- */
+    run("ls");
+    CHECK(strstr(out, "motd.txt") != NULL, "ls lists a file");
+    CHECK(strstr(out, "empty/") == NULL,
+          "and skips the directory entries tar leaves in the archive");
+
+    run("cat motd.txt");
+    CHECK(strcmp(out, "hee-ho\n") == 0, "cat prints the file and nothing else");
+
+    run("cat nope.txt");
+    CHECK(strstr(out, "no such file") != NULL, "and says so when it isnt there");
+
+    run("cat");
+    CHECK(strstr(out, "cat <file>") != NULL, "bare cat explains itself");
+
+    rd_present = false;
+    run("ls");
+    CHECK(strstr(out, "no ramdisk") != NULL, "ls copes with no ramdisk at all");
+    rd_present = true;
+
+    /* ---- who we are ---- */
+    run("arcana");
+    CHECK(strstr(out, "COMPUTER ARCANA") && strstr(out, VERSION),
+          "arcana names the arcana and the version");
+    CHECK(strstr(out, "442") != NULL, "and how many symbols it carries");
+
+    run("persona");
+    CHECK(strstr(out, "velvet@tinyOS") != NULL, "persona has a header");
+    CHECK(strstr(out, "Imaginary CPU") != NULL, "and reports the cpu");
+    CHECK(strstr(out, "1280x800") != NULL, "and the resolution");
+    CHECK(strstr(out, "4 threads") != NULL, "and the thread count");
 
     if (!failures) printf("all good\n");
     return failures;

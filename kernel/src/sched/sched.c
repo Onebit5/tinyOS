@@ -207,6 +207,15 @@ void sched_dump(void) {
     irq_restore(flags);
 }
 
+size_t sched_thread_count(void) {
+    uint64_t flags = irq_save();
+    size_t n = 0;
+    struct thread *t = current;
+    do { n++; t = t->next; } while (t != current);
+    irq_restore(flags);
+    return n;
+}
+
 enum sched_kill_result sched_kill(int id) {
     uint64_t flags = irq_save();
     enum sched_kill_result result = SCHED_KILL_NO_SUCH;

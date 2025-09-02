@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "sched/thread.h"
+#include <stddef.h>
 
 /* round robin preemptive scheduler. one core, one run queue, no
  * priorities, no fairness accounting. it takes turns, thats it */
@@ -45,6 +46,9 @@ void waitq_wake_all(struct waitq *q);
 
 /* walk the run queue (for the `ps` command in m6) */
 void sched_dump(void);
+
+/* how many threads are in the ring, dead ones included */
+size_t sched_thread_count(void);
 
 enum sched_kill_result {
     SCHED_KILL_OK,

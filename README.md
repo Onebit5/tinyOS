@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.0.15** (the prompt behaves like a real one: a cursor you can move, edit in the middle of, and complete with tab. plus the commands you keep reaching for -- `poweroff`, `date`, `hexdump`, `kill`, `time`)
+**version: 0.0.16** (there are files now. limine hands us a tar at boot and `ls`/`cat` read straight out of it. plus `arcana` and `persona`, which are what a version string and a fastfetch look like after reading a tarot deck)
 
 ## scope
 
@@ -72,6 +72,10 @@ boot lands you at a `velvet>` prompt. commands:
 help      list what thou may command
 clear     wipe the screen clean
 echo      say something back
+ls        what the ramdisk carries
+cat       read a file aloud
+arcana    the rank of this bond, and its making
+persona   the face this machine wears
 mem       frames and heap, honestly counted
 uptime    how long since the bond was formed
 ps        the threads that walk this realm
@@ -101,6 +105,7 @@ line editing, as close to readline as a hobby kernel needs:
 | ctrl+w / ctrl+u / ctrl+k | kill a word, the line, or to the end |
 | up / down | the last 16 commands |
 | tab | complete a command name, or list the candidates |
+| ctrl+l | wipe the screen, keeping the line you were typing |
 | ctrl+c | abandon the line, and recall any running personas |
 
 adjacent duplicates and empty lines dont make it into the history.
@@ -134,6 +139,14 @@ the walker itself assumes frame pointers, so the kernel builds with `-fno-omit-f
 
 `bt` in the shell prints a trace with nothing on fire, which is a good way to see it work.
 
+## the ramdisk
+
+there is a filesystem, in the sense that a filing cabinet is furniture. `ramdisk/` is tarred up at build time, limine loads it as a module, and the kernel walks the 512-byte ustar headers to find files. no directories, no writing, and no allocation at all -- `cat` hands you a pointer straight into the archive.
+
+one ordering trap: the module bytes are safe, because limine types that memory "kernel and modules" and we never reclaim it. the *response structure* describing where they are is in bootloader-reclaimable memory, so `ramdisk_init()` has to copy the address out during early boot, before the shell hands that memory back.
+
+`ls` skips the directory entries GNU tar leaves in the archive, and the parser stops rather than wandering when it meets a header without the ustar magic or a size field that would walk it off the end of the buffer. both of those have tests.
+
 ## testing
 
 most of this kernel can be tested without booting anything, because the parts that think are deliberately kept separate from the parts that touch hardware. `pmm_init_from_map()` takes a memory map rather than asking limine for one, `keyboard_feed()` takes a scancode rather than reading port 0x60, `serial_feed()` takes a byte, `run_line()` takes a string. so the test suites compile the *real* kernel sources as ordinary linux programs and poke at them:
@@ -147,6 +160,7 @@ $ make test
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
+  ramdisk    ok        ustar parsing, incl. the real build output
   keyboard   ok        scancodes, ctrl, arrows, 20 cases
   serial     ok        terminal dialect + escape sequences
   shell      ok        parsing, dispatch, history, 32 cases
@@ -218,6 +232,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.0.16** — files. `ramdisk/` becomes a ustar tar at build time, limine passes it as a module, and `ls`/`cat` read straight out of it with no copying. the parser is fed hand-built archives in the tests -- block-sized files, empty files, gnu tar's leading `./`, a header with no magic, a size field that lies -- and then the real archive the build produces, which is the one that catches what tar actually emits. also ctrl+l to clear without losing the line, and two commands that had to be persona-inspired: `arcana` for the version, rendered as the rank of a social link, and `persona`, a fastfetch that shows the machine's face along with what cpu it wears.
 - **0.0.15** — a real line editor. cursor movement and mid-line editing, ctrl+a/e/w/u/k, del, and tab completion. the enabling change was making the console's `\b` non-destructive like an actual terminal, which meant giving it a shadow buffer of the text on screen so the block cursor can sit on a character and put it back afterwards. new commands: `poweroff` (so you stop killing qemu), `date` off the cmos clock, `hexdump` that checks the page tables before reading, `kill`, `history` and `time`. the rtc's decoding is split from its io and tested -- bcd, the pm bit hiding in the top of the hour byte, and 12am being hour zero are each their own small trap.
 - **0.0.14** — symbolized backtraces. `tools/gensyms.py` turns the kernel's own `nm` output into a table baked into a `.ksyms` section, and panics, exception dumps and double faults all print a symbolized call chain. the section sits after `.text` so folding it in can never move a function, and the build verifies that rather than trusting it. found two things on the way: our `backtrace()` was colliding with glibc's in the host tests and being silently shadowed (now `kbacktrace`), and the test binaries had no prerequisite on the kernel sources they `#include`, so they were happily running against stale builds.
 - **0.0.13** — a tss at last, with an IST stack for the double fault vector. that turns stack overflow from a silent triple-fault reboot into a report naming the thread and its guard page, because the cpu can always find a good stack for that vector even when `rsp` is in the hole. and the pmm now reclaims limine's memory (~1 MiB): the shell moved onto its own pmm-backed thread so the boot thread can exit and stop standing on limine's stack, and the bitmap grew to cover the reclaimable regions, which sit above the last usable one and were previously off the end of the map entirely. new test suite for the tss descriptor encoding, which scatters a base address across two qwords and fails silently when you get it wrong.

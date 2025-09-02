@@ -17,11 +17,13 @@
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
 #include "mm/vmm.h"
+#include "fs/ramdisk.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include "shell/shell.h"
+#include "version.h"
 
-#define VERSION "0.0.15"
+
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a
@@ -180,6 +182,11 @@ void kmain(void) {
     tss_init();
     idt_set_ist(8, IST_DOUBLE_FAULT);
     kprintf("  -> tss loaded, double faults land on their own stack\n\n");
+
+    /* before the shell reclaims limine's memory, since the module list
+     * we read this out of is sitting in it */
+    ramdisk_init();
+    kprintf("\n");
 
     /* from here on this function is a thread like any other */
     sched_init();
