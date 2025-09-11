@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "sched/thread.h"
 #include <stddef.h>
+#include <stdbool.h>
 
 /* round robin preemptive scheduler. one core, one run queue, no
  * priorities, no fairness accounting. it takes turns, thats it */
@@ -49,6 +50,11 @@ void sched_dump(void);
 
 /* how many threads are in the ring, dead ones included */
 size_t sched_thread_count(void);
+
+/* is there still a thread with this id that has not finished? asking by
+ * id rather than by pointer on purpose -- the reaper may free the
+ * struct at any moment, and an id cannot dangle */
+bool sched_thread_alive(int id);
 
 enum sched_kill_result {
     SCHED_KILL_OK,

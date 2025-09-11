@@ -33,11 +33,22 @@ uint64_t vmm_new_address_space(void) {
 /* walk one level down, optionally building the next table on the way.
  * returns NULL if theres nothing there (or if a huge page is in the
  * way, which the callers treat as "somebody already mapped this") */
-static uint64_t *step(uint64_t *table, size_t idx, bool create) {
+static uint64_t *step(uint64_t *table, size_t idx, bool create, uint64_t leaf_flags) {
+    /* the cpu ANDs the write and user bits down the whole chain and ORs
+     * the nx bits, so an intermediate entry can only ever take away.
+     * we keep them permissive and let the leaf decide -- except for the
+     * user bit, which has to be granted at every level or ring 3 cannot
+     * reach a page however the leaf is marked. that one is the classic
+     * way to spend an afternoon watching a #PF you cannot explain */
+    uint64_t need = PTE_PRESENT | PTE_WRITE | (leaf_flags & PTE_USER);
+
     if (table[idx] & PTE_PRESENT) {
         if (table[idx] & PTE_HUGE) {
             return NULL;
         }
+        /* a table built for a kernel mapping may now be on the path to
+         * a user one, so widen it */
+        table[idx] |= need;
         return table_at(table[idx] & PTE_ADDR_MASK);
     }
     if (!create) {
@@ -50,19 +61,16 @@ static uint64_t *step(uint64_t *table, size_t idx, bool create) {
     }
     memset(table_at(phys), 0, PAGE_SIZE);
 
-    /* intermediate entries stay permissive on purpose. the cpu ANDs the
-     * write bit and ORs the nx bit down the whole chain, so if we were
-     * strict up here the leaf could never grant anything */
-    table[idx] = phys | PTE_PRESENT | PTE_WRITE;
+    table[idx] = phys | need;
     return table_at(phys);
 }
 
 static bool map_4k(uint64_t pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *t = table_at(pml4);
 
-    t = step(t, PML4_IDX(virt), true); if (!t) return false;
-    t = step(t, PDPT_IDX(virt), true); if (!t) return false;
-    t = step(t, PD_IDX(virt),   true); if (!t) return false;
+    t = step(t, PML4_IDX(virt), true, flags); if (!t) return false;
+    t = step(t, PDPT_IDX(virt), true, flags); if (!t) return false;
+    t = step(t, PD_IDX(virt),   true, flags); if (!t) return false;
 
     t[PT_IDX(virt)] = (phys & PTE_ADDR_MASK) | flags | PTE_PRESENT;
     return true;
@@ -71,8 +79,8 @@ static bool map_4k(uint64_t pml4, uint64_t virt, uint64_t phys, uint64_t flags) 
 static bool map_2m(uint64_t pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
     uint64_t *t = table_at(pml4);
 
-    t = step(t, PML4_IDX(virt), true); if (!t) return false;
-    t = step(t, PDPT_IDX(virt), true); if (!t) return false;
+    t = step(t, PML4_IDX(virt), true, flags); if (!t) return false;
+    t = step(t, PDPT_IDX(virt), true, flags); if (!t) return false;
 
     t[PD_IDX(virt)] = (phys & PTE_ADDR_MASK) | flags | PTE_PRESENT | PTE_HUGE;
     return true;

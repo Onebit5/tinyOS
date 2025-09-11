@@ -13,10 +13,19 @@ struct frame {
 };
 
 static void print_where(uint64_t addr) {
+    /* the symbol table only covers the kernel. an address down in the
+     * low half belongs to whatever program was running, and saying so
+     * is more use than shrugging */
+    if (addr < 0xffff800000000000ull) {
+        kprintf("  %p  <in userspace, which we have no symbols for>\n",
+                (void *)addr);
+        return;
+    }
+
     uint64_t off = 0;
     const char *name = ksym_lookup(addr, &off);
     if (name == NULL) {
-        kprintf("  %p  <no idea, outside every function i know>\n", (void *)addr);
+        kprintf("  %p  <outside every function i know>\n", (void *)addr);
     } else {
         kprintf("  %p  %s+0x%lx\n", (void *)addr, name, off);
     }

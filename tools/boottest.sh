@@ -39,6 +39,8 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'cat motd.txt\r'; sleep 1
     printf 'arcana\r';  sleep 1
     printf 'persona\r'; sleep 2
+    printf 'run bin/hello\r'; sleep 6
+    printf 'dmesg\r';  sleep 2
 } | timeout 60 qemu-system-x86_64 \
         -M q35 -m 2G -cdrom "$ISO" \
         -display none -serial stdio -no-reboot \
@@ -56,7 +58,7 @@ check() {
 
 # did it boot at all
 check 'kernel banner'      'tinyOS v'
-check 'framebuffer found'  'framebuffer :'
+check 'framebuffer found'  'framebuffer :'   # serial keeps everything
 check 'idt armed'          '256 gates armed'
 check 'memory map parsed'  'memory map, as declared by limine'
 check 'memory selftest'    'books balance'
@@ -86,6 +88,13 @@ check 'ls works'      'motd.txt'
 check 'cat works'     'Thou art I'
 check 'arcana works'  'COMPUTER ARCANA'
 check 'persona works' 'velvet@tinyOS'
+check 'ring 3 reached' 'entered ring 3'
+check 'userspace ran'  'A voice speaks from ring 3'
+check 'syscalls work'  'the kernel yet lives'
+check 'loop completed'  '5 ... the kernel yet lives'
+check 'registers kept'  'My purpose is fulfilled'
+check 'program exited'  'sea of souls'
+check 'dmesg works'    'cr3 is ours'
 
 # and did it stay alive rather than falling over
 if grep -qF 'KERNEL PANIC' "$LOG"; then

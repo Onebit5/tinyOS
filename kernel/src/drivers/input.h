@@ -27,6 +27,11 @@ void input_push(int key);
 int  input_getchar(void);           /* next key, or -1 if nothing waiting */
 bool input_haskey(void);
 
+/* the next key without consuming it. lets a waiter watch for one
+ * particular key -- ctrl+c, say -- while leaving everything else in the
+ * queue for whoever it was actually meant for */
+int  input_peek(void);
+
 /* wait for a key. the calling thread sleeps on a waitq and costs
  * nothing until an irq wakes it, which is how the shell can sit at a
  * prompt all day without burning a single cycle */

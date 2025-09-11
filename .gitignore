@@ -3,6 +3,7 @@ bin/
 obj/
 iso_root/
 *.iso
+ramdisk/bin/
 
 # limine binaries get pulled in by make, no point tracking them
 limine/

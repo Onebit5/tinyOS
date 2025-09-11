@@ -13,7 +13,11 @@ static uint64_t gdt[] = {
     0,                      /* null descriptor, mandatory tribute */
     0x00af9a000000ffff,     /* 0x08 kernel code: present, exec, long mode */
     0x00af92000000ffff,     /* 0x10 kernel data: present, rw */
-    0, 0,                   /* 0x18/0x20 user data + code, for the distant future */
+    /* the order of these two is not ours to choose. sysret computes
+     * CS = STAR[63:48] + 16 and SS = STAR[63:48] + 8, so data must sit
+     * eight bytes below code or returning to ring 3 lands nowhere */
+    0x00aff2000000ffff,     /* 0x18 user data: present, rw, dpl 3 */
+    0x00affa000000ffff,     /* 0x20 user code: present, exec, long mode, dpl 3 */
     0, 0,                   /* 0x28 tss descriptor, filled in by gdt_set_tss */
 };
 

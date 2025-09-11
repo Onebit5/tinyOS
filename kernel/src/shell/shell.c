@@ -12,6 +12,7 @@
 #include "drivers/rtc.h"
 #include "cpu/cpuinfo.h"
 #include "fs/ramdisk.h"
+#include "sched/usermode.h"
 #include "lib/ksyms.h"
 #include "version.h"
 #include "sched/sched.h"
@@ -31,10 +32,12 @@ struct command {
     const char *name;
     const char *help;
     void (*fn)(int argc, char **argv);
+    bool takes_file;    /* tab should offer ramdisk names after it */
 };
 
 static const struct command commands[];    /* defined below, after the handlers */
 static void run_argv(int argc, char **argv);
+static size_t common_prefix(const char *a, const char *b);
 
 /* ---- the personas one may summon ---------------------------------- */
 
@@ -260,37 +263,112 @@ static void cmd_ls(int argc, char **argv) {
     }
     struct ramdisk_file f;
     uint64_t total = 0;
+    size_t files = 0;
+
     for (size_t i = 0; ramdisk_stat(i, &f); i++) {
-        /* the archive holds the directory entries too. they have no
-         * bytes and nothing to show, so skip them */
-        size_t n = strlen(f.name);
-        if (n > 0 && f.name[n - 1] == '/') {
+        /* print the path exactly as `cat` and `run` will accept it.
+         * tar stores "./bin/hello" and showing that verbatim tells you
+         * to type something that then does not work */
+        const char *name = f.name;
+        if (name[0] == '.' && name[1] == '/') {
+            name += 2;
+        }
+
+        /* the archive holds directory entries too. they have no bytes
+         * and nothing to open, so they are not worth listing */
+        size_t n = strlen(name);
+        if (n == 0 || name[n - 1] == '/') {
             continue;
         }
-        kprintf("  %6lu  %s\n", f.size, f.name);
+
+        kprintf("  %6lu  %s\n", f.size, name);
         total += f.size;
+        files++;
     }
-    kprintf("  %lu bytes across %zu entries\n", total, ramdisk_count());
+    kprintf("  %lu bytes in %zu files\n", total, files);
+}
+
+/* the archive is a flat list of paths and we do not search it, so
+ * `hello` will not find `bin/hello`. rather than add a path search --
+ * which is magic that surprises you later -- say what they probably
+ * meant, if exactly one file ends that way */
+static const char *suggest_path(const char *name) {
+    struct ramdisk_file f;
+    const char *found = NULL;
+    int matches = 0;
+
+    for (size_t i = 0; ramdisk_stat(i, &f); i++) {
+        const char *p = f.name;
+        if (p[0] == '.' && p[1] == '/') {
+            p += 2;
+        }
+        /* the part after the last slash */
+        const char *base = p;
+        for (const char *q = p; *q; q++) {
+            if (*q == '/') {
+                base = q + 1;
+            }
+        }
+        if (*base != '\0' && strcmp(base, name) == 0) {
+            found = p;
+            matches++;
+        }
+    }
+    return matches == 1 ? found : NULL;
+}
+
+static void missing(const char *what, const char *name) {
+    const char *did = suggest_path(name);
+    if (did != NULL) {
+        kprintf("%s: no such file '%s'. didst thou mean '%s'?\n",
+                what, name, did);
+    } else {
+        kprintf("%s: no such file '%s'. `ls` shows what there is, "
+                "and tab completes it\n", what, name);
+    }
 }
 
 static void cmd_cat(int argc, char **argv) {
     if (argc < 2) {
-        kprintf("cat <file> -- see `ls`\n");
+        kprintf("cat <file> [file...] -- see `ls`\n");
         return;
     }
-    struct ramdisk_file f;
-    if (!ramdisk_open(argv[1], &f)) {
-        kprintf("no such file: %s\n", argv[1]);
+    for (int a = 1; a < argc; a++) {
+        struct ramdisk_file f;
+        if (!ramdisk_open(argv[a], &f)) {
+            missing("cat", argv[a]);
+            continue;
+        }
+        /* straight out of the archive, no copy, no allocation */
+        const char *p = f.data;
+        for (uint64_t i = 0; i < f.size; i++) {
+            kprintf("%c", p[i]);
+        }
+        if (f.size > 0 && p[f.size - 1] != '\n') {
+            kprintf("\n");
+        }
+    }
+}
+
+static void cmd_run(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("run <program> -- try `run bin/hello`\n");
         return;
     }
-    /* straight out of the archive, no copy, no allocation */
-    const char *p = f.data;
-    for (uint64_t i = 0; i < f.size; i++) {
-        kprintf("%c", p[i]);
+    const char *why = NULL;
+    if (!user_run(argv[1], &why)) {
+        if (why == USER_RUN_NO_SUCH_FILE) {
+            missing("run", argv[1]);
+        } else {
+            kprintf("cannot run %s: %s\n", argv[1], why);
+        }
     }
-    if (f.size > 0 && p[f.size - 1] != '\n') {
-        kprintf("\n");
-    }
+}
+
+static void cmd_dmesg(int argc, char **argv) {
+    (void)argc; (void)argv;
+    /* everything the boot said while the screen was being kept quiet */
+    klog_dump();
 }
 
 /* ---- who and what we are -------------------------------------------- */
@@ -506,29 +584,31 @@ static void cmd_reboot(int argc, char **argv) {
 }
 
 static const struct command commands[] = {
-    { "help",   "list what thou may command",           cmd_help   },
-    { "clear",  "wipe the screen clean",                cmd_clear  },
-    { "echo",   "say something back",                   cmd_echo   },
-    { "ls",     "what the ramdisk carries",             cmd_ls     },
-    { "cat",    "read a file aloud",                    cmd_cat    },
-    { "arcana", "the rank of this bond, and its making", cmd_arcana },
-    { "persona","the face this machine wears",          cmd_persona },
-    { "mem",    "frames and heap, honestly counted",    cmd_mem    },
-    { "uptime", "how long since the bond was formed",   cmd_uptime },
-    { "ps",     "the threads that walk this realm",     cmd_ps     },
-    { "summon", "call forth a persona thread",          cmd_summon },
-    { "vmm",    "what the page tables say about an address", cmd_vmm },
-    { "bt",     "who called whom to get here",          cmd_bt     },
-    { "date",   "what the battery-backed clock believes", cmd_date  },
-    { "hexdump","look at memory, safely",                cmd_hexdump },
-    { "kill",   "end a thread by id",                    cmd_kill   },
-    { "history","what thou hast said before",            cmd_history },
-    { "time",   "how long a command takes",              cmd_time   },
-    { "crash",  "tempt fate with a wild pointer",       cmd_crash  },
-    { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow },
-    { "reboot", "sever the bond and begin anew",        cmd_reboot },
-    { "poweroff","let the velvet room fade",             cmd_poweroff },
-    { NULL, NULL, NULL },
+    { "help",   "list what thou may command",           cmd_help, false },
+    { "clear",  "wipe the screen clean",                cmd_clear, false },
+    { "echo",   "say something back",                   cmd_echo, false },
+    { "ls",     "what the ramdisk carries",             cmd_ls, false },
+    { "cat",    "read a file aloud",                    cmd_cat, true },
+    { "run",    "give a program the outer ring (waits for it)", cmd_run, true },
+    { "dmesg",  "everything boot said while you werent looking", cmd_dmesg, false },
+    { "arcana", "the rank of this bond, and its making", cmd_arcana, false },
+    { "persona","the face this machine wears",          cmd_persona, false },
+    { "mem",    "frames and heap, honestly counted",    cmd_mem, false },
+    { "uptime", "how long since the bond was formed",   cmd_uptime, false },
+    { "ps",     "the threads that walk this realm",     cmd_ps, false },
+    { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
+    { "vmm",    "what the page tables say about an address", cmd_vmm, false },
+    { "bt",     "who called whom to get here",          cmd_bt, false },
+    { "date",   "what the battery-backed clock believes", cmd_date, false },
+    { "hexdump","look at memory, safely",                cmd_hexdump, false },
+    { "kill",   "end a thread by id",                    cmd_kill, false },
+    { "history","what thou hast said before",            cmd_history, false },
+    { "time",   "how long a command takes",              cmd_time, false },
+    { "crash",  "tempt fate with a wild pointer",       cmd_crash, false },
+    { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow, false },
+    { "reboot", "sever the bond and begin anew",        cmd_reboot, false },
+    { "poweroff","let the velvet room fade",             cmd_poweroff, false },
+    { NULL, NULL, NULL, false },
 };
 
 /* ---- the line editor ----------------------------------------------- */
@@ -569,7 +649,29 @@ static void run_argv(int argc, char **argv) {
             return;
         }
     }
-    kprintf("'%s' means nothing to me. try 'help'\n", argv[0]);
+    /* before giving up, see if they nearly typed something real. we
+     * only compare leading characters -- enough to catch a fumbled
+     * ending like `dmseg`, and honest about not being spell check */
+    const struct command *near = NULL;
+    size_t best = 0;
+    int ties = 0;
+    for (const struct command *c = commands; c->name; c++) {
+        size_t n = common_prefix(c->name, argv[0]);
+        if (n > best) {
+            best = n;
+            near = c;
+            ties = 1;
+        } else if (n == best && best > 0) {
+            ties++;
+        }
+    }
+
+    if (best >= 2 && ties == 1) {
+        kprintf("'%s' means nothing to me. didst thou mean '%s'?\n",
+                argv[0], near->name);
+    } else {
+        kprintf("'%s' means nothing to me. try 'help'\n", argv[0]);
+    }
 }
 
 static void run_line(char *line) {
@@ -672,46 +774,185 @@ static bool is_word_char(char c) {
 
 /* ---- tab completion ------------------------------------------------ */
 
-/* complete the command name, but only when it is the first word --
- * nothing here takes a filename yet, so anything later is not ours */
+/* how many leading characters two strings share */
+static size_t common_prefix(const char *a, const char *b) {
+    size_t n = 0;
+    while (a[n] != '\0' && a[n] == b[n]) {
+        n++;
+    }
+    return n;
+}
+
+/* the word the cursor is sitting in, and whether it is the first one.
+ * returns where that word starts */
+static size_t word_start(const char *line, size_t pos, bool *first_word) {
+    size_t start = pos;
+    while (start > 0 && line[start - 1] != ' ') {
+        start--;
+    }
+    *first_word = true;
+    for (size_t i = 0; i < start; i++) {
+        if (line[i] != ' ') {
+            *first_word = false;
+            break;
+        }
+    }
+    return start;
+}
+
+/* replace the word under the cursor with `with`, redrawing what follows */
+static void replace_word(char *line, size_t *len, size_t *pos,
+                         size_t start, const char *with) {
+    size_t old_word = *pos - start;
+    size_t tail_len = *len - *pos;
+    size_t new_word = strlen(with);
+
+    if (start + new_word + tail_len + 1 >= LINE_MAX) {
+        return;
+    }
+
+    /* shuffle whatever came after the word out of the way */
+    for (size_t i = 0; i < tail_len; i++) {
+        line[start + new_word + i] = line[*pos + i];
+    }
+    for (size_t i = 0; i < new_word; i++) {
+        line[start + i] = with[i];
+    }
+    *len = start + new_word + tail_len;
+    line[*len] = '\0';
+
+    move_left(old_word);
+    for (size_t i = start; i < *len; i++) {
+        kprintf("%c", line[i]);
+    }
+    /* blank anything the shorter word left behind */
+    size_t was = start + old_word + tail_len;
+    for (size_t i = *len; i < was; i++) {
+        kprintf(" ");
+    }
+    *pos = start + new_word;
+    move_left((*len > was ? *len : was) - *pos);
+}
+
+/* which command the line begins with, or NULL if it is not one we know.
+ * the line must already be terminated -- complete() sees to that */
+static const struct command *command_for_line(const char *line) {
+    size_t i = 0;
+    while (line[i] == ' ') {
+        i++;
+    }
+    size_t start = i;
+    while (line[i] != '\0' && line[i] != ' ') {
+        i++;
+    }
+    size_t n = i - start;
+
+    for (const struct command *c = commands; c->name; c++) {
+        if (strlen(c->name) == n && memcmp(c->name, line + start, n) == 0) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
+/* candidates come from one of two places depending on where you are:
+ * command names in the first word, ramdisk filenames after a command
+ * that takes one */
+struct candidates {
+    const char *items[32];
+    int count;
+};
+
+static void gather(struct candidates *c, const char *line, size_t start,
+                   size_t pos, bool first_word) {
+    c->count = 0;
+    size_t plen = pos - start;
+    const char *prefix = line + start;
+
+    if (first_word) {
+        for (const struct command *cmd = commands; cmd->name; cmd++) {
+            if (strlen(cmd->name) >= plen
+                && common_prefix(cmd->name, prefix) >= plen
+                && c->count < 32) {
+                c->items[c->count++] = cmd->name;
+            }
+        }
+        return;
+    }
+
+    /* only offer filenames after a command that actually takes one --
+     * completing `echo mo<tab>` into a filename would be surprising */
+    const struct command *cmd = command_for_line(line);
+    if (cmd == NULL || !cmd->takes_file) {
+        return;
+    }
+
+    struct ramdisk_file f;
+    for (size_t i = 0; ramdisk_stat(i, &f) && c->count < 32; i++) {
+        const char *name = f.name;
+        if (name[0] == '.' && name[1] == '/') {
+            name += 2;
+        }
+        size_t n = strlen(name);
+        if (n == 0 || name[n - 1] == '/') {
+            continue;       /* directories arent worth offering */
+        }
+        if (n >= plen && common_prefix(name, prefix) >= plen) {
+            c->items[c->count++] = name;
+        }
+    }
+}
+
 static void complete(char *line, size_t *len, size_t *pos) {
-    for (size_t i = 0; i < *pos; i++) {
-        if (line[i] == ' ') {
-            return;
-        }
-    }
+    /* the editor does not keep the line terminated while you are typing
+     * -- it only does that on enter -- and everything below wants a
+     * string. terminate it here, where len is known */
+    line[*len] = '\0';
 
-    const struct command *match = NULL;
-    int matches = 0;
-    for (const struct command *c = commands; c->name; c++) {
-        bool same = true;
-        for (size_t i = 0; i < *pos; i++) {
-            if (c->name[i] != line[i]) { same = false; break; }
-        }
-        if (same && strlen(c->name) >= *pos) {
-            match = c;
-            matches++;
-        }
-    }
+    bool first_word;
+    size_t start = word_start(line, *pos, &first_word);
 
-    if (matches == 1) {
-        replace_line(line, len, pos, match->name);
-        return;
-    }
-    if (matches == 0) {
+    /* a bare tab in the command position does nothing on purpose:
+     * dumping the whole command list is what `help` is for. after a
+     * command that takes a filename there is no such list to consult,
+     * so an empty word there is worth answering */
+    if (*pos == start && first_word) {
         return;
     }
 
-    /* several. show them and put the prompt back underneath */
+    struct candidates c;
+    gather(&c, line, start, *pos, first_word);
+
+    if (c.count == 0) {
+        return;
+    }
+    if (c.count == 1) {
+        replace_word(line, len, pos, start, c.items[0]);
+        return;
+    }
+
+    /* several: fill in as far as they all agree, and only if that adds
+     * nothing do we show the list */
+    size_t shared = strlen(c.items[0]);
+    for (int i = 1; i < c.count; i++) {
+        size_t n = common_prefix(c.items[0], c.items[i]);
+        if (n < shared) {
+            shared = n;
+        }
+    }
+    if (shared > *pos - start) {
+        char partial[LINE_MAX];
+        for (size_t i = 0; i < shared; i++) {
+            partial[i] = c.items[0][i];
+        }
+        partial[shared] = '\0';
+        replace_word(line, len, pos, start, partial);
+        return;
+    }
+
     kprintf("\n");
-    for (const struct command *c = commands; c->name; c++) {
-        bool same = true;
-        for (size_t i = 0; i < *pos; i++) {
-            if (c->name[i] != line[i]) { same = false; break; }
-        }
-        if (same && strlen(c->name) >= *pos) {
-            kprintf("  %s", c->name);
-        }
+    for (int i = 0; i < c.count; i++) {
+        kprintf("  %s", c.items[i]);
     }
     kprintf("\n");
     prompt();
@@ -725,8 +966,6 @@ void shell_run(void) {
     char line[LINE_MAX];
 
     console_set_colors(COLOR_TEXT, 0x101018);
-    kprintf("type 'help' if thou art lost, or press tab to be reminded.\n");
-    kprintf("arrows move and recall, ctrl+c abandons a line.\n\n");
 
     for (;;) {
         size_t len = 0;     /* characters in the line */

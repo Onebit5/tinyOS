@@ -58,6 +58,16 @@ int main(void) {
     CHECK(((lo >> 45) & 3) == 0,   "DPL is 0, ring 0 only");
     CHECK(((lo >> 47) & 1) == 1,   "present");
 
+    /* the user descriptors, whose layout sysret dictates rather than us */
+    CHECK(((gdt[GDT_USER_CODE / 8] >> 45) & 3) == 3, "user code is dpl 3");
+    CHECK(((gdt[GDT_USER_DATA / 8] >> 45) & 3) == 3, "user data is dpl 3");
+    CHECK((gdt[GDT_USER_CODE / 8] >> 53) & 1, "user code is a long mode segment");
+    CHECK(GDT_USER_CODE == GDT_USER_DATA + 8,
+          "sysret computes CS = base+16 and SS = base+8, so code must sit "
+          "eight bytes above data");
+    CHECK(GDT_USER_DATA == GDT_KERNEL_DATA + 8,
+          "and STAR[63:48] = kernel data makes those two land right");
+
     /* the descriptor must not have trampled its neighbours */
     CHECK(gdt[0] == 0, "null descriptor still null");
     CHECK(gdt[GDT_KERNEL_CODE / 8] == 0x00af9a000000ffff, "kernel code intact");

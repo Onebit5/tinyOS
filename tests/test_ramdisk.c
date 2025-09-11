@@ -150,6 +150,21 @@ int main(void) {
                   "and its contents come back intact");
             CHECK(ramdisk_open("arcana.txt", &f), "so is arcana.txt");
             CHECK(ramdisk_open("README", &f), "and README");
+
+            /* the path `run` is told to use. gnu tar writes it as
+             * ./bin/hello, so this only works if the leading ./ is
+             * being stripped -- and getting it wrong just looks like
+             * "no such file in the ramdisk" */
+            CHECK(ramdisk_open("bin/hello", &f),
+                  "bin/hello opens by the path the shell asks for");
+            CHECK(f.size > 4 && memcmp(f.data, "\x7f" "ELF", 4) == 0,
+                  "and it really is an elf");
+            CHECK(ramdisk_open("./bin/hello", &f),
+                  "and by the path tar actually stored");
+            CHECK(!ramdisk_open("hello", &f),
+                  "but not by the bare name -- there is no path search");
+            CHECK(!ramdisk_open("bin", &f),
+                  "and a directory is not a file");
         }
     }
 

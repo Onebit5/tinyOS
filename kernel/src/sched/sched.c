@@ -7,6 +7,9 @@
 #include "lib/panic.h"
 #include "lib/string.h"
 #include "cpu/interrupts.h"
+#include "cpu/tss.h"
+#include "cpu/syscall.h"
+#include "mm/pmm.h"
 
 /* how many ticks a thread gets before we take the cpu back. 5 ticks at
  * 100hz = 50ms, short enough to look instant, long enough that we're
@@ -119,6 +122,17 @@ static void schedule(void) {
     next->state = THREAD_RUNNING;
     current = next;
 
+    /* both of these say "where does the kernel stand when this thread
+     * traps in from ring 3". the tss answers it for interrupts, the
+     * global for `syscall`, and they must follow the thread or two
+     * user threads would land on the same stack and eat each other */
+    if (next->stack_phys != 0) {
+        uint64_t ktop = (uint64_t)pmm_phys_to_virt(next->stack_phys)
+                      + next->stack_pages * PAGE_SIZE;
+        tss_set_rsp0(ktop);
+        syscall_kernel_rsp = ktop;
+    }
+
     switch_context(&prev->rsp, &next->rsp);
     /* when we get back here, an unknown amount of time has passed and
      * we are `prev` again. everything above is somebody elses story */
@@ -182,27 +196,50 @@ void sched_tick(void) {
     }
 }
 
+static void dump_one(struct thread *t) {
+    kprintf("  %2d  %s", t->id, t->name);
+    for (size_t i = strlen(t->name); i < THREAD_NAME_MAX; i++) {
+        kprintf(" ");
+    }
+    kprintf("%s", thread_state_name(t->state));
+    if (t->state == THREAD_SLEEPING) {
+        kprintf(" (%lu ticks)", t->wake_at > pit_ticks()
+                                ? t->wake_at - pit_ticks() : 0);
+    }
+    if (t->stack_phys == 0) {
+        kprintf("   (bootloader's)");
+    }
+    kprintf("\n");
+}
+
 void sched_dump(void) {
     uint64_t flags = irq_save();
-    struct thread *t = current;
 
     kprintf("  id  name             state\n");
-    do {
-        kprintf("  %2d  %s", t->id, t->name);
-        for (size_t i = strlen(t->name); i < THREAD_NAME_MAX; i++) {
-            kprintf(" ");
+
+    /* the ring is in newest-first order, because sched_add splices each
+     * new thread in just after current. that is fine for scheduling and
+     * confusing to read, so print by id instead. a sweep per id is
+     * quadratic and there are five threads */
+    int highest = 0;
+    for (struct thread *t = current; ; ) {
+        if (t->id > highest) {
+            highest = t->id;
         }
-        kprintf("%s", thread_state_name(t->state));
-        if (t->state == THREAD_SLEEPING) {
-            kprintf(" (%lu ticks)", t->wake_at > pit_ticks()
-                                    ? t->wake_at - pit_ticks() : 0);
-        }
-        if (t->stack_phys == 0) {
-            kprintf("   (bootloader's)");
-        }
-        kprintf("\n");
         t = t->next;
-    } while (t != current);
+        if (t == current) break;
+    }
+
+    for (int want = 0; want <= highest; want++) {
+        for (struct thread *t = current; ; ) {
+            if (t->id == want) {
+                dump_one(t);
+                break;
+            }
+            t = t->next;
+            if (t == current) break;
+        }
+    }
 
     irq_restore(flags);
 }
@@ -214,6 +251,23 @@ size_t sched_thread_count(void) {
     do { n++; t = t->next; } while (t != current);
     irq_restore(flags);
     return n;
+}
+
+bool sched_thread_alive(int id) {
+    uint64_t flags = irq_save();
+    bool alive = false;
+
+    struct thread *t = current;
+    do {
+        if (t->id == id && t->state != THREAD_DEAD) {
+            alive = true;
+            break;
+        }
+        t = t->next;
+    } while (t != current);
+
+    irq_restore(flags);
+    return alive;
 }
 
 enum sched_kill_result sched_kill(int id) {

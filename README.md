@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.0.16** (there are files now. limine hands us a tar at boot and `ls`/`cat` read straight out of it. plus `arcana` and `persona`, which are what a version string and a fastfetch look like after reading a tarot deck)
+**version: 0.0.17** (**it runs programs.** ring 3, `syscall`/`sysret`, an elf loader, and a userspace hello that can touch nothing and must ask for everything. boot is quiet now too, and the prompt completes filenames)
 
 ## scope
 
@@ -73,6 +73,8 @@ help      list what thou may command
 clear     wipe the screen clean
 echo      say something back
 ls        what the ramdisk carries
+run       give a program the outer ring
+dmesg     everything boot said while you werent looking
 cat       read a file aloud
 arcana    the rank of this bond, and its making
 persona   the face this machine wears
@@ -104,7 +106,7 @@ line editing, as close to readline as a hobby kernel needs:
 | backspace, del / ctrl+d | delete behind and ahead |
 | ctrl+w / ctrl+u / ctrl+k | kill a word, the line, or to the end |
 | up / down | the last 16 commands |
-| tab | complete a command name, or list the candidates |
+| tab | complete a command name, or a filename after `cat`/`run` |
 | ctrl+l | wipe the screen, keeping the line you were typing |
 | ctrl+c | abandon the line, and recall any running personas |
 
@@ -139,6 +141,30 @@ the walker itself assumes frame pointers, so the kernel builds with `-fno-omit-f
 
 `bt` in the shell prints a trace with nothing on fire, which is a good way to see it work.
 
+## ring 3
+
+`run bin/hello` loads an elf out of the ramdisk and gives it the outer ring. it cannot touch a port, cannot read the kernel, and cannot see any memory but its own -- the only thing it can do to the world is ask, through `syscall`, and be answered.
+
+`ls` prints paths exactly as `cat` and `run` accept them -- tar stores `./bin/hello`, and showing that verbatim tells you to type something that then does not work. there is no path search, so `run hello` will not find `bin/hello`; instead of adding magic that surprises you later, a miss says which file you probably meant.
+
+`user/` is a whole tiny userland: a freestanding program with no libc, six inline syscall stubs, and its own linker script putting it at `0x400000` in the low half where the kernel's mappings can never reach.
+
+three things about this were easy to get wrong and interesting to get right:
+
+**two calling conventions meet at the entry stub, and they are not the same one.** ring 3 hands over `nr` in rax and arguments in rdi/rsi/rdx/r10/r8; sysv C wants them in rdi/rsi/rdx/rcx/r8/r9, and the dispatcher's *first* argument is the number, so everything shifts one place right to make room. get that wrong and the kernel reads an argument as the call number, which looks exactly like a program asking for syscall 4198426. the shuffle also has to be written in an order where every register is read before anything overwrites it.
+
+**ring 3 gets every register back but three.** the syscall instruction destroys rcx and r11, and rax carries the result -- everything else the user compiled against the assumption that it survives. so the entry stub has to preserve the caller-saved registers itself, because the C dispatcher is free to clobber them and the argument shuffle certainly does. miss that and kernel values leak into a program that will use them as pointers, which surfaces as a page fault in userspace at an address that means nothing to anyone. (rbx, rbp and r12-r15 need no saving there: `syscall_dispatch` is an ordinary C function and the abi makes those its problem.)
+
+**`syscall` does not switch stacks.** it puts the return address in rcx, the flags in r11, loads cs and rip from MSRs, and that is all. you arrive in ring 0 *standing on the user's stack*, which is as alarming as it sounds. the entry stub's first job is to get off it. it can do that with a global only because `SFMASK` clears IF, so we arrive with interrupts off and nothing can preempt us in the three instructions before the user's rsp is safely parked on a kernel stack.
+
+**the gdt layout is not ours to choose.** `sysret` computes `CS = STAR[63:48] + 16` and `SS = STAR[63:48] + 8`, so user data has to sit eight bytes below user code or returning to ring 3 lands nowhere. there is a test asserting that relationship, because it is the sort of thing a tidy-up would quietly break.
+
+**the user bit is ANDed down the whole chain.** a leaf marked `PTE_USER` under intermediate tables that are not is unreachable from ring 3, and it looks completely correct in any dump you care to print. the vmm now grants the bit at every level on the way to a user mapping, and widens tables that were built for a kernel mapping and later find themselves on the path to a user one. kernel leaves stay supervisor-only regardless. that one has a test that walks all four levels by hand.
+
+`run` is a foreground command: it waits for the program and gives you the prompt back when it is done, which is what a shell does. `summon` is deliberately the opposite -- it puts a thread in the background and returns at once, because watching threads share a console *is* the demo. while a program runs, ctrl+c stops it; the wait peeks at the key rather than taking it, so a program sitting on `SYS_READ` still gets the input meant for it.
+
+what is missing is honest. there is one address space, so every program links to the same addresses and only one can run at a time -- `run` says so rather than mapping the second one over the first. a program's pages are also not reclaimed when it exits, so each run leaks its image (a few pages). both go away with per-process address spaces, which is a milestone of its own and the spine of 0.1.0.
+
 ## the ramdisk
 
 there is a filesystem, in the sense that a filing cabinet is furniture. `ramdisk/` is tarred up at build time, limine loads it as a module, and the kernel walks the 512-byte ustar headers to find files. no directories, no writing, and no allocation at all -- `cat` hands you a pointer straight into the archive.
@@ -161,6 +187,8 @@ $ make test
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
   ramdisk    ok        ustar parsing, incl. the real build output
+  elf        ok        header validation, incl. the real user program
+  syscall    ok        dispatch, and every pointer it refuses
   keyboard   ok        scancodes, ctrl, arrows, 20 cases
   serial     ok        terminal dialect + escape sequences
   shell      ok        parsing, dispatch, history, 32 cases
@@ -232,6 +260,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.0.17** — **it runs programs.** ring 3 via `iretq` into a fabricated frame, `syscall`/`sysret` with STAR/LSTAR/SFMASK, a static elf64 loader, per-thread kernel stacks tracked in the tss and for `syscall`, and `user/hello.c` -- a real program with no libc that prints and sleeps and exits, all through six syscalls. every pointer ring 3 hands the kernel is checked against the page tables before it is touched, mapped *and* user, so a program cannot make the kernel fault by lying -- and the refusals are tested harder than the successes, since they are the actual boundary. found a genuine bug on the way: intermediate page table entries never set `PTE_USER`, and since the cpu ANDs that bit down the whole chain, every user mapping would have been unreachable while looking perfectly correct in a dump. boot is quiet now -- the driver chatter goes to serial and `dmesg`, and the screen gets the banner and `welcome.txt`. tab completes filenames after any command that takes one (`cat`, `run`), fills in the longest shared prefix, and does nothing on an empty word *in the command position* -- listing every command is what `help` is for, but after `cat ` there is no such list to consult, so an empty word there is worth answering. `run` waits for its program like a foreground command should, with ctrl+c to stop it. also `cat` takes several files, unknown commands suggest the nearest match (and a bare filename points at the path it lives under), `ls` prints paths you can actually retype, and `ps` prints in id order.
 - **0.0.16** — files. `ramdisk/` becomes a ustar tar at build time, limine passes it as a module, and `ls`/`cat` read straight out of it with no copying. the parser is fed hand-built archives in the tests -- block-sized files, empty files, gnu tar's leading `./`, a header with no magic, a size field that lies -- and then the real archive the build produces, which is the one that catches what tar actually emits. also ctrl+l to clear without losing the line, and two commands that had to be persona-inspired: `arcana` for the version, rendered as the rank of a social link, and `persona`, a fastfetch that shows the machine's face along with what cpu it wears.
 - **0.0.15** — a real line editor. cursor movement and mid-line editing, ctrl+a/e/w/u/k, del, and tab completion. the enabling change was making the console's `\b` non-destructive like an actual terminal, which meant giving it a shadow buffer of the text on screen so the block cursor can sit on a character and put it back afterwards. new commands: `poweroff` (so you stop killing qemu), `date` off the cmos clock, `hexdump` that checks the page tables before reading, `kill`, `history` and `time`. the rtc's decoding is split from its io and tested -- bcd, the pm bit hiding in the top of the hour byte, and 12am being hour zero are each their own small trap.
 - **0.0.14** — symbolized backtraces. `tools/gensyms.py` turns the kernel's own `nm` output into a table baked into a `.ksyms` section, and panics, exception dumps and double faults all print a symbolized call chain. the section sits after `.text` so folding it in can never move a function, and the build verifies that rather than trusting it. found two things on the way: our `backtrace()` was colliding with glibc's in the host tests and being silently shadowed (now `kbacktrace`), and the test binaries had no prerequisite on the kernel sources they `#include`, so they were happily running against stale builds.

@@ -30,6 +30,11 @@ struct thread {
     void (*entry)(void *);
     void *arg;
 
+    /* ring 3 threads only: where their user stack was allocated, so it
+     * can go back to the pmm when they exit */
+    uint64_t user_stack_phys;
+    size_t   user_stack_pages;
+
     int  id;
     char name[THREAD_NAME_MAX];
 

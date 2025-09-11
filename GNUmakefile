@@ -69,13 +69,34 @@ limine/limine:
 		https://github.com/limine-bootloader/limine.git limine
 	$(MAKE) -C limine
 
+# ---- userspace ------------------------------------------------------
+#
+# a ring 3 program is built much like the kernel -- freestanding, no
+# libc -- but without -mcmodel=kernel, since it lives at 0x400000 in
+# the low half rather than up in the higher one. it gets copied into
+# the ramdisk, which is how the kernel finds it.
+
+UCFLAGS := -Wall -Wextra -std=gnu11 -O1 \
+	-ffreestanding -fno-stack-protector -fno-stack-check -fno-pic \
+	-fno-omit-frame-pointer \
+	-m64 -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone -Iuser
+
+ULDFLAGS := -nostdlib -static -T user/linker.ld
+
+USER_PROGS := ramdisk/bin/hello
+
+ramdisk/bin/%: user/%.c user/syscall.h user/linker.ld
+	@mkdir -p $(@D)
+	$(CC) $(UCFLAGS) -c $< -o obj/user_$*.o
+	$(LD) $(ULDFLAGS) obj/user_$*.o -o $@
+
 # the ramdisk is a plain tar. --format=ustar because thats the one the
 # kernel knows how to read, and the flags after it keep the archive
 # byte-identical between builds so the iso doesnt churn
 RAMDISK := bin/ramdisk.tar
 RAMDISK_FILES := $(shell find ramdisk -type f 2>/dev/null)
 
-$(RAMDISK): $(RAMDISK_FILES)
+$(RAMDISK): $(USER_PROGS) $(RAMDISK_FILES)
 	@mkdir -p $(@D)
 	tar --format=ustar --sort=name --owner=0 --group=0 --numeric-owner \
 		--mtime=@0 -cf $@ -C ramdisk .
@@ -118,7 +139,8 @@ HOSTCC    := gcc
 HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 
 TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
-             bin/tests/ksyms bin/tests/rtc bin/tests/ramdisk \
+             bin/tests/ksyms bin/tests/rtc bin/tests/ramdisk bin/tests/elf \
+             bin/tests/syscall \
              bin/tests/keyboard bin/tests/serial \
              bin/tests/shell bin/tests/switch
 
@@ -129,6 +151,9 @@ bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
                     kernel/src/lib/string.c
 bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c
 bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c
+bin/tests/syscall:  tests/test_syscall.c  kernel/src/cpu/syscall.c
+bin/tests/elf:      tests/test_elf.c      kernel/src/fs/elf.c \
+                    kernel/src/lib/string.c
 bin/tests/ramdisk:  tests/test_ramdisk.c  kernel/src/fs/ramdisk.c \
                     kernel/src/lib/string.c
 bin/tests/gdt:      tests/test_gdt.c      kernel/src/cpu/gdt.c
@@ -138,8 +163,10 @@ bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
                     kernel/src/drivers/input.c
 bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c \
+                    kernel/src/fs/ramdisk.c \
                     kernel/src/shell/shell.c kernel/src/version.h
-bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c
+bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c \
+                           kernel/src/fs/ramdisk.c
 
 # SRCS overrides what gets compiled, for tests that #include a kernel
 # .c file directly -- that file still belongs in the prerequisites so
@@ -160,7 +187,7 @@ bin/tests/switch: tests/test_switch.c obj/tests/switch.asm.o
 	$(HOSTCC) $(HOSTFLAGS) -no-pie $^ -o $@
 
 .PHONY: test
-test: checkfmt $(RAMDISK) $(TEST_BINS)
+test: checkfmt $(USER_PROGS) $(RAMDISK) $(TEST_BINS)
 	@fail=0; \
 	for t in $(TEST_BINS); do \
 		printf '  %-10s ' "$$(basename $$t)"; \

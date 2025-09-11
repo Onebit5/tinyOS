@@ -118,6 +118,34 @@ int main(void) {
     check_maps(pml4, mis, 0x1000, "misaligned base still translates");
     check_maps(pml4, mis + 0x300000, 0x301000, "and so does the far end");
 
+    /* ---- the user bit has to be granted the whole way down ----
+     * the cpu ANDs U/S across pml4, pdpt, pd and pt, so a leaf marked
+     * user under intermediates that are not is unreachable from ring 3
+     * -- and it looks exactly like a correct mapping in a dump */
+    {
+        uint64_t upml4 = vmm_new_address_space();
+        uint64_t uva = 0x400000;
+        CHECK(vmm_map_range(upml4, uva, 0x900000, 4096, PTE_USER | PTE_WRITE),
+              "map a page for ring 3");
+        CHECK(vmm_flags(upml4, uva) & PTE_USER, "the leaf says user");
+
+        uint64_t *t = (uint64_t *)(arena + upml4);
+        uint64_t pml4e = t[(uva >> 39) & 0x1ff];
+        CHECK(pml4e & PTE_USER, "and so does the pml4 entry");
+        t = (uint64_t *)(arena + (pml4e & 0x000ffffffffff000ull));
+        uint64_t pdpte = t[(uva >> 30) & 0x1ff];
+        CHECK(pdpte & PTE_USER, "and the pdpt entry");
+        t = (uint64_t *)(arena + (pdpte & 0x000ffffffffff000ull));
+        CHECK(t[(uva >> 21) & 0x1ff] & PTE_USER, "and the pd entry");
+
+        /* a kernel mapping sharing the path must not become reachable */
+        CHECK(vmm_map_range(upml4, uva + 0x1000, 0x901000, 4096, PTE_WRITE),
+              "map a kernel-only page beside it");
+        CHECK(!(vmm_flags(upml4, uva + 0x1000) & PTE_USER),
+              "its leaf stays supervisor-only even though the tables above "
+              "it are now user-accessible");
+    }
+
     /* ---- unmapping, incl. splitting a huge page ---- */
     CHECK(vmm_unmap_page(pml4, 0x400000), "unmap the small page");
     CHECK(vmm_translate(pml4, 0x400000) == VMM_NO_MAPPING, "and its gone");

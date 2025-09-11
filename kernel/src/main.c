@@ -6,6 +6,7 @@
 #include "cpu/idt.h"
 #include "cpu/pic.h"
 #include "cpu/tss.h"
+#include "cpu/syscall.h"
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "drivers/keyboard.h"
@@ -106,6 +107,33 @@ static void memory_selftest(void) {
     }
 }
 
+/* what the user actually sees at boot: the name, the contract, and
+ * whatever welcome.txt has to say. everything the drivers had to report
+ * went to serial and is still there under `dmesg` */
+static void greet(void) {
+    console_clear();
+
+    console_set_colors(0x45e653, 0x101018);
+    kprintf("tinyOS v%s\n\n", VERSION);
+
+    console_set_colors(0x7b8ce0, 0x101018);
+    kprintf("Thou art I... And I am thou...\n");
+    kprintf("Thou hast established a new bond...\n\n");
+    kprintf("Thou shalt be blessed when creating\n");
+    kprintf("Personas of the Computer's Arcana...\n\n");
+
+    console_set_colors(0xc8c8d0, 0x101018);
+
+    struct ramdisk_file f;
+    if (ramdisk_open("welcome.txt", &f)) {
+        const char *p = f.data;
+        for (uint64_t i = 0; i < f.size; i++) {
+            kprintf("%c", p[i]);
+        }
+        kprintf("\n");
+    }
+}
+
 /* the shell runs here rather than on the boot thread, because this
  * stack came from the pmm. that is what lets the boot thread walk away
  * from limine's stack and lets us hand limine's memory back */
@@ -113,8 +141,13 @@ static void shell_thread(void *arg) {
     (void)arg;
 
     uint64_t gained = pmm_reclaim_bootloader();
-    kprintf("reclaimed %lu KiB of bootloader memory (%lu MiB usable now)\n\n",
+    kprintf("reclaimed %lu KiB of bootloader memory (%lu MiB usable now)\n",
             gained / 1024, pmm_total_bytes() / (1024 * 1024));
+    kprintf("boot complete, handing the screen to the shell\n\n");
+
+    /* the screen is the user's from here */
+    kprintf_to_console(true);
+    greet();
 
     shell_run();
 }
@@ -143,18 +176,12 @@ void kmain(void) {
         kprintf("console refused %u bpp, serial only from here\n", fb->bpp);
     }
 
-    /* the banner. green name because we earned it */
-    console_set_colors(0x45e653, 0x101018);
-    kprintf("tinyOS v%s\n\n", VERSION);
+    /* from here until the shell is ready, everything goes to serial and
+     * the log but not to the screen. all of it is worth having when
+     * something breaks and none of it is worth reading when it doesnt */
+    kprintf_to_console(false);
 
-    /* velvet room blue, obviously */
-    console_set_colors(0x7b8ce0, 0x101018);
-    kprintf("Thou art I... And I am thou...\n");
-    kprintf("Thou hast established a new bond...\n\n");
-    kprintf("Thou shalt be blessed when creating\n");
-    kprintf("Personas of the Computer's Arcana...\n\n");
-
-    console_set_colors(0xc8c8d0, 0x101018);
+    kprintf("tinyOS v%s\n", VERSION);
     kprintf("framebuffer : %lux%lu @ %u bpp, pitch %lu bytes, at %p\n",
             fb->width, fb->height, fb->bpp, fb->pitch, fb->address);
     kprintf("font        : spleen 8x16 (bsd 2-clause)\n");
@@ -181,7 +208,10 @@ void kmain(void) {
     /* needs the pmm for its stacks, so it waits until now */
     tss_init();
     idt_set_ist(8, IST_DOUBLE_FAULT);
-    kprintf("  -> tss loaded, double faults land on their own stack\n\n");
+    kprintf("  -> tss loaded, double faults land on their own stack\n");
+
+    syscall_init();
+    kprintf("  -> syscall/sysret armed, ring 3 has a way in\n\n");
 
     /* before the shell reclaims limine's memory, since the module list
      * we read this out of is sitting in it */
@@ -201,10 +231,6 @@ void kmain(void) {
 
     asm volatile ("sti");
 
-    console_set_colors(0x7b8ce0, 0x101018);
-    kprintf("The contract hath been sealed.\n");
-    kprintf("Speak thy will, and it shall be written...\n\n");
-    console_set_colors(0xc8c8d0, 0x101018);
 
     /* the boot thread's work is finished. it has to actually leave --
      * its stack is limine's, sitting in the memory the shell is about

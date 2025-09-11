@@ -39,6 +39,13 @@ int input_getchar(void) {
     return c;
 }
 
+int input_peek(void) {
+    uint64_t flags = irq_save();
+    int c = (tail == head) ? -1 : buf[tail];
+    irq_restore(flags);
+    return c;
+}
+
 bool input_haskey(void) {
     return tail != head;
 }

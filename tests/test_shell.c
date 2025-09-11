@@ -37,6 +37,18 @@ uint64_t pmm_free_bytes(void) { return 2045ull * 1024 * 1024; }
 uint64_t kheap_total_bytes(void) { return 36 * 1024; }
 uint64_t kheap_used_bytes(void) { return 512; }
 void sched_dump(void) { kprintf("<PS>"); }
+void klog_dump(void) { kprintf("<DMESG>"); }
+static bool run_ok = true;
+static const char *ran_path;
+#include "sched/usermode.h"
+const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
+static const char *run_error = "not an elf";
+bool user_run(const char *path, const char **error) {
+    ran_path = path;
+    if (run_ok) return true;
+    *error = run_error;
+    return false;
+}
 void vmm_dump(uint64_t v) { kprintf("<VMM %#lx>", v); }
 void kbacktrace(uint64_t rbp, uint64_t rip) { (void)rbp; (void)rip; kprintf("<BT>"); }
 void system_poweroff(void) { kprintf("<POWEROFF>"); exit(0); }
@@ -52,25 +64,11 @@ void console_size(size_t *c, size_t *r, size_t *w, size_t *h) {
 }
 const unsigned long ksym_count = 442;
 
-/* a tiny stand-in ramdisk */
+/* the real ramdisk parser, mounted on the real archive the build
+ * produces. the stubs that used to live here handed out tidy names
+ * like "motd.txt", while tar actually stores "./motd.txt" -- so the
+ * tests agreed with themselves and disagreed with the kernel */
 #include "fs/ramdisk.h"
-static bool rd_present = true;
-static const struct ramdisk_file rd_files[] = {
-    { "motd.txt", "hee-ho\n", 7 },
-    { "empty/",   "",          0 },
-};
-bool ramdisk_present(void) { return rd_present; }
-size_t ramdisk_count(void) { return 2; }
-uint64_t ramdisk_bytes(void) { return 1024; }
-bool ramdisk_stat(size_t i, struct ramdisk_file *out) {
-    if (i >= 2) return false;
-    *out = rd_files[i];
-    return true;
-}
-bool ramdisk_open(const char *name, struct ramdisk_file *out) {
-    if (strcmp(name, "motd.txt") == 0) { *out = rd_files[0]; return true; }
-    return false;
-}
 
 #include "sched/sched.h"
 size_t sched_thread_count(void) { return 4; }
@@ -131,6 +129,24 @@ static void run(const char *line) {
 }
 
 int main(void) {
+    /* mount the archive the build just made, so completion is exercised
+     * against the names the kernel really sees */
+    {
+        FILE *fp = fopen("bin/ramdisk.tar", "rb");
+        if (fp == NULL) {
+            printf("FAIL: no bin/ramdisk.tar -- run `make bin/ramdisk.tar`\n");
+            return 1;
+        }
+        static uint8_t tarbytes[1024 * 1024];
+        size_t n = fread(tarbytes, 1, sizeof tarbytes, fp);
+        fclose(fp);
+        ramdisk_mount(tarbytes, n);
+        if (!ramdisk_present()) {
+            printf("FAIL: the archive did not parse\n");
+            return 1;
+        }
+    }
+
     /* ---- splitting ---- */
     check_split("help", 1, "help", NULL);
     check_split("echo hello", 2, "echo", "hello");
@@ -280,6 +296,7 @@ int main(void) {
         CHECK(strcmp(line, "uptime") == 0 && len == 6 && pos == 6,
               "a unique prefix completes to the whole command");
 
+        /* several candidates sharing no more letters: list them */
         strcpy(line, "c"); len = 1; pos = 1;
         out_reset();
         complete(line, &len, &pos);
@@ -288,17 +305,95 @@ int main(void) {
         CHECK(strstr(out, "clear") && strstr(out, "crash"),
               "and shows what it could have meant");
 
+        /* several candidates that DO share letters: fill those in and
+         * say nothing. `re` can only be reboot, `p` is poweroff or
+         * persona or ps, but `po` is only poweroff */
+        strcpy(line, "po"); len = 2; pos = 2;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "poweroff") == 0, "a unique-enough prefix fills in");
+
+        /* an empty word must do nothing at all -- thats what help is for */
+        strcpy(line, ""); len = 0; pos = 0;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(out_len == 0 && len == 0,
+              "a bare tab lists nothing, since `help` exists");
+
+        /* a bare tab after a command that takes a filename should
+         * answer, unlike a bare tab in the command position -- there is
+         * no `help` listing files */
+        strcpy(line, "cat "); len = 4; pos = 4;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(out_len > 0, "cat<tab> with nothing typed offers something");
+
+        strcpy(line, "run "); len = 4; pos = 4;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(out_len > 0, "and so does run<tab>");
+
+        /* run completes a nested path, which is where bin/hello lives */
+        strcpy(line, "run bin/h"); len = 9; pos = 9;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "run bin/hello") == 0,
+              "run completes bin/hello from a partial path");
+
+        /* directories are not worth offering */
+        strcpy(line, "cat bin"); len = 7; pos = 7;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat bin/hello") == 0,
+              "completing `bin` skips the directory entry and finds the file");
+
+        /* filenames after cat */
+        strcpy(line, "cat mo"); len = 6; pos = 6;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat motd.txt") == 0 && pos == 12,
+              "cat completes a filename out of the ramdisk");
+
+        /* completing mid-line keeps whatever followed */
+        strcpy(line, "cat mo done"); len = 11; pos = 6;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat motd.txt done") == 0,
+              "and the rest of the line survives the insert");
+
         strcpy(line, "zzz"); len = 3; pos = 3;
         out_reset();
         complete(line, &len, &pos);
         CHECK(strcmp(line, "zzz") == 0 && out_len == 0,
               "an unmatchable prefix is left in peace");
 
-        strcpy(line, "echo up"); len = 7; pos = 7;
+        strcpy(line, "echo mo"); len = 7; pos = 7;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "echo up") == 0 && out_len == 0,
-              "completion does not fire on later words");
+        CHECK(strcmp(line, "echo mo") == 0 && out_len == 0,
+              "only commands that take a file complete one -- echo gets nothing");
+
+        strcpy(line, "echo "); len = 5; pos = 5;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(out_len == 0, "nor does a bare tab after echo");
+
+        /* an unknown command offers nothing after it either */
+        strcpy(line, "zzz mo"); len = 6; pos = 6;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(out_len == 0, "an unknown command has no filenames to offer");
+
+        /* complete() must cope with a line the editor has not
+         * terminated, which is the state it is really called in */
+        memset(line, 'X', LINE_MAX);
+        line[0]='c'; line[1]='a'; line[2]='t'; line[3]=' ';
+        line[4]='m'; line[5]='o';
+        len = 6; pos = 6;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat motd.txt") == 0,
+              "an unterminated buffer still completes correctly");
     }
 
     /* ---- the new commands ---- */
@@ -339,22 +434,78 @@ int main(void) {
     /* ---- the ramdisk ---- */
     run("ls");
     CHECK(strstr(out, "motd.txt") != NULL, "ls lists a file");
-    CHECK(strstr(out, "empty/") == NULL,
-          "and skips the directory entries tar leaves in the archive");
+    CHECK(strstr(out, "in 5 files") != NULL,
+          "and counts files, not the directory entries tar leaves behind");
+    CHECK(strstr(out, "bin/hello") != NULL, "and the nested one");
+    CHECK(strstr(out, "./") == NULL,
+          "and prints paths you can actually retype -- no leading ./");
 
     run("cat motd.txt");
-    CHECK(strcmp(out, "hee-ho\n") == 0, "cat prints the file and nothing else");
+    CHECK(strstr(out, "Thou art I") != NULL, "cat prints the real file");
 
     run("cat nope.txt");
     CHECK(strstr(out, "no such file") != NULL, "and says so when it isnt there");
 
+    run("cat hello");
+    CHECK(strstr(out, "bin/hello") != NULL, "cat suggests the path too");
+
     run("cat");
     CHECK(strstr(out, "cat <file>") != NULL, "bare cat explains itself");
 
-    rd_present = false;
-    run("ls");
-    CHECK(strstr(out, "no ramdisk") != NULL, "ls copes with no ramdisk at all");
-    rd_present = true;
+    /* the file that matters, by the exact path the shell must accept */
+    run("cat bin/hello");
+    CHECK(out_len > 0, "cat can reach bin/hello");
+
+    /* cat takes several files at once */
+    run("cat motd.txt motd.txt");
+    {
+        const char *first = strstr(out, "Thou art I");
+        CHECK(first && strstr(first + 1, "Thou art I"),
+              "cat concatenates, as named");
+    }
+
+    run("cat motd.txt nope.txt");
+    CHECK(strstr(out, "Thou art I") && strstr(out, "no such file"),
+          "and keeps going past one that is missing");
+
+    run("dmesg");
+    CHECK(strcmp(out, "<DMESG>") == 0, "dmesg reaches the log");
+
+    /* a near miss gets a suggestion rather than a shrug */
+    run("dmseg");
+    CHECK(strstr(out, "didst thou mean 'dmesg'") != NULL,
+          "one candidate by first letter earns a suggestion");
+    run("qqq");
+    CHECK(strstr(out, "try 'help'") != NULL,
+          "no candidate falls back to pointing at help");
+
+    /* running a program */
+    ran_path = NULL; run_ok = true;
+    run("run bin/hello");
+    CHECK(ran_path && strcmp(ran_path, "bin/hello") == 0,
+          "run passes the path through to the loader");
+
+    run_ok = false;
+    run("run junk");
+    CHECK(strstr(out, "cannot run junk") && strstr(out, "not an elf"),
+          "and reports why the loader refused");
+
+    /* the mistake a person actually makes: the bare name of a file that
+     * lives in a directory. we do not search paths, so say what they
+     * meant rather than just refusing */
+    run_error = USER_RUN_NO_SUCH_FILE;
+    run("run hello");
+    CHECK(strstr(out, "bin/hello") != NULL,
+          "`run hello` points at bin/hello instead of just refusing");
+
+    run("run nowhere");
+    CHECK(strstr(out, "`ls`") != NULL,
+          "and something with no near match points at ls and tab");
+    run_error = "not an elf";
+    run_ok = true;
+
+    run("run");
+    CHECK(strstr(out, "run <program>") != NULL, "bare run explains itself");
 
     /* ---- who we are ---- */
     run("arcana");
