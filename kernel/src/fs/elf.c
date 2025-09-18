@@ -93,7 +93,8 @@ bool elf_is_loadable(const void *image, uint64_t size, const char **why) {
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 
-struct elf_load_result elf_load(const void *image, uint64_t size) {
+struct elf_load_result elf_load(const void *image, uint64_t size,
+                                uint64_t pml4) {
     struct elf_load_result r = { 0, 0, false, NULL };
 
     if (!elf_is_loadable(image, size, &r.error)) {
@@ -103,7 +104,6 @@ struct elf_load_result elf_load(const void *image, uint64_t size) {
     const struct elf64_header *h = image;
     const struct elf64_phdr *ph =
         (const struct elf64_phdr *)((const uint8_t *)image + h->phoff);
-    uint64_t pml4 = vmm_kernel_pml4();
 
     for (uint16_t i = 0; i < h->phnum; i++) {
         if (ph[i].type != PT_LOAD || ph[i].memsz == 0) {
@@ -145,7 +145,6 @@ struct elf_load_result elf_load(const void *image, uint64_t size) {
                 r.error = "could not map a segment";
                 return r;
             }
-            vmm_flush_page(v);
         }
 
         /* copy the file's bytes in through the direct map rather than

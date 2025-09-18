@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+struct addrspace;
+
 #define THREAD_NAME_MAX  16
 #define THREAD_STACK_PAGES 4        /* 16k of kernel stack each, plenty */
 
@@ -30,10 +32,10 @@ struct thread {
     void (*entry)(void *);
     void *arg;
 
-    /* ring 3 threads only: where their user stack was allocated, so it
-     * can go back to the pmm when they exit */
-    uint64_t user_stack_phys;
-    size_t   user_stack_pages;
+    /* ring 3 threads only. the address space owns every page in its
+     * lower half -- the program's image and its stack alike -- so
+     * there is nothing else to free by hand */
+    struct addrspace *space;
 
     int  id;
     char name[THREAD_NAME_MAX];

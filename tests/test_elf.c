@@ -83,6 +83,11 @@ int main(void) {
         }
     }
 
+    /* the loader itself needs a real cpu, but its contract is worth
+     * stating: it maps into a given address space rather than whatever
+     * happens to be live, which is what lets a program be built before
+     * anything switches to it */
+
     if (!failures) printf("all good\n");
     return failures;
 }

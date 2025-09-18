@@ -352,11 +352,15 @@ static void cmd_cat(int argc, char **argv) {
 
 static void cmd_run(int argc, char **argv) {
     if (argc < 2) {
-        kprintf("run <program> -- try `run bin/hello`\n");
+        kprintf("run <program> [&] -- try `run bin/hello`\n");
         return;
     }
+    /* a trailing & puts it in the background, so you can have two
+     * programs at once and watch them not interfere */
+    bool background = (argc >= 3 && strcmp(argv[2], "&") == 0);
+
     const char *why = NULL;
-    if (!user_run(argv[1], &why)) {
+    if (!user_run(argv[1], background, &why)) {
         if (why == USER_RUN_NO_SUCH_FILE) {
             missing("run", argv[1]);
         } else {
@@ -589,7 +593,7 @@ static const struct command commands[] = {
     { "echo",   "say something back",                   cmd_echo, false },
     { "ls",     "what the ramdisk carries",             cmd_ls, false },
     { "cat",    "read a file aloud",                    cmd_cat, true },
-    { "run",    "give a program the outer ring (waits for it)", cmd_run, true },
+    { "run",    "give a program the outer ring; & for background", cmd_run, true },
     { "dmesg",  "everything boot said while you werent looking", cmd_dmesg, false },
     { "arcana", "the rank of this bond, and its making", cmd_arcana, false },
     { "persona","the face this machine wears",          cmd_persona, false },

@@ -2,6 +2,7 @@
 #include "sched/sched.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "mm/addrspace.h"
 #include "mm/kmalloc.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
@@ -76,8 +77,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     t->next        = NULL;
     t->wait_next   = NULL;
     t->from_heap   = true;
-    t->user_stack_phys = 0;
-    t->user_stack_pages = 0;
+    t->space       = NULL;
 
     thread_set_name(t, name);
 
@@ -136,9 +136,11 @@ void thread_exit(void) {
  * the direct map first: the pmm is about to hand that frame to somebody
  * else, and they will expect to be able to reach it */
 void thread_free_stack(struct thread *t) {
-    if (t->user_stack_phys != 0) {
-        pmm_free_pages(t->user_stack_phys, t->user_stack_pages);
-        t->user_stack_phys = 0;
+    /* the address space owns the program's pages and its user stack, so
+     * letting it go reclaims all of them at once */
+    if (t->space != NULL) {
+        addrspace_destroy(t->space);
+        t->space = NULL;
     }
     if (t->stack_phys == 0) {
         return;     /* the boot thread's stack came from limine, not us */

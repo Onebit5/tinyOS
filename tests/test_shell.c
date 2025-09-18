@@ -43,8 +43,10 @@ static const char *ran_path;
 #include "sched/usermode.h"
 const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
 static const char *run_error = "not an elf";
-bool user_run(const char *path, const char **error) {
+static bool ran_background;
+bool user_run(const char *path, bool background, const char **error) {
     ran_path = path;
+    ran_background = background;
     if (run_ok) return true;
     *error = run_error;
     return false;
@@ -340,12 +342,25 @@ int main(void) {
         CHECK(strcmp(line, "run bin/hello") == 0,
               "run completes bin/hello from a partial path");
 
-        /* directories are not worth offering */
+        /* two programs live under bin/, so completing `bin` fills in as
+         * far as they agree and stops rather than picking one */
         strcpy(line, "cat bin"); len = 7; pos = 7;
         out_reset();
         complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat bin/") == 0,
+              "an ambiguous path completes to the shared prefix");
+
+        strcpy(line, "cat bin/h"); len = 9; pos = 9;
+        out_reset();
+        complete(line, &len, &pos);
         CHECK(strcmp(line, "cat bin/hello") == 0,
-              "completing `bin` skips the directory entry and finds the file");
+              "and one more character settles it");
+
+        strcpy(line, "run bin/c"); len = 9; pos = 9;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "run bin/counter") == 0,
+              "the other program completes too");
 
         /* filenames after cat */
         strcpy(line, "cat mo"); len = 6; pos = 6;
@@ -434,7 +449,7 @@ int main(void) {
     /* ---- the ramdisk ---- */
     run("ls");
     CHECK(strstr(out, "motd.txt") != NULL, "ls lists a file");
-    CHECK(strstr(out, "in 5 files") != NULL,
+    CHECK(strstr(out, "in 6 files") != NULL,
           "and counts files, not the directory entries tar leaves behind");
     CHECK(strstr(out, "bin/hello") != NULL, "and the nested one");
     CHECK(strstr(out, "./") == NULL,
@@ -506,6 +521,13 @@ int main(void) {
 
     run("run");
     CHECK(strstr(out, "run <program>") != NULL, "bare run explains itself");
+
+    ran_background = true;
+    run("run bin/hello");
+    CHECK(!ran_background, "run waits for its program by default");
+
+    run("run bin/hello &");
+    CHECK(ran_background, "a trailing & puts it in the background");
 
     /* ---- who we are ---- */
     run("arcana");

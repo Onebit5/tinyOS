@@ -6,24 +6,30 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.0.17** (**it runs programs.** ring 3, `syscall`/`sysret`, an elf loader, and a userspace hello that can touch nothing and must ask for everything. boot is quiet now too, and the prompt completes filenames)
+**version: 0.1.0** (**programs are isolated.** each one gets its own page tables, so two can link to the same addresses and never meet, and every page it touched goes back to the pmm when it dies. see [ROADMAP.md](ROADMAP.md) for where this goes next)
 
-## scope
-
-roughly in order, this is where the project is going:
+## what it does
 
 - [x] boot into 64-bit long mode via limine
-- [x] serial (com1) logging
+- [x] serial (com1) logging, and serial input too -- the shell answers either way
 - [x] framebuffer console with its own font rendering
 - [x] gdt/idt, real exception dumps instead of silent triple faults
 - [x] ps/2 keyboard driver (interrupt driven, no polling)
 - [x] physical page allocator + kmalloc heap on top
 - [x] pit timer + preemptive round-robin scheduler with kernel threads
-- [x] a small interactive shell (help, mem, uptime, ps, the classics)
-- [x] ci that builds the iso and boot-tests it in qemu on every push
+- [x] an interactive shell with line editing, history and tab completion
 - [x] our own page tables: W^X, NX, guard pages under thread stacks
+- [x] a tss with an IST, so a stack overflow reports instead of rebooting
+- [x] symbolized backtraces on panic
+- [x] a read-only ramdisk, unpacked from a tar limine hands us at boot
+- [x] ring 3, `syscall`/`sysret`, and an elf loader -- it runs programs
+- [x] an address space per program, reclaimed when it dies
+- [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
-non-goals for now: usermode (maybe someday), networking, filesystems, being useful in any practical sense
+where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
+filesystem on a real disk and a bootloader of our own.
+
+still a non-goal: networking, and being useful in any practical sense.
 
 ## building
 
@@ -161,9 +167,26 @@ three things about this were easy to get wrong and interesting to get right:
 
 **the user bit is ANDed down the whole chain.** a leaf marked `PTE_USER` under intermediate tables that are not is unreachable from ring 3, and it looks completely correct in any dump you care to print. the vmm now grants the bit at every level on the way to a user mapping, and widens tables that were built for a kernel mapping and later find themselves on the path to a user one. kernel leaves stay supervisor-only regardless. that one has a test that walks all four levels by hand.
 
+### one address space each
+
+every program has its own pml4. only the lower half differs -- the upper half, where the kernel and the direct map live, is shared *by reference*, so all of it stays reachable no matter whose tables are loaded. it has to be shared: the stack we are standing on when we switch cr3 is up there.
+
+sharing by copying the top-level entries means a change the kernel makes later (splitting a huge page for a guard page, say) is seen by every space at once. that only works because the kernel maps everything it will ever need before the first program exists and never adds a new top-level entry afterwards.
+
+it also means teardown is simple and complete: freeing the lower half of a space walks four levels and hands back the program's image, its stack, and the tables that described them. nothing to track by hand, and nothing left behind -- the test for it hands `addrspace.c` a pmm that refuses a double free and checks the books are *exactly* level after two spaces are created, used and destroyed.
+
+`run bin/counter &` twice starts two copies of the same program, at the same entry point, with the same stack address, each writing to a page it believes it owns alone -- and it is true. `ps` shows which threads are ring 3 and how many pages each is holding.
+
 `run` is a foreground command: it waits for the program and gives you the prompt back when it is done, which is what a shell does. `summon` is deliberately the opposite -- it puts a thread in the background and returns at once, because watching threads share a console *is* the demo. while a program runs, ctrl+c stops it; the wait peeks at the key rather than taking it, so a program sitting on `SYS_READ` still gets the input meant for it.
 
-what is missing is honest. there is one address space, so every program links to the same addresses and only one can run at a time -- `run` says so rather than mapping the second one over the first. a program's pages are also not reclaimed when it exits, so each run leaks its image (a few pages). both go away with per-process address spaces, which is a milestone of its own and the spine of 0.1.0.
+what is missing, kept here where it stays uncomfortable:
+
+- no `fork`. `spawn` will be the shape instead, since fork without copy-on-write is an expensive way to waste memory.
+- no demand paging -- every page a program will ever touch is mapped before it starts.
+- the scheduler is round-robin with a fixed quantum and no priorities, so a busy thread and an idle one are treated identically.
+- `kill` refuses anything blocked on a waitq, because the queue holds a bare pointer and reaping it would be a use-after-free.
+- a program cannot open a file. it can be *loaded* from the ramdisk, but there is no `open` syscall yet, so `cat` remains a kernel command.
+- the ramdisk is read-only and lives in ram, which is why a real disk is on the roadmap.
 
 ## the ramdisk
 
@@ -183,6 +206,7 @@ $ make test
   kprintf    ok        formatting vs the real printf, 33 cases
   mm         ok        pmm + heap, incl. draining ram dry
   vmm        ok        page tables built and walked, 40+ cases
+  addrspace  ok        sharing, isolation, and a leak-free teardown
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -260,6 +284,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.0** — **programs are isolated.** each gets its own pml4, sharing only the kernel half, and by reference so the kernel stays reachable whichever tables are loaded -- it must, since the stack we switch on lives there. two copies of the same program now run at once at identical addresses without meeting. teardown walks the lower half and hands back the image, the stack and the page tables together, which retires the leak 0.0.17 shipped with. `run prog &` for background, `ps` showing which threads are ring 3 and how much memory each holds, and `bin/counter` as a second program that exists to be run twice. plus [ROADMAP.md](ROADMAP.md), which lays out the eleven steps of 0.1.x -- from exit codes and a wider syscall table up to a filesystem on a real disk and a bootloader of our own.
 - **0.0.17** — **it runs programs.** ring 3 via `iretq` into a fabricated frame, `syscall`/`sysret` with STAR/LSTAR/SFMASK, a static elf64 loader, per-thread kernel stacks tracked in the tss and for `syscall`, and `user/hello.c` -- a real program with no libc that prints and sleeps and exits, all through six syscalls. every pointer ring 3 hands the kernel is checked against the page tables before it is touched, mapped *and* user, so a program cannot make the kernel fault by lying -- and the refusals are tested harder than the successes, since they are the actual boundary. found a genuine bug on the way: intermediate page table entries never set `PTE_USER`, and since the cpu ANDs that bit down the whole chain, every user mapping would have been unreachable while looking perfectly correct in a dump. boot is quiet now -- the driver chatter goes to serial and `dmesg`, and the screen gets the banner and `welcome.txt`. tab completes filenames after any command that takes one (`cat`, `run`), fills in the longest shared prefix, and does nothing on an empty word *in the command position* -- listing every command is what `help` is for, but after `cat ` there is no such list to consult, so an empty word there is worth answering. `run` waits for its program like a foreground command should, with ctrl+c to stop it. also `cat` takes several files, unknown commands suggest the nearest match (and a bare filename points at the path it lives under), `ls` prints paths you can actually retype, and `ps` prints in id order.
 - **0.0.16** — files. `ramdisk/` becomes a ustar tar at build time, limine passes it as a module, and `ls`/`cat` read straight out of it with no copying. the parser is fed hand-built archives in the tests -- block-sized files, empty files, gnu tar's leading `./`, a header with no magic, a size field that lies -- and then the real archive the build produces, which is the one that catches what tar actually emits. also ctrl+l to clear without losing the line, and two commands that had to be persona-inspired: `arcana` for the version, rendered as the rank of a social link, and `persona`, a fastfetch that shows the machine's face along with what cpu it wears.
 - **0.0.15** — a real line editor. cursor movement and mid-line editing, ctrl+a/e/w/u/k, del, and tab completion. the enabling change was making the console's `\b` non-destructive like an actual terminal, which meant giving it a shadow buffer of the text on screen so the block cursor can sit on a character and put it back afterwards. new commands: `poweroff` (so you stop killing qemu), `date` off the cmos clock, `hexdump` that checks the page tables before reading, `kill`, `history` and `time`. the rtc's decoding is split from its io and tested -- bcd, the pm bit hiding in the top of the hour byte, and 12am being hour zero are each their own small trap.

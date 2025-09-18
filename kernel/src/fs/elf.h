@@ -20,8 +20,12 @@ struct elf_load_result {
  * politely rather than mapping nonsense */
 bool elf_is_loadable(const void *image, uint64_t size, const char **why);
 
-/* map every PT_LOAD segment into the current address space with user
- * permissions, copying from the image. frames come from the pmm */
-struct elf_load_result elf_load(const void *image, uint64_t size);
+/* map every PT_LOAD segment into the given address space with user
+ * permissions, copying from the image. frames come from the pmm.
+ *
+ * the space does not have to be the live one: the copy goes through the
+ * direct map, which is mapped identically everywhere */
+struct elf_load_result elf_load(const void *image, uint64_t size,
+                                uint64_t pml4);
 
 #endif

@@ -2,6 +2,7 @@
 #include "sched/thread.h"
 #include "drivers/pit.h"
 #include "mm/pmm.h"
+#include "mm/addrspace.h"
 #include "mm/kmalloc.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
@@ -10,6 +11,7 @@
 #include "cpu/tss.h"
 #include "cpu/syscall.h"
 #include "mm/pmm.h"
+#include "mm/addrspace.h"
 
 /* how many ticks a thread gets before we take the cpu back. 5 ticks at
  * 100hz = 50ms, short enough to look instant, long enough that we're
@@ -122,6 +124,11 @@ static void schedule(void) {
     next->state = THREAD_RUNNING;
     current = next;
 
+    /* whose memory is real from here on. the kernel half is identical
+     * in every space, so the stack we are standing on survives the
+     * change -- that is the whole reason the upper half is shared */
+    addrspace_switch(next->space);
+
     /* both of these say "where does the kernel stand when this thread
      * traps in from ring 3". the tss answers it for interrupts, the
      * global for `syscall`, and they must follow the thread or two
@@ -201,7 +208,15 @@ static void dump_one(struct thread *t) {
     for (size_t i = strlen(t->name); i < THREAD_NAME_MAX; i++) {
         kprintf(" ");
     }
-    kprintf("%s", thread_state_name(t->state));
+    kprintf("%-9s", thread_state_name(t->state));
+
+    /* a thread with an address space of its own is a program in ring 3
+     * rather than a part of the kernel, and it is worth seeing which */
+    if (t->space != NULL) {
+        kprintf("  ring 3, %lu pages", addrspace_frames(t->space));
+    } else {
+        kprintf("  kernel");
+    }
     if (t->state == THREAD_SLEEPING) {
         kprintf(" (%lu ticks)", t->wake_at > pit_ticks()
                                 ? t->wake_at - pit_ticks() : 0);
@@ -215,7 +230,7 @@ static void dump_one(struct thread *t) {
 void sched_dump(void) {
     uint64_t flags = irq_save();
 
-    kprintf("  id  name             state\n");
+    kprintf("  id  name             state    where\n");
 
     /* the ring is in newest-first order, because sched_add splices each
      * new thread in just after current. that is fine for scheduling and
