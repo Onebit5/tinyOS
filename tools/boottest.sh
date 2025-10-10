@@ -43,6 +43,8 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'run bin/counter &\r'; sleep 1
     printf 'run bin/counter &\r'; sleep 3
     printf 'ps\r';     sleep 4
+    printf 'run bin/fail\r'; sleep 2
+    printf 'ps\r';     sleep 1
     printf 'dmesg\r';  sleep 2
 } | timeout 60 qemu-system-x86_64 \
         -M q35 -m 2G -cdrom "$ISO" \
@@ -99,7 +101,9 @@ check 'registers kept'  'My purpose is fulfilled'
 check 'program exited'  'sea of souls'
 check 'two at once'     '(background)'
 check 'isolated memory' 'this memory is mine alone'
-check 'ps sees ring 3'  'ring 3,'
+check 'ps has processes' 'processes'
+check 'pids assigned'    'is pid'
+check 'exit code kept'   'exited with 42'
 check 'dmesg works'    'cr3 is ours'
 
 # and did it stay alive rather than falling over

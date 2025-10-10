@@ -11,6 +11,8 @@
 #include "mm/kmalloc.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "sched/process.h"
+#include "drivers/pit.h"
 
 const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
 
@@ -35,7 +37,33 @@ static void user_thread_start(void *arg) {
     enter_usermode(entry, stack_top, GDT_USER_CODE3, GDT_USER_DATA3);
 }
 
+/* collect anything that finished in the background and was never
+ * waited for. a real system has the parent do this on its own schedule;
+ * here the next `run` sweeps up, which keeps the table from filling
+ * with the remains of programs nobody asked about */
+static void reap_abandoned(void) {
+    /* collecting one renumbers the walk under us, so finish and start
+     * over rather than trying to carry on from where we were */
+    bool collected_one = true;
+    while (collected_one) {
+        collected_one = false;
+        for (size_t i = 0; ; i++) {
+            const struct process *p = process_at(i);
+            if (p == NULL) {
+                break;
+            }
+            if (p->exited) {
+                process_collect(p->pid, NULL);
+                collected_one = true;
+                break;
+            }
+        }
+    }
+}
+
 bool user_run(const char *path, bool background, const char **error) {
+    reap_abandoned();
+
     struct ramdisk_file f;
     if (!ramdisk_open(path, &f)) {
         *error = USER_RUN_NO_SUCH_FILE;
@@ -91,20 +119,37 @@ bool user_run(const char *path, bool background, const char **error) {
     start->entry = loaded.entry;
     start->stack_top = USER_STACK_TOP & ~0xfull;   /* sysv wants 16-aligned */
 
+    /* the process comes first, because it is what outlives the thread
+     * and holds the exit code somebody will want to read */
+    int pid = process_create(path, 0, pit_uptime_ms());
+    if (pid == 0) {
+        kfree(start);
+        addrspace_destroy(space);
+        *error = "the process table is full";
+        return false;
+    }
+
     struct thread *t = thread_create(path, user_thread_start, start);
     if (t == NULL) {
+        int ignored;
+        process_exited(pid, PROCESS_KILLED, pit_uptime_ms());
+        process_collect(pid, &ignored);
         kfree(start);
         addrspace_destroy(space);
         *error = "no memory for a thread";
         return false;
     }
     t->space = space;
+    t->pid   = pid;
+    process_set_thread(pid, t->id);
 
     int id = t->id;
-    kprintf("[kernel] %s entered ring 3 at %p, thread %d%s\n",
-            path, (void *)loaded.entry, id, background ? " (background)" : "");
+    kprintf("[kernel] %s is pid %d, ring 3 at %p%s\n",
+            path, pid, (void *)loaded.entry, background ? " (background)" : "");
 
     if (background) {
+        /* nobody is waiting, so nobody will collect it. leave the slot
+         * for `ps` to show and let the next `run` sweep it up */
         return true;
     }
 
@@ -124,12 +169,22 @@ bool user_run(const char *path, bool background, const char **error) {
             (void)input_getchar();
             kprintf("^C\n");
             if (sched_kill(id) != SCHED_KILL_OK) {
-                kprintf("[kernel] it is waiting on something and cannot be "
-                        "stopped safely -- see `kill`\n");
+                kprintf("[kernel] it would not stop\n");
                 return true;
             }
         }
         sleep_ms(20);
+    }
+
+    /* collect it: take the code and free the slot, which is the whole
+     * reason the process outlived the thread */
+    int code = 0;
+    if (process_collect(pid, &code)) {
+        if (code == PROCESS_KILLED) {
+            kprintf("[kernel] pid %d was killed\n", pid);
+        } else if (code != 0) {
+            kprintf("[kernel] pid %d exited with %d\n", pid, code);
+        }
     }
     return true;
 }

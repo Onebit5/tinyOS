@@ -7,6 +7,8 @@
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "cpu/interrupts.h"
+#include "sched/process.h"
+#include "drivers/pit.h"
 
 static int next_id = 1;     /* 0 belongs to the boot thread */
 
@@ -45,7 +47,7 @@ static void thread_bootstrap(void) {
 
     struct thread *me = sched_current();
     me->entry(me->arg);
-    thread_exit();
+    thread_exit(0);     /* a thread that simply returned did fine */
 }
 
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg) {
@@ -78,6 +80,8 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     t->wait_next   = NULL;
     t->from_heap   = true;
     t->space       = NULL;
+    t->waiting_on  = NULL;
+    t->pid         = 0;
 
     thread_set_name(t, name);
 
@@ -115,8 +119,14 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     return t;
 }
 
-void thread_exit(void) {
+void thread_exit(int code) {
     struct thread *me = sched_current();
+
+    /* tell the process table before the thread goes, because the
+     * process is what a parent will still be able to ask */
+    if (me->pid != 0) {
+        process_exited(me->pid, code, pit_uptime_ms());
+    }
 
     kprintf("[%s] hath returned to the sea of souls\n", me->name);
 

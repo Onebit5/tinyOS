@@ -425,11 +425,6 @@ int main(void) {
     CHECK(killed_id == 3 && strstr(out, "sea of souls"),
           "kill passes the id through and reports success");
 
-    kill_answer = SCHED_KILL_BLOCKED;
-    run("kill 4");
-    CHECK(strstr(out, "waiting on something") != NULL,
-          "a blocked thread is refused, with a reason");
-
     kill_answer = SCHED_KILL_PROTECTED;
     run("kill 1");
     CHECK(strstr(out, "wheel turning") != NULL, "idle is protected");
@@ -449,7 +444,7 @@ int main(void) {
     /* ---- the ramdisk ---- */
     run("ls");
     CHECK(strstr(out, "motd.txt") != NULL, "ls lists a file");
-    CHECK(strstr(out, "in 6 files") != NULL,
+    CHECK(strstr(out, "in 7 files") != NULL,
           "and counts files, not the directory entries tar leaves behind");
     CHECK(strstr(out, "bin/hello") != NULL, "and the nested one");
     CHECK(strstr(out, "./") == NULL,

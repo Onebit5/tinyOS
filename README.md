@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.0** (**programs are isolated.** each one gets its own page tables, so two can link to the same addresses and never meet, and every page it touched goes back to the pmm when it dies. see [ROADMAP.md](ROADMAP.md) for where this goes next)
+**version: 0.1.1** (**processes, not just threads.** a program has a pid, a parent, and an exit code that survives it -- the table outlives the thread, so there is something left to read when it dies. and `kill` finally works on a thread that is blocked)
 
 ## what it does
 
@@ -24,6 +24,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a read-only ramdisk, unpacked from a tar limine hands us at boot
 - [x] ring 3, `syscall`/`sysret`, and an elf loader -- it runs programs
 - [x] an address space per program, reclaimed when it dies
+- [x] a process table: pids, parents, and exit codes that outlive the thread
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -120,7 +121,7 @@ adjacent duplicates and empty lines dont make it into the history.
 
 all of that rests on one small change: the console used to treat `\b` as "move left and erase", which made `"\b \b"` work by accident. now it moves only, the way every real terminal does -- so `"\b \b"` still erases *and* a bare `\b` is non-destructive cursor movement that behaves identically on the framebuffer and down the serial line. the console grew a shadow buffer of what character is in each cell to go with it, because a block cursor sitting *on* a character has to put that character back when it moves away, and a framebuffer cannot tell you what used to be there.
 
-`hexdump` asks the page tables whether an address is mapped before reading it, so a typo prints `<not mapped>` instead of panicking. `kill` refuses to end a thread that is blocked on a waitq, and says why: the queue holds a bare pointer to it, and reaping something another structure still points at is a use-after-free waiting to happen.
+`hexdump` asks the page tables whether an address is mapped before reading it, so a typo prints `<not mapped>` instead of panicking. `kill` works on a thread in any state, including one blocked on a waitq -- it takes it off that queue first, which is what the back-pointer added in 0.1.1 is for.
 
 `summon pixie` and `summon jack-frost` spawn real kernel threads that count in the background while you keep typing -- that is the whole scheduler demo in one command. they speak eight times and then depart, which also gives the reaper something to clean up (watch `ps` before and after). they print over the top of your prompt while they run, which looks messy and is entirely honest: three threads are sharing one console and nobody is arbitrating.
 
@@ -167,6 +168,12 @@ three things about this were easy to get wrong and interesting to get right:
 
 **the user bit is ANDed down the whole chain.** a leaf marked `PTE_USER` under intermediate tables that are not is unreachable from ring 3, and it looks completely correct in any dump you care to print. the vmm now grants the bit at every level on the way to a user mapping, and widens tables that were built for a kernel mapping and later find themselves on the path to a user one. kernel leaves stay supervisor-only regardless. that one has a test that walks all four levels by hand.
 
+### processes outlive their threads
+
+a thread is reaped the instant it dies -- stack and address space handed straight back -- so an exit code kept on the thread would be gone before anyone could read it. the process table is the thing that outlives it: a fixed set of slots holding the pid, the parent, the name and how it ended, staying occupied until somebody collects them. a process that has finished but not been collected is what everyone else calls a zombie, and it is the only reason `run` can tell you a program exited 42.
+
+that also retired the oldest caveat in this file. `kill` used to refuse anything blocked on a waitq, because the queue held a bare pointer to a thread the reaper was about to free. threads now carry a pointer back to the queue they are parked on, so killing one takes it off that queue first -- and the refusal is gone.
+
 ### one address space each
 
 every program has its own pml4. only the lower half differs -- the upper half, where the kernel and the direct map live, is shared *by reference*, so all of it stays reachable no matter whose tables are loaded. it has to be shared: the stack we are standing on when we switch cr3 is up there.
@@ -184,7 +191,6 @@ what is missing, kept here where it stays uncomfortable:
 - no `fork`. `spawn` will be the shape instead, since fork without copy-on-write is an expensive way to waste memory.
 - no demand paging -- every page a program will ever touch is mapped before it starts.
 - the scheduler is round-robin with a fixed quantum and no priorities, so a busy thread and an idle one are treated identically.
-- `kill` refuses anything blocked on a waitq, because the queue holds a bare pointer and reaping it would be a use-after-free.
 - a program cannot open a file. it can be *loaded* from the ramdisk, but there is no `open` syscall yet, so `cat` remains a kernel command.
 - the ramdisk is read-only and lives in ram, which is why a real disk is on the roadmap.
 
@@ -207,6 +213,7 @@ $ make test
   mm         ok        pmm + heap, incl. draining ram dry
   vmm        ok        page tables built and walked, 40+ cases
   addrspace  ok        sharing, isolation, and a leak-free teardown
+  process    ok        pids, zombies, a full table, and a kill that races
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -284,6 +291,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.1** — processes. a program now has a pid, a parent and an exit code, kept in a table that outlives the thread that ran it -- which is the only way an exit code can survive, since the thread and its whole address space are gone the moment it dies. `run` reports how a program went; `ps` shows threads and processes as the different things they are. and the caveat that has been in this file since m6 is retired: threads carry a pointer back to the waitq they are parked on, so `kill` can take one off that queue before the reaper frees it, instead of refusing. `bin/fail` exists to exit 42 and prove the number gets home.
 - **0.1.0** — **programs are isolated.** each gets its own pml4, sharing only the kernel half, and by reference so the kernel stays reachable whichever tables are loaded -- it must, since the stack we switch on lives there. two copies of the same program now run at once at identical addresses without meeting. teardown walks the lower half and hands back the image, the stack and the page tables together, which retires the leak 0.0.17 shipped with. `run prog &` for background, `ps` showing which threads are ring 3 and how much memory each holds, and `bin/counter` as a second program that exists to be run twice. plus [ROADMAP.md](ROADMAP.md), which lays out the eleven steps of 0.1.x -- from exit codes and a wider syscall table up to a filesystem on a real disk and a bootloader of our own.
 - **0.0.17** — **it runs programs.** ring 3 via `iretq` into a fabricated frame, `syscall`/`sysret` with STAR/LSTAR/SFMASK, a static elf64 loader, per-thread kernel stacks tracked in the tss and for `syscall`, and `user/hello.c` -- a real program with no libc that prints and sleeps and exits, all through six syscalls. every pointer ring 3 hands the kernel is checked against the page tables before it is touched, mapped *and* user, so a program cannot make the kernel fault by lying -- and the refusals are tested harder than the successes, since they are the actual boundary. found a genuine bug on the way: intermediate page table entries never set `PTE_USER`, and since the cpu ANDs that bit down the whole chain, every user mapping would have been unreachable while looking perfectly correct in a dump. boot is quiet now -- the driver chatter goes to serial and `dmesg`, and the screen gets the banner and `welcome.txt`. tab completes filenames after any command that takes one (`cat`, `run`), fills in the longest shared prefix, and does nothing on an empty word *in the command position* -- listing every command is what `help` is for, but after `cat ` there is no such list to consult, so an empty word there is worth answering. `run` waits for its program like a foreground command should, with ctrl+c to stop it. also `cat` takes several files, unknown commands suggest the nearest match (and a bare filename points at the path it lives under), `ls` prints paths you can actually retype, and `ps` prints in id order.
 - **0.0.16** — files. `ramdisk/` becomes a ustar tar at build time, limine passes it as a module, and `ls`/`cat` read straight out of it with no copying. the parser is fed hand-built archives in the tests -- block-sized files, empty files, gnu tar's leading `./`, a header with no magic, a size field that lies -- and then the real archive the build produces, which is the one that catches what tar actually emits. also ctrl+l to clear without losing the line, and two commands that had to be persona-inspired: `arcana` for the version, rendered as the rank of a social link, and `persona`, a fastfetch that shows the machine's face along with what cpu it wears.

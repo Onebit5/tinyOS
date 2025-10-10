@@ -3,6 +3,7 @@
 #include "drivers/pit.h"
 #include "mm/pmm.h"
 #include "mm/addrspace.h"
+#include "sched/process.h"
 #include "mm/kmalloc.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
@@ -12,6 +13,7 @@
 #include "cpu/syscall.h"
 #include "mm/pmm.h"
 #include "mm/addrspace.h"
+#include "sched/process.h"
 
 /* how many ticks a thread gets before we take the cpu back. 5 ticks at
  * 100hz = 50ms, short enough to look instant, long enough that we're
@@ -155,9 +157,11 @@ void waitq_block(struct waitq *q) {
     /* interrupts are already off -- see the contract in sched.h.
      * we go on the queue and off the run queue in the same breath */
     current->wait_next = q->head;
+    current->waiting_on = q;
     q->head = current;
     current->state = THREAD_BLOCKED;
     schedule();
+    current->waiting_on = NULL;
     /* somebody woke us and the scheduler picked us back up */
 }
 
@@ -168,12 +172,32 @@ void waitq_wake_all(struct waitq *q) {
     while (t != NULL) {
         struct thread *next = t->wait_next;
         t->wait_next = NULL;
+        t->waiting_on = NULL;
         if (t->state == THREAD_BLOCKED) {
             t->state = THREAD_READY;
         }
         t = next;
     }
     q->head = NULL;
+
+    irq_restore(flags);
+}
+
+void waitq_remove(struct waitq *q, struct thread *t) {
+    uint64_t flags = irq_save();
+
+    /* walk with a pointer to the link rather than the node, so removing
+     * the head needs no special case */
+    struct thread **link = &q->head;
+    while (*link != NULL) {
+        if (*link == t) {
+            *link = t->wait_next;
+            t->wait_next = NULL;
+            t->waiting_on = NULL;
+            break;
+        }
+        link = &(*link)->wait_next;
+    }
 
     irq_restore(flags);
 }
@@ -210,12 +234,8 @@ static void dump_one(struct thread *t) {
     }
     kprintf("%-9s", thread_state_name(t->state));
 
-    /* a thread with an address space of its own is a program in ring 3
-     * rather than a part of the kernel, and it is worth seeing which */
-    if (t->space != NULL) {
-        kprintf("  ring 3, %lu pages", addrspace_frames(t->space));
-    } else {
-        kprintf("  kernel");
+    if (t->pid != 0) {
+        kprintf("  pid %d, %lu pages", t->pid, addrspace_frames(t->space));
     }
     if (t->state == THREAD_SLEEPING) {
         kprintf(" (%lu ticks)", t->wake_at > pit_ticks()
@@ -230,7 +250,8 @@ static void dump_one(struct thread *t) {
 void sched_dump(void) {
     uint64_t flags = irq_save();
 
-    kprintf("  id  name             state    where\n");
+    kprintf("threads\n");
+    kprintf("  id  name             state    running\n");
 
     /* the ring is in newest-first order, because sched_add splices each
      * new thread in just after current. that is fine for scheduling and
@@ -296,11 +317,19 @@ enum sched_kill_result sched_kill(int id) {
                 result = SCHED_KILL_SELF;
             } else if (t == idle_thread) {
                 result = SCHED_KILL_PROTECTED;
-            } else if (t->state == THREAD_BLOCKED) {
-                result = SCHED_KILL_BLOCKED;
             } else if (t->state == THREAD_DEAD) {
                 result = SCHED_KILL_NO_SUCH;    /* already gone */
             } else {
+                /* if it is parked on a queue, take it off before the
+                 * reaper frees it out from under that queue */
+                if (t->waiting_on != NULL) {
+                    struct waitq *q = t->waiting_on;
+                    t->waiting_on = NULL;
+                    waitq_remove(q, t);
+                }
+                if (t->pid != 0) {
+                    process_exited(t->pid, PROCESS_KILLED, pit_uptime_ms());
+                }
                 t->state = THREAD_DEAD;
                 result = SCHED_KILL_OK;
             }

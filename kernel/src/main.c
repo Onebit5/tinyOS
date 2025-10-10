@@ -235,5 +235,5 @@ void kmain(void) {
     /* the boot thread's work is finished. it has to actually leave --
      * its stack is limine's, sitting in the memory the shell is about
      * to reclaim, and you cannot free the ground you are standing on */
-    thread_exit();
+    thread_exit(0);
 }

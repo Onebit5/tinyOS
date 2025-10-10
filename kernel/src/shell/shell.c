@@ -546,10 +546,6 @@ static void cmd_kill(int argc, char **argv) {
     case SCHED_KILL_PROTECTED:
         kprintf("that one keeps the wheel turning. leave it be\n");
         break;
-    case SCHED_KILL_BLOCKED:
-        kprintf("thread %lu is waiting on something and cannot be freed\n"
-                "safely -- we have no way to take it off the queue yet\n", id);
-        break;
     }
 }
 

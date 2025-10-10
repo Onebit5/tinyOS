@@ -10,12 +10,12 @@ worth a paragraph in the changelog. the big one is at the bottom.
 
 ## 0.1.x — filling in what having processes implies
 
-**0.1.1 processes, not just threads.** exit codes carried back to
+**0.1.1 processes, not just threads.** ~~exit codes carried back to
 whoever waited. a real process table with a parent. `ps` splitting
 kernel threads from programs properly. `kill` learning to end a
 program rather than refusing anything blocked -- which needs threads to
 carry a back-pointer to the waitq they are parked on, the same gap that
-makes `kill` timid today.
+makes `kill` timid today.~~ **done in 0.1.1.**
 
 **0.1.2 more to ask for.** the syscall table is six calls wide. it
 wants `open`/`read`/`close` against the ramdisk so a program can read a

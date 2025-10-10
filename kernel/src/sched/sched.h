@@ -61,16 +61,16 @@ enum sched_kill_result {
     SCHED_KILL_NO_SUCH,
     SCHED_KILL_SELF,        /* the caller asked to end itself */
     SCHED_KILL_PROTECTED,   /* idle -- somebody has to take the cpu */
-    SCHED_KILL_BLOCKED,     /* parked on a waitq, see below */
 };
 
-/* mark a thread dead so the reaper collects it.
- *
- * a thread sitting on a waitq is refused, and that refusal is the
- * honest answer rather than a limitation to paper over: the waitq
- * holds a bare pointer to it, and reaping a thread that something else
- * still has a pointer to is a use-after-free waiting to happen. giving
- * threads a back-pointer to the queue they wait on would fix it */
+/* mark a thread dead so the reaper collects it. a thread parked on a
+ * waitq is taken off it first, which is the whole reason threads now
+ * carry a pointer to the queue they are waiting on */
 enum sched_kill_result sched_kill(int id);
+
+/* take one thread off a queue without waking it. used when a thread is
+ * killed while blocked -- the queue must not be left holding a pointer
+ * to something the reaper is about to free */
+void waitq_remove(struct waitq *q, struct thread *t);
 
 #endif

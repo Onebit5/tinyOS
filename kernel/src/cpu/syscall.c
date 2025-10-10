@@ -98,7 +98,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
 
     switch (nr) {
     case SYS_EXIT:
-        thread_exit();          /* never returns */
+        thread_exit((int)a0);   /* never returns */
     case SYS_WRITE:
         return sys_write(a0, a1);
     case SYS_READ:

@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 struct addrspace;
+struct waitq;
 
 #define THREAD_NAME_MAX  16
 #define THREAD_STACK_PAGES 4        /* 16k of kernel stack each, plenty */
@@ -45,7 +46,19 @@ struct thread {
     bool from_heap;
 
     struct thread *next;        /* circular run queue */
-    struct thread *wait_next;   /* the waitq we're parked on, if any */
+
+    /* the queue this thread is parked on, and the next one along it.
+     * the back-pointer is what lets somebody else take it off that
+     * queue -- without it the queue holds a bare pointer to a thread
+     * the reaper may free, and killing a blocked thread is a
+     * use-after-free waiting to happen */
+    struct waitq  *waiting_on;
+    struct thread *wait_next;
+
+    /* which program this thread is running, or 0 for a kernel thread.
+     * the process outlives the thread, so an exit code survives long
+     * enough for a parent to read it */
+    int pid;
 };
 
 const char *thread_state_name(enum thread_state s);
@@ -61,7 +74,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
 /* hand a dead thread's stack back to the pmm, guard page and all */
 void thread_free_stack(struct thread *t);
 
-/* leave. never returns, obviously */
-void thread_exit(void) __attribute__((noreturn));
+/* leave, with something to say about how it went. never returns */
+void thread_exit(int code) __attribute__((noreturn));
 
 #endif

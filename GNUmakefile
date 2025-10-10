@@ -83,7 +83,7 @@ UCFLAGS := -Wall -Wextra -std=gnu11 -O1 \
 
 ULDFLAGS := -nostdlib -static -T user/linker.ld
 
-USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter
+USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail
 
 ramdisk/bin/%: user/%.c user/syscall.h user/linker.ld
 	@mkdir -p $(@D)
@@ -140,7 +140,7 @@ HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 
 TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
              bin/tests/ksyms bin/tests/rtc bin/tests/ramdisk bin/tests/elf \
-             bin/tests/addrspace \
+             bin/tests/addrspace bin/tests/process \
              bin/tests/syscall \
              bin/tests/keyboard bin/tests/serial \
              bin/tests/shell bin/tests/switch
@@ -154,6 +154,8 @@ bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
                     kernel/src/lib/string.c
 bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c
 bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c
+bin/tests/process:  tests/test_process.c  kernel/src/sched/process.c \
+                    kernel/src/lib/string.c
 bin/tests/syscall:  tests/test_syscall.c  kernel/src/cpu/syscall.c
 bin/tests/elf:      tests/test_elf.c      kernel/src/fs/elf.c \
                     kernel/src/lib/string.c
