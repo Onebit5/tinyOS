@@ -61,19 +61,19 @@ static void reap_abandoned(void) {
     }
 }
 
-bool user_run(const char *path, bool background, const char **error) {
+int user_spawn(const char *path, int parent, const char **error) {
     reap_abandoned();
 
     struct ramdisk_file f;
     if (!ramdisk_open(path, &f)) {
         *error = USER_RUN_NO_SUCH_FILE;
-        return false;
+        return 0;
     }
 
     const char *why = NULL;
     if (!elf_is_loadable(f.data, f.size, &why)) {
         *error = why;
-        return false;
+        return 0;
     }
 
     /* its own memory. two programs can now link to the same addresses
@@ -81,14 +81,14 @@ bool user_run(const char *path, bool background, const char **error) {
     struct addrspace *space = addrspace_create(vmm_kernel_pml4());
     if (space == NULL) {
         *error = "no memory for an address space";
-        return false;
+        return 0;
     }
 
     struct elf_load_result loaded = elf_load(f.data, f.size, space->pml4);
     if (!loaded.ok) {
         addrspace_destroy(space);
         *error = loaded.error;
-        return false;
+        return 0;
     }
 
     /* a stack for ring 3: writable, never executable, mapped user */
@@ -96,7 +96,7 @@ bool user_run(const char *path, bool background, const char **error) {
     if (stack_phys == 0) {
         addrspace_destroy(space);
         *error = "no memory for a user stack";
-        return false;
+        return 0;
     }
     memset(pmm_phys_to_virt(stack_phys), 0, USER_STACK_PAGES * PAGE_SIZE);
 
@@ -107,26 +107,26 @@ bool user_run(const char *path, bool background, const char **error) {
         pmm_free_pages(stack_phys, USER_STACK_PAGES);
         addrspace_destroy(space);
         *error = "could not map a user stack";
-        return false;
+        return 0;
     }
 
     struct user_start *start = kmalloc(sizeof *start);
     if (start == NULL) {
         addrspace_destroy(space);   /* which owns the stack by now */
         *error = "no memory";
-        return false;
+        return 0;
     }
     start->entry = loaded.entry;
     start->stack_top = USER_STACK_TOP & ~0xfull;   /* sysv wants 16-aligned */
 
     /* the process comes first, because it is what outlives the thread
      * and holds the exit code somebody will want to read */
-    int pid = process_create(path, 0, pit_uptime_ms());
+    int pid = process_create(path, parent, pit_uptime_ms());
     if (pid == 0) {
         kfree(start);
         addrspace_destroy(space);
         *error = "the process table is full";
-        return false;
+        return 0;
     }
 
     struct thread *t = thread_create(path, user_thread_start, start);
@@ -137,21 +137,49 @@ bool user_run(const char *path, bool background, const char **error) {
         kfree(start);
         addrspace_destroy(space);
         *error = "no memory for a thread";
-        return false;
+        return 0;
     }
     t->space = space;
     t->pid   = pid;
     process_set_thread(pid, t->id);
 
-    int id = t->id;
-    kprintf("[kernel] %s is pid %d, ring 3 at %p%s\n",
-            path, pid, (void *)loaded.entry, background ? " (background)" : "");
+    kprintf("[kernel] %s is pid %d, ring 3 at %p\n",
+            path, pid, (void *)loaded.entry);
+    return pid;
+}
+
+/* wait for a pid, however it ends. polling for the same reason the
+ * foreground wait polls: the thread may be freed at any moment, and a
+ * pid cannot dangle where a pointer would */
+bool user_wait(int pid, int *code) {
+    for (;;) {
+        const struct process *p = process_find(pid);
+        if (p == NULL) {
+            return false;       /* gone, or somebody else collected it */
+        }
+        if (p->exited) {
+            break;
+        }
+        sleep_ms(20);
+    }
+    return process_collect(pid, code);
+}
+
+bool user_run(const char *path, bool background, const char **error) {
+    int pid = user_spawn(path, 0, error);
+    if (pid == 0) {
+        return false;
+    }
 
     if (background) {
-        /* nobody is waiting, so nobody will collect it. leave the slot
-         * for `ps` to show and let the next `run` sweep it up */
+        /* nobody is waiting, so nobody will collect it. the slot stays
+         * for `ps` to show, and the next spawn sweeps it up */
+        kprintf("[kernel] pid %d runs in the background\n", pid);
         return true;
     }
+
+    const struct process *p = process_find(pid);
+    int id = (p != NULL) ? p->thread_id : 0;
 
     /* a foreground program is waited for, because that is what a shell
      * does. without it the prompt prints first and the program prints

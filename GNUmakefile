@@ -83,7 +83,8 @@ UCFLAGS := -Wall -Wextra -std=gnu11 -O1 \
 
 ULDFLAGS := -nostdlib -static -T user/linker.ld
 
-USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail
+USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail \
+              ramdisk/bin/reader ramdisk/bin/parent
 
 ramdisk/bin/%: user/%.c user/syscall.h user/linker.ld
 	@mkdir -p $(@D)
@@ -156,7 +157,8 @@ bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c
 bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c
 bin/tests/process:  tests/test_process.c  kernel/src/sched/process.c \
                     kernel/src/lib/string.c
-bin/tests/syscall:  tests/test_syscall.c  kernel/src/cpu/syscall.c
+bin/tests/syscall:  tests/test_syscall.c  kernel/src/cpu/syscall.c \
+                    kernel/src/sched/process.c kernel/src/lib/string.c
 bin/tests/elf:      tests/test_elf.c      kernel/src/fs/elf.c \
                     kernel/src/lib/string.c
 bin/tests/ramdisk:  tests/test_ramdisk.c  kernel/src/fs/ramdisk.c \

@@ -9,6 +9,11 @@
 #include "mm/pmm.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
+#include "sched/process.h"
+#include "sched/usermode.h"
+#include "mm/addrspace.h"
+#include "fs/ramdisk.h"
+#include "lib/string.h"
 
 #define MSR_STAR   0xc0000081
 #define MSR_LSTAR  0xc0000082
@@ -25,6 +30,25 @@ uint64_t syscall_kernel_rsp;
 /* implemented in syscall.asm */
 extern void syscall_entry(void);
 
+static int caller_pid(void);
+
+/* whose page tables decide whether a user pointer is real.
+ *
+ * it must be the *caller's*, not the kernel's. every program has had an
+ * address space of its own since 0.1.0, and the kernel's tables have no
+ * mapping for a program's memory at all -- so checking there says no to
+ * every pointer that was ever going to be valid, and a program prints
+ * nothing for no visible reason. we are running on the caller's cr3 at
+ * this moment, so this is also what the cpu would use if we simply
+ * dereferenced the thing */
+static uint64_t caller_pml4(void) {
+    struct thread *me = sched_current();
+    if (me != NULL && me->space != NULL) {
+        return me->space->pml4;
+    }
+    return vmm_kernel_pml4();
+}
+
 /* a pointer handed to us by ring 3 is a claim, not a fact. check the
  * whole span really is mapped before touching a byte of it -- a user
  * program should not be able to make the kernel fault by lying */
@@ -40,10 +64,16 @@ static bool user_range_ok(uint64_t addr, uint64_t len) {
     if (addr >= 0xffff800000000000ull || (addr + len) > 0xffff800000000000ull) {
         return false;
     }
-    uint64_t pml4 = vmm_kernel_pml4();
+    uint64_t pml4 = caller_pml4();
     for (uint64_t p = addr & ~0xfffull; p < addr + len; p += PAGE_SIZE) {
         uint64_t flags = vmm_flags(pml4, p);
         if (!(flags & PTE_PRESENT) || !(flags & PTE_USER)) {
+            /* say so. a refusal returns -1 to a program that will
+             * probably ignore it, and the result is a program that
+             * prints nothing for no reason anyone can see -- which is
+             * exactly how the 0.1.0 version of this bug stayed hidden */
+            kprintf("[kernel] refused a pointer from pid %d: %p is not "
+                    "this process's memory\n", caller_pid(), (void *)addr);
             return false;
         }
     }
@@ -52,7 +82,39 @@ static bool user_range_ok(uint64_t addr, uint64_t len) {
 
 #define WRITE_MAX 4096
 
-static int64_t sys_write(uint64_t ptr, uint64_t len) {
+/* which process is asking. everything touching per-process state goes
+ * through this rather than assuming */
+static int caller_pid(void) {
+    struct thread *me = sched_current();
+    return (me != NULL) ? me->pid : 0;
+}
+
+/* copy a path out of ring 3 into somewhere we can trust it. paths are
+ * short by definition, so a fixed buffer is honest rather than lazy */
+static bool copy_path(uint64_t ptr, uint64_t len, char *out, size_t max) {
+    if (len == 0 || len >= max || !user_range_ok(ptr, len)) {
+        return false;
+    }
+    const char *src = (const char *)ptr;
+    for (uint64_t i = 0; i < len; i++) {
+        out[i] = src[i];
+    }
+    out[len] = '\0';
+    return true;
+}
+
+static int64_t sys_write_console(uint64_t ptr, uint64_t len);
+
+static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
+    /* nothing here is writable but the console: a descriptor onto the
+     * ramdisk is a bookmark into read-only memory */
+    if (fd != FD_STDOUT && fd != FD_STDERR) {
+        return -1;
+    }
+    return sys_write_console(ptr, len);
+}
+
+static int64_t sys_write_console(uint64_t ptr, uint64_t len) {
     /* clamp first, then check what we clamped to. a program asking to
      * write four exabytes gets a short write rather than a refusal,
      * which is the ordinary contract -- and the range actually checked
@@ -71,10 +133,7 @@ static int64_t sys_write(uint64_t ptr, uint64_t len) {
     return (int64_t)len;
 }
 
-static int64_t sys_read(uint64_t ptr, uint64_t len) {
-    if (!user_range_ok(ptr, len) || len == 0) {
-        return -1;
-    }
+static int64_t sys_read_stdin(uint64_t ptr, uint64_t len) {
     char *buf = (char *)ptr;
     uint64_t n = 0;
     while (n < len) {
@@ -90,19 +149,97 @@ static int64_t sys_read(uint64_t ptr, uint64_t len) {
     return (int64_t)n;
 }
 
+static int64_t sys_read(uint64_t fd, uint64_t ptr, uint64_t len) {
+    if (len == 0 || !user_range_ok(ptr, len)) {
+        return -1;
+    }
+    if (fd == FD_STDIN) {
+        return sys_read_stdin(ptr, len);
+    }
+
+    /* a file. the bytes are already in memory -- the descriptor only
+     * says how far through them we had got */
+    const void *data = NULL;
+    uint64_t left = 0;
+    if (!process_fd_peek(caller_pid(), (int)fd, &data, &left)) {
+        return -1;
+    }
+    if (left < len) {
+        len = left;             /* a short read at the end, as usual */
+    }
+    memcpy((void *)ptr, data, len);
+    process_fd_advance(caller_pid(), (int)fd, len);
+    return (int64_t)len;
+}
+
+static int64_t sys_open(uint64_t ptr, uint64_t len) {
+    char path[64];
+    if (!copy_path(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    struct ramdisk_file f;
+    if (!ramdisk_open(path, &f)) {
+        return -1;
+    }
+    return process_fd_open(caller_pid(), f.data, f.size);
+}
+
+static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
+    char path[64];
+    if (!copy_path(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    const char *why = NULL;
+    int pid = user_spawn(path, caller_pid(), &why);
+    return (pid == 0) ? -1 : pid;
+}
+
+/* block until a child ends, then hand back how it went. a program may
+ * only wait for something it started -- otherwise one process could
+ * collect another's child, and the exit code would go to the wrong
+ * place entirely */
+static int64_t sys_wait(uint64_t pid, uint64_t code_ptr) {
+    const struct process *p = process_find((int)pid);
+    if (p == NULL || p->parent != caller_pid()) {
+        return -1;
+    }
+    if (code_ptr != 0 && !user_range_ok(code_ptr, sizeof(int))) {
+        return -1;
+    }
+
+    int code = 0;
+    if (!user_wait((int)pid, &code)) {
+        return -1;
+    }
+    if (code_ptr != 0) {
+        *(int *)code_ptr = code;
+    }
+    return (int64_t)pid;
+}
+
 /* the number is in rax, arguments in rdi rsi rdx rcx (the asm moved r10
  * there for us) and r8. returns into rax */
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4) {
-    (void)a2; (void)a3; (void)a4;
+    (void)a3; (void)a4;
 
     switch (nr) {
     case SYS_EXIT:
         thread_exit((int)a0);   /* never returns */
     case SYS_WRITE:
-        return sys_write(a0, a1);
+        return sys_write(a0, a1, a2);
     case SYS_READ:
-        return sys_read(a0, a1);
+        return sys_read(a0, a1, a2);
+    case SYS_OPEN:
+        return sys_open(a0, a1);
+    case SYS_CLOSE:
+        return process_fd_close(caller_pid(), (int)a0) ? 0 : -1;
+    case SYS_GETPID:
+        return caller_pid();
+    case SYS_SPAWN:
+        return sys_spawn(a0, a1);
+    case SYS_WAIT:
+        return sys_wait(a0, a1);
     case SYS_UPTIME:
         return (int64_t)pit_uptime_ms();
     case SYS_YIELD:

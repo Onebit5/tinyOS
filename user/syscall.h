@@ -13,20 +13,31 @@
 #define SYS_UPTIME 3
 #define SYS_YIELD  4
 #define SYS_SLEEP  5
+#define SYS_OPEN   6
+#define SYS_CLOSE  7
+#define SYS_GETPID 8
+#define SYS_SPAWN  9
+#define SYS_WAIT   10
+
+/* the usual three, spoken for the way they are everywhere */
+#define STDIN   0
+#define STDOUT  1
+#define STDERR  2
 
 /* rcx and r11 are destroyed by the syscall instruction itself, and the
  * kernel may clobber anything the abi allows a call to */
-static inline long syscall2(long nr, long a0, long a1) {
+static inline long syscall3(long nr, long a0, long a1, long a2) {
     long ret;
     __asm__ volatile ("syscall"
                       : "=a"(ret)
-                      : "a"(nr), "D"(a0), "S"(a1)
+                      : "a"(nr), "D"(a0), "S"(a1), "d"(a2)
                       : "rcx", "r11", "memory");
     return ret;
 }
 
-static inline long syscall1(long nr, long a0) { return syscall2(nr, a0, 0); }
-static inline long syscall0(long nr)          { return syscall2(nr, 0, 0); }
+static inline long syscall2(long nr, long a0, long a1) { return syscall3(nr, a0, a1, 0); }
+static inline long syscall1(long nr, long a0)          { return syscall3(nr, a0, 0, 0); }
+static inline long syscall0(long nr)                   { return syscall3(nr, 0, 0, 0); }
 
 static inline size_t ustrlen(const char *s) {
     size_t n = 0;
@@ -34,8 +45,37 @@ static inline size_t ustrlen(const char *s) {
     return n;
 }
 
+static inline long write_fd(long fd, const void *buf, long len) {
+    return syscall3(SYS_WRITE, fd, (long)buf, len);
+}
+
 static inline void write(const char *s) {
-    syscall2(SYS_WRITE, (long)s, (long)ustrlen(s));
+    write_fd(STDOUT, s, (long)ustrlen(s));
+}
+
+static inline long read_fd(long fd, void *buf, long len) {
+    return syscall3(SYS_READ, fd, (long)buf, len);
+}
+
+/* ---- files -------------------------------------------------------- */
+
+static inline long open(const char *path) {
+    return syscall2(SYS_OPEN, (long)path, (long)ustrlen(path));
+}
+static inline long close(long fd) { return syscall1(SYS_CLOSE, fd); }
+
+/* ---- other programs ----------------------------------------------- */
+
+static inline long getpid(void) { return syscall0(SYS_GETPID); }
+
+static inline long spawn(const char *path) {
+    return syscall2(SYS_SPAWN, (long)path, (long)ustrlen(path));
+}
+
+/* blocks until that pid ends. returns the pid, or -1 if it was never
+ * ours to wait for */
+static inline long wait(long pid, int *code) {
+    return syscall2(SYS_WAIT, pid, (long)code);
 }
 
 static inline long uptime(void)      { return syscall0(SYS_UPTIME); }

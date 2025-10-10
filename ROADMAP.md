@@ -17,11 +17,11 @@ program rather than refusing anything blocked -- which needs threads to
 carry a back-pointer to the waitq they are parked on, the same gap that
 makes `kill` timid today.~~ **done in 0.1.1.**
 
-**0.1.2 more to ask for.** the syscall table is six calls wide. it
+**0.1.2 more to ask for.** ~~the syscall table is six calls wide. it
 wants `open`/`read`/`close` against the ramdisk so a program can read a
 file instead of being handed one; `getpid`; `spawn` and `wait` so a
 program can start another. that last pair is what makes a userspace
-shell possible at all.
+shell possible at all.~~ **done in 0.1.2.**
 
 **0.1.3 input that belongs to somebody.** right now the kernel shell
 peeks at keys while a program runs and hopes. a foreground process

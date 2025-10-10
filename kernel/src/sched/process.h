@@ -19,8 +19,27 @@
 #define MAX_PROCESSES   32
 #define PROC_NAME_MAX   24
 
+/* how many files one process may hold open. 0, 1 and 2 are spoken for
+ * by the console, the way they are everywhere, so an opened file gets
+ * the first number from 3 up */
+#define MAX_FDS         8
+#define FD_STDIN        0
+#define FD_STDOUT       1
+#define FD_STDERR       2
+#define FD_FIRST_FILE   3
+
 /* what we record when a process was killed rather than choosing to go */
 #define PROCESS_KILLED  (-1)
+
+/* a file, as far as a process is concerned: somewhere in the ramdisk
+ * and how far through it we are. nothing is copied -- the archive is
+ * already in memory and read-only, so a descriptor is a bookmark */
+struct fd {
+    bool            open;
+    const uint8_t  *data;
+    uint64_t        size;
+    uint64_t        pos;
+};
 
 struct process {
     int      pid;               /* 0 means the slot is free */
@@ -31,6 +50,7 @@ struct process {
     int      exit_code;
     uint64_t started_ms;
     uint64_t ended_ms;
+    struct fd fds[MAX_FDS];
 };
 
 /* claim a slot. returns the new pid, or 0 if the table is full */
@@ -48,6 +68,27 @@ void process_exited(int pid, int code, uint64_t now_ms);
 bool process_collect(int pid, int *code);
 
 const struct process *process_find(int pid);
+
+/* ---- open files -----------------------------------------------------
+ * the process owns these, so they close themselves when it ends. the
+ * copying in and out is left to the syscall layer, which is the only
+ * place that knows how to check a pointer ring 3 handed over */
+
+/* take a descriptor onto a stretch of ramdisk. returns the fd, or -1
+ * if this process is already holding as many as it may */
+int  process_fd_open(int pid, const void *data, uint64_t size);
+
+/* where the descriptor has got to, and how much is left. false if the
+ * fd was never opened */
+bool process_fd_peek(int pid, int fd, const void **data, uint64_t *remaining);
+
+/* note that n bytes were taken */
+void process_fd_advance(int pid, int fd, uint64_t n);
+
+bool process_fd_close(int pid, int fd);
+
+/* how many a process is holding, for `ps` and the tests */
+size_t process_fd_count(int pid);
 
 /* walk the table. index from 0; slots that are free are skipped */
 const struct process *process_at(size_t index);

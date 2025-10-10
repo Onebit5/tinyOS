@@ -44,6 +44,8 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'run bin/counter &\r'; sleep 3
     printf 'ps\r';     sleep 4
     printf 'run bin/fail\r'; sleep 2
+    printf 'run bin/reader\r'; sleep 2
+    printf 'run bin/parent\r'; sleep 3
     printf 'ps\r';     sleep 1
     printf 'dmesg\r';  sleep 2
 } | timeout 60 qemu-system-x86_64 \
@@ -104,9 +106,20 @@ check 'isolated memory' 'this memory is mine alone'
 check 'ps has processes' 'processes'
 check 'pids assigned'    'is pid'
 check 'exit code kept'   'exited with 42'
+check 'open/read work'   'in bites of 32'
+check 'spawn works'      '[parent] it is pid'
+check 'wait works'       'exactly as foretold'
 check 'dmesg works'    'cr3 is ours'
 
 # and did it stay alive rather than falling over
+if grep -qF 'refused a pointer' "$LOG"; then
+    echo '  FAIL  a syscall refused a program its own memory:'
+    grep -m3 'refused a pointer' "$LOG" | sed 's/^/        /'
+    fail=1
+else
+    echo '  ok    no pointer refused'
+fi
+
 if grep -qF 'KERNEL PANIC' "$LOG"; then
     echo '  FAIL  it panicked somewhere:'
     grep -A6 'KERNEL PANIC' "$LOG" | sed 's/^/        /'

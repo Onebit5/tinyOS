@@ -20,10 +20,18 @@ void enter_usermode(uint64_t entry, uint64_t stack_top,
  * message, so it is a value it can compare against rather than prose */
 extern const char *const USER_RUN_NO_SUCH_FILE;
 
-/* load an executable out of the ramdisk and run it as a ring 3 thread
- * in an address space of its own. foreground waits for it; background
- * returns as soon as it is running. returns false if the file is
- * missing or not something we can load */
+/* start a program and return its pid, or 0 with *error set. `parent` is
+ * the pid that will be allowed to wait for it -- 0 means the kernel
+ * shell, which is nobody's child */
+int user_spawn(const char *path, int parent, const char **error);
+
+/* block until a pid has ended, then collect it. false if there is no
+ * such process. whether the caller had any business waiting for it is
+ * the syscall layer's question, not this one's */
+bool user_wait(int pid, int *code);
+
+/* the shell's way in: spawn, and unless told otherwise wait for it and
+ * report how it went */
 bool user_run(const char *path, bool background, const char **error);
 
 #endif

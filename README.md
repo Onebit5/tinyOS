@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.1** (**processes, not just threads.** a program has a pid, a parent, and an exit code that survives it -- the table outlives the thread, so there is something left to read when it dies. and `kill` finally works on a thread that is blocked)
+**version: 0.1.2** (**a program can open a file, and start another program.** eleven syscalls now, with descriptors that belong to the process and a `spawn`/`wait` pair -- which means a shell in ring 3 is something that could now be written)
 
 ## what it does
 
@@ -25,6 +25,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] ring 3, `syscall`/`sysret`, and an elf loader -- it runs programs
 - [x] an address space per program, reclaimed when it dies
 - [x] a process table: pids, parents, and exit codes that outlive the thread
+- [x] file descriptors, and `spawn`/`wait` -- a program can start a program
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -49,6 +50,10 @@ make run    # boot it in qemu
 make test   # run the host test suites (no qemu needed, takes a second)
 make boottest   # boot the iso and drive the shell over serial
 ```
+
+[TESTING.md](TESTING.md) has what to check by hand, version by version -- a
+two-minute smoke test, then the specific thing each version introduced, so a
+regression can be bisected to the milestone that owns it.
 
 `make run` gives you a qemu window *and* a serial console in your terminal -- and since com1 is wired into the input queue, you can type at either one. the shell cannot tell the difference.
 
@@ -168,6 +173,25 @@ three things about this were easy to get wrong and interesting to get right:
 
 **the user bit is ANDed down the whole chain.** a leaf marked `PTE_USER` under intermediate tables that are not is unreachable from ring 3, and it looks completely correct in any dump you care to print. the vmm now grants the bit at every level on the way to a user mapping, and widens tables that were built for a kernel mapping and later find themselves on the path to a user one. kernel leaves stay supervisor-only regardless. that one has a test that walks all four levels by hand.
 
+### what a program may ask for
+
+eleven syscalls, and no libc out there to satisfy -- only what a program in this kernel could actually want:
+
+```
+exit(code)              write(fd, buf, len)     read(fd, buf, len)
+uptime()                yield()                 sleep(ms)
+open(path) -> fd        close(fd)               getpid()
+spawn(path) -> pid      wait(pid, &code)
+```
+
+`read` and `write` take a descriptor first, the way they do everywhere. 0, 1 and 2 are the console; anything from 3 up is a file, and a descriptor is a bookmark into the ramdisk rather than a copy of it -- the archive is already in memory and read-only, so there is nothing to allocate and nothing to free. they belong to the process, so they close when it ends.
+
+every pointer a program hands over is checked against **that program's** page tables, not the kernel's. the kernel's have no mapping for a program's memory at all, so checking there says no to every pointer that was ever going to be valid -- which is precisely what 0.1.0 shipped and nobody noticed until a program ran. a refusal is now logged rather than returned in silence, because a program that ignores an error and prints nothing is a miserable thing to debug.
+
+`spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
+
+`bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
 ### processes outlive their threads
 
 a thread is reaped the instant it dies -- stack and address space handed straight back -- so an exit code kept on the thread would be gone before anyone could read it. the process table is the thing that outlives it: a fixed set of slots holding the pid, the parent, the name and how it ended, staying occupied until somebody collects them. a process that has finished but not been collected is what everyone else calls a zombie, and it is the only reason `run` can tell you a program exited 42.
@@ -191,7 +215,6 @@ what is missing, kept here where it stays uncomfortable:
 - no `fork`. `spawn` will be the shape instead, since fork without copy-on-write is an expensive way to waste memory.
 - no demand paging -- every page a program will ever touch is mapped before it starts.
 - the scheduler is round-robin with a fixed quantum and no priorities, so a busy thread and an idle one are treated identically.
-- a program cannot open a file. it can be *loaded* from the ramdisk, but there is no `open` syscall yet, so `cat` remains a kernel command.
 - the ramdisk is read-only and lives in ram, which is why a real disk is on the roadmap.
 
 ## the ramdisk
@@ -213,13 +236,13 @@ $ make test
   mm         ok        pmm + heap, incl. draining ram dry
   vmm        ok        page tables built and walked, 40+ cases
   addrspace  ok        sharing, isolation, and a leak-free teardown
-  process    ok        pids, zombies, a full table, and a kill that races
+  process    ok        pids, zombies, fds, and a kill that races
+  syscall    ok        dispatch, files, spawn, and every pointer refused
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
   ramdisk    ok        ustar parsing, incl. the real build output
   elf        ok        header validation, incl. the real user program
-  syscall    ok        dispatch, and every pointer it refuses
   keyboard   ok        scancodes, ctrl, arrows, 20 cases
   serial     ok        terminal dialect + escape sequences
   shell      ok        parsing, dispatch, history, 32 cases
@@ -291,6 +314,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.2** — the syscall table doubles: `open`/`close` and a `read` that takes a descriptor, so a program can read a file instead of only being loaded from one; `getpid`; and `spawn`/`wait`, which let a program start another and hear how it went. descriptors live on the process, so they close when it does, and a bookmark into a read-only archive costs nothing to allocate or free. a process may only wait for its own children. `read`/`write` gained an fd argument, a breaking change to the user abi and the right shape. also fixes a regression 0.1.0 shipped: user pointers were validated against the kernel's page tables, which since per-process address spaces map none of a program's memory -- so every syscall taking a pointer silently returned -1 and programs printed nothing at all. refusals are logged now, a test asserts which page tables get consulted, and the boot test fails if any pointer is ever refused. two new programs: `bin/reader` opens a file and reads it in bites, `bin/parent` spawns `bin/fail` and passes on its 42.
 - **0.1.1** — processes. a program now has a pid, a parent and an exit code, kept in a table that outlives the thread that ran it -- which is the only way an exit code can survive, since the thread and its whole address space are gone the moment it dies. `run` reports how a program went; `ps` shows threads and processes as the different things they are. and the caveat that has been in this file since m6 is retired: threads carry a pointer back to the waitq they are parked on, so `kill` can take one off that queue before the reaper frees it, instead of refusing. `bin/fail` exists to exit 42 and prove the number gets home.
 - **0.1.0** — **programs are isolated.** each gets its own pml4, sharing only the kernel half, and by reference so the kernel stays reachable whichever tables are loaded -- it must, since the stack we switch on lives there. two copies of the same program now run at once at identical addresses without meeting. teardown walks the lower half and hands back the image, the stack and the page tables together, which retires the leak 0.0.17 shipped with. `run prog &` for background, `ps` showing which threads are ring 3 and how much memory each holds, and `bin/counter` as a second program that exists to be run twice. plus [ROADMAP.md](ROADMAP.md), which lays out the eleven steps of 0.1.x -- from exit codes and a wider syscall table up to a filesystem on a real disk and a bootloader of our own.
 - **0.0.17** — **it runs programs.** ring 3 via `iretq` into a fabricated frame, `syscall`/`sysret` with STAR/LSTAR/SFMASK, a static elf64 loader, per-thread kernel stacks tracked in the tss and for `syscall`, and `user/hello.c` -- a real program with no libc that prints and sleeps and exits, all through six syscalls. every pointer ring 3 hands the kernel is checked against the page tables before it is touched, mapped *and* user, so a program cannot make the kernel fault by lying -- and the refusals are tested harder than the successes, since they are the actual boundary. found a genuine bug on the way: intermediate page table entries never set `PTE_USER`, and since the cpu ANDs that bit down the whole chain, every user mapping would have been unreachable while looking perfectly correct in a dump. boot is quiet now -- the driver chatter goes to serial and `dmesg`, and the screen gets the banner and `welcome.txt`. tab completes filenames after any command that takes one (`cat`, `run`), fills in the longest shared prefix, and does nothing on an empty word *in the command position* -- listing every command is what `help` is for, but after `cat ` there is no such list to consult, so an empty word there is worth answering. `run` waits for its program like a foreground command should, with ctrl+c to stop it. also `cat` takes several files, unknown commands suggest the nearest match (and a bare filename points at the path it lives under), `ls` prints paths you can actually retype, and `ps` prints in id order.

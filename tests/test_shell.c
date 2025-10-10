@@ -444,7 +444,7 @@ int main(void) {
     /* ---- the ramdisk ---- */
     run("ls");
     CHECK(strstr(out, "motd.txt") != NULL, "ls lists a file");
-    CHECK(strstr(out, "in 7 files") != NULL,
+    CHECK(strstr(out, "in 9 files") != NULL,
           "and counts files, not the directory entries tar leaves behind");
     CHECK(strstr(out, "bin/hello") != NULL, "and the nested one");
     CHECK(strstr(out, "./") == NULL,
