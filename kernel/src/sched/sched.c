@@ -183,6 +183,28 @@ void waitq_wake_all(struct waitq *q) {
     irq_restore(flags);
 }
 
+void sched_wake_thread(int id) {
+    uint64_t flags = irq_save();
+
+    struct thread *t = current;
+    do {
+        if (t->id == id) {
+            if (t->state == THREAD_BLOCKED || t->state == THREAD_SLEEPING) {
+                if (t->waiting_on != NULL) {
+                    struct waitq *q = t->waiting_on;
+                    t->waiting_on = NULL;
+                    waitq_remove(q, t);
+                }
+                t->state = THREAD_READY;
+            }
+            break;
+        }
+        t = t->next;
+    } while (t != current);
+
+    irq_restore(flags);
+}
+
 void waitq_remove(struct waitq *q, struct thread *t) {
     uint64_t flags = irq_save();
 

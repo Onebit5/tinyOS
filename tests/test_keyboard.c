@@ -14,6 +14,11 @@ struct waitq;
 void waitq_block(struct waitq *q) { (void)q; }
 void waitq_wake_all(struct waitq *q) { (void)q; }
 
+/* input_push offers every key to the tty first, so ctrl+c aimed at a
+ * program becomes an interrupt rather than a character. nothing is in
+ * the foreground here, so nothing is intercepted */
+bool tty_intercept(int key) { (void)key; return false; }
+
 #include "drivers/keyboard.h"
 #include "drivers/input.h"
 

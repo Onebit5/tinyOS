@@ -1,6 +1,7 @@
 #include "drivers/input.h"
 #include "cpu/interrupts.h"
 #include "sched/sched.h"
+#include "drivers/tty.h"
 
 /* producers are irq handlers, the consumer is the shell thread, and
  * theres one core, so interrupts-off is all the mutual exclusion this
@@ -12,6 +13,13 @@ static volatile unsigned int head, tail;
 static struct waitq waiters;
 
 void input_push(int key) {
+    /* the tty gets first refusal. ctrl+c aimed at a program is an
+     * interrupt rather than a character, and must not end up in the
+     * buffer where somebody would later read it as one */
+    if (tty_intercept(key)) {
+        return;
+    }
+
     unsigned int next = (head + 1) % INPUT_BUF_SIZE;
     if (next == tail) {
         return;     /* buffer full, the keystroke returns to the sea of souls */

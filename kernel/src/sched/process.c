@@ -36,6 +36,7 @@ int process_create(const char *name, int parent, uint64_t now_ms) {
         p->thread_id  = 0;
         p->exited     = false;
         p->exit_code  = 0;
+        p->interrupted = false;
         p->started_ms = now_ms;
         p->ended_ms   = 0;
         for (size_t f = 0; f < MAX_FDS; f++) {
@@ -129,6 +130,34 @@ size_t process_count(void) {
         }
     }
     return n;
+}
+
+/* ---- interrupts ----------------------------------------------------- */
+
+void process_interrupt(int pid) {
+    uint64_t flags = irq_save();
+    struct process *p = slot_for(pid);
+    if (p != NULL) {
+        p->interrupted = true;
+    }
+    irq_restore(flags);
+}
+
+bool process_interrupt_pending(int pid) {
+    const struct process *p = slot_for(pid);
+    return p != NULL && p->interrupted;
+}
+
+bool process_take_interrupt(int pid) {
+    uint64_t flags = irq_save();
+    bool had = false;
+    struct process *p = slot_for(pid);
+    if (p != NULL && p->interrupted) {
+        p->interrupted = false;
+        had = true;
+    }
+    irq_restore(flags);
+    return had;
 }
 
 /* ---- open files ---------------------------------------------------- */

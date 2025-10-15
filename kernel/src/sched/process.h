@@ -48,6 +48,11 @@ struct process {
     char     name[PROC_NAME_MAX];
     bool     exited;
     int      exit_code;
+
+    /* an interrupt has been delivered and not yet looked at. this is as
+     * close to a signal as this kernel gets: a flag the process finds
+     * the next time it asks the kernel for anything */
+    bool     interrupted;
     uint64_t started_ms;
     uint64_t ended_ms;
     struct fd fds[MAX_FDS];
@@ -68,6 +73,15 @@ void process_exited(int pid, int code, uint64_t now_ms);
 bool process_collect(int pid, int *code);
 
 const struct process *process_find(int pid);
+
+/* deliver an interrupt. the process finds it on its next syscall */
+void process_interrupt(int pid);
+
+/* is one waiting, unlooked-at? asking does not consume it */
+bool process_interrupt_pending(int pid);
+
+/* take it, clearing the flag. true if there was one */
+bool process_take_interrupt(int pid);
 
 /* ---- open files -----------------------------------------------------
  * the process owns these, so they close themselves when it ends. the

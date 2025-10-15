@@ -80,7 +80,8 @@ static inline long wait(long pid, int *code) {
 
 static inline long uptime(void)      { return syscall0(SYS_UPTIME); }
 static inline void yield(void)       { syscall0(SYS_YIELD); }
-static inline void sleep(long ms)    { syscall1(SYS_SLEEP, ms); }
+/* returns -1 if an interrupt cut the sleep short */
+static inline long sleep(long ms)    { return syscall1(SYS_SLEEP, ms); }
 static inline void exit(long code)   { syscall1(SYS_EXIT, code); __builtin_unreachable(); }
 
 /* just enough to print a number without a libc */

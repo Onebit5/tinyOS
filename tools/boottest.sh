@@ -46,6 +46,9 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'run bin/fail\r'; sleep 2
     printf 'run bin/reader\r'; sleep 2
     printf 'run bin/parent\r'; sleep 3
+    printf 'run bin/ask\r'; sleep 2
+    printf 'Igor\r';  sleep 2
+    printf '\003';    sleep 2
     printf 'ps\r';     sleep 1
     printf 'dmesg\r';  sleep 2
 } | timeout 60 qemu-system-x86_64 \
@@ -109,6 +112,9 @@ check 'exit code kept'   'exited with 42'
 check 'open/read work'   'in bites of 32'
 check 'spawn works'      '[parent] it is pid'
 check 'wait works'       'exactly as foretold'
+check 'a program reads'  'what is thy name?'
+check 'input reaches it' 'well met, Igor'
+check 'ctrl+c delivered' 'leaving politely'
 check 'dmesg works'    'cr3 is ours'
 
 # and did it stay alive rather than falling over

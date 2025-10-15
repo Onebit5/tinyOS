@@ -23,10 +23,11 @@ file instead of being handed one; `getpid`; `spawn` and `wait` so a
 program can start another. that last pair is what makes a userspace
 shell possible at all.~~ **done in 0.1.2.**
 
-**0.1.3 input that belongs to somebody.** right now the kernel shell
+**0.1.3 input that belongs to somebody.** ~~right now the kernel shell
 peeks at keys while a program runs and hopes. a foreground process
 should *own* the input queue, with ctrl+c delivered to it rather than
-handled on its behalf. that is the beginning of a controlling terminal.
+handled on its behalf. that is the beginning of a controlling
+terminal.~~ **done in 0.1.3.**
 
 **0.1.4 a userspace toolbox.** `cat`, `echo`, `uptime` as real programs
 in `ramdisk/bin` rather than kernel commands. the kernel shell keeps

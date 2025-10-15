@@ -13,6 +13,7 @@
 #include "sched/usermode.h"
 #include "mm/addrspace.h"
 #include "fs/ramdisk.h"
+#include "drivers/tty.h"
 #include "lib/string.h"
 
 #define MSR_STAR   0xc0000081
@@ -133,20 +134,10 @@ static int64_t sys_write_console(uint64_t ptr, uint64_t len) {
     return (int64_t)len;
 }
 
+/* the terminal does the echoing and the line editing, because a program
+ * in ring 3 cannot -- the keys never pass through it */
 static int64_t sys_read_stdin(uint64_t ptr, uint64_t len) {
-    char *buf = (char *)ptr;
-    uint64_t n = 0;
-    while (n < len) {
-        int c = input_getchar_blocking();
-        if (c < 0 || c > 0xff) {
-            continue;           /* an arrow key is not a byte */
-        }
-        buf[n++] = (char)c;
-        if (c == '\n') {
-            break;
-        }
-    }
-    return (int64_t)n;
+    return tty_read_line(caller_pid(), (char *)ptr, len);
 }
 
 static int64_t sys_read(uint64_t fd, uint64_t ptr, uint64_t len) {
@@ -247,7 +238,9 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return 0;
     case SYS_SLEEP:
         sleep_ms(a0);
-        return 0;
+        /* an interrupt wakes a sleeper early, and it should be able to
+         * tell that is what happened rather than think time passed */
+        return process_take_interrupt(caller_pid()) ? -1 : 0;
     default:
         kprintf("[kernel] thread asked for syscall %lu, which does not exist\n",
                 nr);

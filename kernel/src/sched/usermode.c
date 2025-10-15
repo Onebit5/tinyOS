@@ -3,6 +3,7 @@
 #include "sched/thread.h"
 #include "cpu/gdt.h"
 #include "drivers/input.h"
+#include "drivers/tty.h"
 #include "fs/elf.h"
 #include "fs/ramdisk.h"
 #include "lib/kprintf.h"
@@ -181,6 +182,12 @@ bool user_run(const char *path, bool background, const char **error) {
     const struct process *p = process_find(pid);
     int id = (p != NULL) ? p->thread_id : 0;
 
+    /* the terminal is the program's now. we stop watching the keyboard
+     * entirely -- ctrl+c goes to it rather than being acted on for it,
+     * and every other key is its to read. this is the difference
+     * between a shell that waits and one that stands in the way */
+    tty_set_foreground(pid);
+
     /* a foreground program is waited for, because that is what a shell
      * does. without it the prompt prints first and the program prints
      * over the top of it, leaving output with no prompt underneath.
@@ -191,18 +198,10 @@ bool user_run(const char *path, bool background, const char **error) {
      * needs lifetime rules we do not have -- this polls every 20ms,
      * which no human will notice. */
     while (sched_thread_alive(id)) {
-        /* peek rather than take: the program may be sitting on
-         * SYS_READ waiting for the very keys we would swallow */
-        if (input_peek() == KEY_CTRL_C) {
-            (void)input_getchar();
-            kprintf("^C\n");
-            if (sched_kill(id) != SCHED_KILL_OK) {
-                kprintf("[kernel] it would not stop\n");
-                return true;
-            }
-        }
         sleep_ms(20);
     }
+
+    tty_set_foreground(TTY_SHELL);
 
     /* collect it: take the code and free the slot, which is the whole
      * reason the process outlived the thread */

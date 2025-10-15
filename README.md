@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.2** (**a program can open a file, and start another program.** eleven syscalls now, with descriptors that belong to the process and a `spawn`/`wait` pair -- which means a shell in ring 3 is something that could now be written)
+**version: 0.1.3** (**the keyboard belongs to somebody now.** a foreground process owns the terminal, and ctrl+c is delivered *to* it rather than acted on for it -- so a program can finally read the keys it was always being denied)
 
 ## what it does
 
@@ -26,6 +26,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] an address space per program, reclaimed when it dies
 - [x] a process table: pids, parents, and exit codes that outlive the thread
 - [x] file descriptors, and `spawn`/`wait` -- a program can start a program
+- [x] a controlling terminal: a foreground process, and ctrl+c delivered to it
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -192,6 +193,20 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### the keyboard belongs to somebody
+
+before this there was no answer to the question "whose keys are these". the shell sat in a loop peeking at the input while a program ran, watching for ctrl+c and killing on the program's behalf -- which meant a program could never actually read the keyboard, because the shell was standing in front of it.
+
+now the terminal has a **foreground process**. while a program runs it holds the front, and the shell stops watching the keyboard entirely. only the foreground process may read stdin; a background one is refused rather than helping itself to keys meant for whoever is being typed at.
+
+ctrl+c aimed at a program is **delivered to it** rather than acted on for it. it never reaches anybody's input buffer as a character -- it is a request, not a byte. the process finds it on its next syscall: a read comes back -1, and a sleep returns -1 rather than pretending the time passed, so a sleeping program learns about it immediately instead of whenever it next happened to ask for something. what to do about it is then the program's business.
+
+pressing it twice stops being a request. the first is delivered; if the program is still there when a second arrives, the kernel says so and ends it. that is as close to a signal as this kernel gets, and the honest shape of it: a flag the process finds, plus an escape hatch for programs that ignore it.
+
+the terminal also does the **echoing**, which is the part you notice the moment it is missing. a program in ring 3 never sees the keys go past on their way to its buffer, so it cannot echo them itself -- if the terminal does not, you type into a void and see nothing until the program answers. so the tty owns the line discipline: characters appear as they are typed, backspace takes one off the screen as well as out of the buffer, arrows are ignored rather than drawn as nonsense, and the line is handed over on enter. the kernel shell has always done its own version of this for its prompt; now a program gets one too.
+
+`bin/ask` reads a line from the keyboard and greets you, then sleeps in a loop inviting an interrupt -- a program that could not have worked at all one version ago.
+
 ### processes outlive their threads
 
 a thread is reaped the instant it dies -- stack and address space handed straight back -- so an exit code kept on the thread would be gone before anyone could read it. the process table is the thing that outlives it: a fixed set of slots holding the pid, the parent, the name and how it ended, staying occupied until somebody collects them. a process that has finished but not been collected is what everyone else calls a zombie, and it is the only reason `run` can tell you a program exited 42.
@@ -238,6 +253,7 @@ $ make test
   addrspace  ok        sharing, isolation, and a leak-free teardown
   process    ok        pids, zombies, fds, and a kill that races
   syscall    ok        dispatch, files, spawn, and every pointer refused
+  tty        ok        who owns the keyboard, echo, and what ctrl+c means
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -314,6 +330,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.3** — the keyboard belongs to somebody. a foreground process owns the terminal while it runs, and the shell stops peeking at keys on its behalf -- which is what made a program reading the keyboard impossible until now. ctrl+c aimed at a program is delivered to it rather than acted on for it: it never becomes a character, the process finds it on its next syscall, and a read or a sleep comes back -1 so a sleeping program hears about it at once. pressing it twice stops asking. only the foreground process may read stdin, so a background one cannot take keys meant for somebody else. the tty also owns the line discipline -- echo, backspace, and ignoring arrows -- because a program never sees the keys go past and cannot echo them itself; without it you type into a void. `bin/ask` reads a line and greets you, which is a thing that could not have worked a version ago.
 - **0.1.2** — the syscall table doubles: `open`/`close` and a `read` that takes a descriptor, so a program can read a file instead of only being loaded from one; `getpid`; and `spawn`/`wait`, which let a program start another and hear how it went. descriptors live on the process, so they close when it does, and a bookmark into a read-only archive costs nothing to allocate or free. a process may only wait for its own children. `read`/`write` gained an fd argument, a breaking change to the user abi and the right shape. also fixes a regression 0.1.0 shipped: user pointers were validated against the kernel's page tables, which since per-process address spaces map none of a program's memory -- so every syscall taking a pointer silently returned -1 and programs printed nothing at all. refusals are logged now, a test asserts which page tables get consulted, and the boot test fails if any pointer is ever refused. two new programs: `bin/reader` opens a file and reads it in bites, `bin/parent` spawns `bin/fail` and passes on its 42.
 - **0.1.1** — processes. a program now has a pid, a parent and an exit code, kept in a table that outlives the thread that ran it -- which is the only way an exit code can survive, since the thread and its whole address space are gone the moment it dies. `run` reports how a program went; `ps` shows threads and processes as the different things they are. and the caveat that has been in this file since m6 is retired: threads carry a pointer back to the waitq they are parked on, so `kill` can take one off that queue before the reaper frees it, instead of refusing. `bin/fail` exists to exit 42 and prove the number gets home.
 - **0.1.0** — **programs are isolated.** each gets its own pml4, sharing only the kernel half, and by reference so the kernel stays reachable whichever tables are loaded -- it must, since the stack we switch on lives there. two copies of the same program now run at once at identical addresses without meeting. teardown walks the lower half and hands back the image, the stack and the page tables together, which retires the leak 0.0.17 shipped with. `run prog &` for background, `ps` showing which threads are ring 3 and how much memory each holds, and `bin/counter` as a second program that exists to be run twice. plus [ROADMAP.md](ROADMAP.md), which lays out the eleven steps of 0.1.x -- from exit codes and a wider syscall table up to a filesystem on a real disk and a bootloader of our own.

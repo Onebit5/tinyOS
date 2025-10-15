@@ -68,6 +68,11 @@ enum sched_kill_result {
  * carry a pointer to the queue they are waiting on */
 enum sched_kill_result sched_kill(int id);
 
+/* make a thread runnable wherever it is: asleep, or parked on a queue.
+ * used to deliver an interrupt, which has to reach a process that is
+ * not currently asking for anything */
+void sched_wake_thread(int id);
+
 /* take one thread off a queue without waking it. used when a thread is
  * killed while blocked -- the queue must not be left holding a pointer
  * to something the reaper is about to free */

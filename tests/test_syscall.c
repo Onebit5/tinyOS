@@ -87,6 +87,21 @@ bool ramdisk_open(const char *name, struct ramdisk_file *out) {
     return true;
 }
 
+/* the terminal, whose real version needs a scheduler to wake threads */
+#include "drivers/tty.h"
+static int foreground_pid = TTY_SHELL;
+int tty_foreground(void) { return foreground_pid; }
+
+/* the line discipline is the tty's own business and has its own suite.
+ * here it only has to behave like one, so the syscall layer can be
+ * checked for handing it the right things */
+int64_t tty_read_line(int pid, char *buf, uint64_t len) {
+    if (pid != foreground_pid || len == 0) return -1;
+    if (process_take_interrupt(pid)) return -1;
+    buf[0] = (char)next_key;
+    return 1;
+}
+
 /* spawn and wait live in usermode.c, which needs a real cpu */
 static int spawned_parent = -1;
 static const char *spawned_path;
@@ -128,6 +143,7 @@ int main(void) {
     /* the caller is a process, since half of these calls are about what
      * that process owns */
     me.pid = process_create("tester", 0, 0);
+    foreground_pid = me.pid;    /* it holds the terminal, mostly */
 
     /* a page a user program could legitimately own */
     char *page = aligned_alloc(4096, 8192);
@@ -216,6 +232,29 @@ int main(void) {
     CHECK(buf[0] == 'q', "from the keyboard");
     CHECK(read_from(FD_STDIN, kernel_page, 4) == -1, "and refuses kernel memory");
     CHECK(read_from(FD_STDIN, user_page, 0) == -1, "a zero-length read is refused");
+
+    /* ---- only the foreground process may read the keyboard ----
+     * a background program helping itself would take keys from whoever
+     * is actually being typed at */
+    foreground_pid = 999;               /* somebody else is at the front */
+    CHECK(read_from(FD_STDIN, (uint64_t)buf, 1) == -1,
+          "a background process is refused the keyboard");
+    foreground_pid = me.pid;
+    next_key = 'z';
+    CHECK(read_from(FD_STDIN, (uint64_t)buf, 1) == 1,
+          "and the foreground one is not");
+
+    /* an interrupt delivered before a read means the read never starts */
+    process_interrupt(me.pid);
+    CHECK(read_from(FD_STDIN, (uint64_t)buf, 1) == -1,
+          "a pending interrupt cuts a read short before it begins");
+    CHECK(!process_interrupt_pending(me.pid), "and is consumed by it");
+
+    /* a sleep says how it ended */
+    CHECK(call(SYS_SLEEP, 1, 0) == 0, "an uninterrupted sleep returns 0");
+    process_interrupt(me.pid);
+    CHECK(call(SYS_SLEEP, 1, 0) == -1,
+          "and an interrupted one says so, rather than pretending time passed");
 
     /* ---- writing somewhere that is not the console ---- */
     CHECK(write_to(3, user_page, 4) == -1,
