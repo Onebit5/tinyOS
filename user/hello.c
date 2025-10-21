@@ -6,7 +6,9 @@
 
 #include "syscall.h"
 
-void _start(void) {
+void _start(int argc, char **argv) {
+    (void)argc; (void)argv;
+
     write("\n");
     write("I am thou... thou art I...\n");
     write("A voice speaks from ring 3, where it can touch nothing\n");

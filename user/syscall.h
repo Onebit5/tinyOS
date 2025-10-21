@@ -18,6 +18,7 @@
 #define SYS_GETPID 8
 #define SYS_SPAWN  9
 #define SYS_WAIT   10
+#define SYS_READDIR 11
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -64,6 +65,11 @@ static inline long open(const char *path) {
 }
 static inline long close(long fd) { return syscall1(SYS_CLOSE, fd); }
 
+/* the nth name in the ramdisk, or -1 once there are no more */
+static inline long readdir(long n, char *buf, long len) {
+    return syscall3(SYS_READDIR, n, (long)buf, len);
+}
+
 /* ---- other programs ----------------------------------------------- */
 
 static inline long getpid(void) { return syscall0(SYS_GETPID); }
@@ -85,6 +91,11 @@ static inline long sleep(long ms)    { return syscall1(SYS_SLEEP, ms); }
 static inline void exit(long code)   { syscall1(SYS_EXIT, code); __builtin_unreachable(); }
 
 /* just enough to print a number without a libc */
+static inline int ustrcmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
 static inline void write_num(long v) {
     char buf[24];
     int i = 23;

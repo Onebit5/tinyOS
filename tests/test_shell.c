@@ -44,8 +44,13 @@ static const char *ran_path;
 const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
 static const char *run_error = "not an elf";
 static bool ran_background;
-bool user_run(const char *path, bool background, const char **error) {
+static int ran_argc;
+static const char *ran_arg1;
+bool user_run(const char *path, int argc, const char *const argv[],
+              bool background, const char **error) {
     ran_path = path;
+    ran_argc = argc;
+    ran_arg1 = (argc > 1) ? argv[1] : NULL;
     ran_background = background;
     if (run_ok) return true;
     *error = run_error;
@@ -164,11 +169,18 @@ int main(void) {
     CHECK(strstr(out, "summon") && strstr(out, "reboot"),
           "help lists the commands");
 
+    /* echo and uptime are programs now, not builtins. typing them
+     * should look no different, but it launches something in ring 3 */
+    ran_path = NULL;
     run("echo thou art I");
-    CHECK(strcmp(out, "thou art I\n") == 0, "echo rejoins its arguments");
+    CHECK(ran_path && strcmp(ran_path, "bin/echo") == 0,
+          "echo is a program now, found in bin/");
+    CHECK(ran_argc == 4, "and gets all its words");
 
-    run("echo");
-    CHECK(strcmp(out, "\n") == 0, "bare echo prints just a newline");
+    ran_path = NULL;
+    run("uptime");
+    CHECK(ran_path && strcmp(ran_path, "bin/uptime") == 0,
+          "and so is uptime");
 
     run("");
     CHECK(out_len == 0, "empty line does nothing at all");
@@ -181,9 +193,6 @@ int main(void) {
 
     run("ps");
     CHECK(strcmp(out, "<PS>") == 0, "ps reaches the scheduler");
-
-    run("uptime");
-    CHECK(strstr(out, "12345") != NULL, "uptime reports the real number");
 
     run("mem");
     CHECK(strstr(out, "2046") && strstr(out, "36"),
@@ -292,10 +301,10 @@ int main(void) {
     {
         char line[LINE_MAX]; size_t len, pos;
 
-        strcpy(line, "upt"); len = 3; pos = 3;
+        strcpy(line, "hex"); len = 3; pos = 3;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "uptime") == 0 && len == 6 && pos == 6,
+        CHECK(strcmp(line, "hexdump") == 0 && len == 7 && pos == 7,
               "a unique prefix completes to the whole command");
 
         /* several candidates sharing no more letters: list them */
@@ -356,7 +365,7 @@ int main(void) {
         CHECK(strcmp(line, "cat bin/hello") == 0,
               "and one more character settles it");
 
-        strcpy(line, "run bin/c"); len = 9; pos = 9;
+        strcpy(line, "run bin/co"); len = 10; pos = 10;
         out_reset();
         complete(line, &len, &pos);
         CHECK(strcmp(line, "run bin/counter") == 0,
@@ -382,16 +391,20 @@ int main(void) {
         CHECK(strcmp(line, "zzz") == 0 && out_len == 0,
               "an unmatchable prefix is left in peace");
 
-        strcpy(line, "echo mo"); len = 7; pos = 7;
+        /* a builtin that takes no filename offers none */
+        strcpy(line, "bt mo"); len = 5; pos = 5;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "echo mo") == 0 && out_len == 0,
-              "only commands that take a file complete one -- echo gets nothing");
+        CHECK(strcmp(line, "bt mo") == 0 && out_len == 0,
+              "a builtin that takes no file completes nothing");
 
-        strcpy(line, "echo "); len = 5; pos = 5;
+        /* but a program does, since the shell cannot know what it takes
+         * and most of them take a filename */
+        strcpy(line, "cat mo"); len = 6; pos = 6;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(out_len == 0, "nor does a bare tab after echo");
+        CHECK(strcmp(line, "cat motd.txt") == 0,
+              "and a program in bin/ completes filenames after it");
 
         /* an unknown command offers nothing after it either */
         strcpy(line, "zzz mo"); len = 6; pos = 6;
@@ -434,49 +447,30 @@ int main(void) {
     CHECK(killed_id == -1 && strstr(out, "not a thread id"),
           "a non-numeric id never reaches the scheduler");
 
-    run("time echo hi");
-    CHECK(strstr(out, "hi") && strstr(out, "ms]"),
+    run("time ps");
+    CHECK(strstr(out, "<PS>") && strstr(out, "ms]"),
           "time runs the command and reports how long it took");
 
     run("hexdump");
     CHECK(strstr(out, "hexdump <hex address>") != NULL, "hexdump explains itself");
 
-    /* ---- the ramdisk ---- */
+    /* ---- the ramdisk ----
+     * ls and cat left the kernel in 0.1.4. the shell's job is now only
+     * to find them in bin/ and hand over the arguments; what they print
+     * is their own business, and tested where they live */
+    ran_path = NULL;
     run("ls");
-    CHECK(strstr(out, "motd.txt") != NULL, "ls lists a file");
-    CHECK(strstr(out, "in 10 files") != NULL,
-          "and counts files, not the directory entries tar leaves behind");
-    CHECK(strstr(out, "bin/hello") != NULL, "and the nested one");
-    CHECK(strstr(out, "./") == NULL,
-          "and prints paths you can actually retype -- no leading ./");
+    CHECK(ran_path && strcmp(ran_path, "bin/ls") == 0, "ls is a program now");
 
+    ran_path = NULL;
     run("cat motd.txt");
-    CHECK(strstr(out, "Thou art I") != NULL, "cat prints the real file");
+    CHECK(ran_path && strcmp(ran_path, "bin/cat") == 0, "and so is cat");
 
-    run("cat nope.txt");
-    CHECK(strstr(out, "no such file") != NULL, "and says so when it isnt there");
 
-    run("cat hello");
-    CHECK(strstr(out, "bin/hello") != NULL, "cat suggests the path too");
 
-    run("cat");
-    CHECK(strstr(out, "cat <file>") != NULL, "bare cat explains itself");
 
-    /* the file that matters, by the exact path the shell must accept */
-    run("cat bin/hello");
-    CHECK(out_len > 0, "cat can reach bin/hello");
 
-    /* cat takes several files at once */
-    run("cat motd.txt motd.txt");
-    {
-        const char *first = strstr(out, "Thou art I");
-        CHECK(first && strstr(first + 1, "Thou art I"),
-              "cat concatenates, as named");
-    }
 
-    run("cat motd.txt nope.txt");
-    CHECK(strstr(out, "Thou art I") && strstr(out, "no such file"),
-          "and keeps going past one that is missing");
 
     run("dmesg");
     CHECK(strcmp(out, "<DMESG>") == 0, "dmesg reaches the log");
@@ -523,6 +517,29 @@ int main(void) {
 
     run("run bin/hello &");
     CHECK(ran_background, "a trailing & puts it in the background");
+
+    /* arguments reach the program, which is what let cat and echo
+     * stop being kernel commands */
+    run("run bin/cat motd.txt");
+    CHECK(ran_argc == 2 && ran_arg1 && strcmp(ran_arg1, "motd.txt") == 0,
+          "arguments after the program name are handed to it");
+
+    run("run bin/cat motd.txt &");
+    CHECK(ran_background && ran_argc == 2,
+          "and the & is taken off rather than passed along as one");
+
+    /* an unknown command is looked for in bin/, which is how a moved
+     * command keeps working without the shell knowing it moved */
+    ran_path = NULL;
+    run("cat motd.txt");
+    CHECK(ran_path && strcmp(ran_path, "bin/cat") == 0,
+          "an unknown command is looked for as a program");
+    CHECK(ran_argc == 2 && ran_arg1 && strcmp(ran_arg1, "motd.txt") == 0,
+          "with its arguments");
+
+    ran_path = NULL;
+    run("definitelynotathing");
+    CHECK(ran_path == NULL, "and one that is not there is not run");
 
     /* ---- who we are ---- */
     run("arcana");

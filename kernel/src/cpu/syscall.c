@@ -175,13 +175,45 @@ static int64_t sys_open(uint64_t ptr, uint64_t len) {
     return process_fd_open(caller_pid(), f.data, f.size);
 }
 
+/* the nth file in the ramdisk, by name. this is the whole of readdir:
+ * there are no directories to descend into, so an index and a name is
+ * the entire interface. `ls` needed exactly this and nothing else --
+ * it was the only thing keeping it inside the kernel */
+static int64_t sys_readdir(uint64_t index, uint64_t ptr, uint64_t len) {
+    if (len == 0 || !user_range_ok(ptr, len)) {
+        return -1;
+    }
+
+    struct ramdisk_file f;
+    if (!ramdisk_stat((size_t)index, &f)) {
+        return -1;      /* past the end */
+    }
+
+    const char *name = f.name;
+    if (name[0] == '.' && name[1] == '/') {
+        name += 2;      /* the same path a program could hand to open */
+    }
+
+    uint64_t n = strlen(name);
+    if (n >= len) {
+        n = len - 1;
+    }
+    memcpy((void *)ptr, name, n);
+    ((char *)ptr)[n] = '\0';
+    return (int64_t)n;
+}
+
 static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
     char path[64];
     if (!copy_path(ptr, len, path, sizeof path)) {
         return -1;
     }
+    /* a spawned program gets its own path as argv[0], the way a shell
+     * would give it. richer arguments want a syscall that can carry
+     * them, which is not this one */
     const char *why = NULL;
-    int pid = user_spawn(path, caller_pid(), &why);
+    const char *argv[1] = { path };
+    int pid = user_spawn(path, 1, argv, caller_pid(), &why);
     return (pid == 0) ? -1 : pid;
 }
 
@@ -231,6 +263,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_spawn(a0, a1);
     case SYS_WAIT:
         return sys_wait(a0, a1);
+    case SYS_READDIR:
+        return sys_readdir(a0, a1, a2);
     case SYS_UPTIME:
         return (int64_t)pit_uptime_ms();
     case SYS_YIELD:

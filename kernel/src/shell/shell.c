@@ -37,6 +37,7 @@ struct command {
 
 static const struct command commands[];    /* defined below, after the handlers */
 static void run_argv(int argc, char **argv);
+static void launch(const char *path, int argc, char **argv);
 static size_t common_prefix(const char *a, const char *b);
 
 /* ---- the personas one may summon ---------------------------------- */
@@ -84,7 +85,8 @@ static void persona_thread(void *arg) {
 
 static void cmd_help(int argc, char **argv) {
     (void)argc; (void)argv;
-    kprintf("thou may command:\n");
+
+    kprintf("built into the kernel, because they need to be:\n");
     for (const struct command *c = commands; c->name; c++) {
         kprintf("  %s", c->name);
         for (size_t i = strlen(c->name); i < 9; i++) {
@@ -92,18 +94,31 @@ static void cmd_help(int argc, char **argv) {
         }
         kprintf("%s\n", c->help);
     }
+
+    /* and everything that did not need to be. typing one of these
+     * looks no different, but it runs in ring 3 with an address space
+     * of its own and can touch nothing it was not given */
+    struct ramdisk_file f;
+    bool any = false;
+    for (size_t i = 0; ramdisk_stat(i, &f); i++) {
+        const char *n = f.name;
+        if (n[0] == '.' && n[1] == '/') n += 2;
+        if (n[0] != 'b' || n[1] != 'i' || n[2] != 'n' || n[3] != '/') continue;
+        if (n[4] == '\0') continue;
+        if (!any) {
+            kprintf("\nprograms in ring 3, run by name:\n ");
+            any = true;
+        }
+        kprintf(" %s", n + 4);
+    }
+    if (any) {
+        kprintf("\n");
+    }
 }
 
 static void cmd_clear(int argc, char **argv) {
     (void)argc; (void)argv;
     console_clear();
-}
-
-static void cmd_echo(int argc, char **argv) {
-    for (int i = 1; i < argc; i++) {
-        kprintf("%s%s", argv[i], i + 1 < argc ? " " : "");
-    }
-    kprintf("\n");
 }
 
 static void cmd_mem(int argc, char **argv) {
@@ -121,14 +136,6 @@ static void cmd_mem(int argc, char **argv) {
     kprintf("kernel heap\n");
     kprintf("  total  %lu KiB claimed from the pmm\n", kheap_total_bytes() / 1024);
     kprintf("  used   %lu bytes handed out\n", kheap_used_bytes());
-}
-
-static void cmd_uptime(int argc, char **argv) {
-    (void)argc; (void)argv;
-    uint64_t ms = pit_uptime_ms();
-    uint64_t s  = ms / 1000;
-    kprintf("awake for %luh %lum %lus (%lu ticks, %lums)\n",
-            s / 3600, (s / 60) % 60, s % 60, pit_ticks(), ms);
 }
 
 static void cmd_ps(int argc, char **argv) {
@@ -253,41 +260,6 @@ static void cmd_bt(int argc, char **argv) {
     kbacktrace(0, 0);
 }
 
-/* ---- the ramdisk ---------------------------------------------------- */
-
-static void cmd_ls(int argc, char **argv) {
-    (void)argc; (void)argv;
-    if (!ramdisk_present()) {
-        kprintf("no ramdisk was handed to us at boot\n");
-        return;
-    }
-    struct ramdisk_file f;
-    uint64_t total = 0;
-    size_t files = 0;
-
-    for (size_t i = 0; ramdisk_stat(i, &f); i++) {
-        /* print the path exactly as `cat` and `run` will accept it.
-         * tar stores "./bin/hello" and showing that verbatim tells you
-         * to type something that then does not work */
-        const char *name = f.name;
-        if (name[0] == '.' && name[1] == '/') {
-            name += 2;
-        }
-
-        /* the archive holds directory entries too. they have no bytes
-         * and nothing to open, so they are not worth listing */
-        size_t n = strlen(name);
-        if (n == 0 || name[n - 1] == '/') {
-            continue;
-        }
-
-        kprintf("  %6lu  %s\n", f.size, name);
-        total += f.size;
-        files++;
-    }
-    kprintf("  %lu bytes in %zu files\n", total, files);
-}
-
 /* the archive is a flat list of paths and we do not search it, so
  * `hello` will not find `bin/hello`. rather than add a path search --
  * which is magic that surprises you later -- say what they probably
@@ -328,45 +300,30 @@ static void missing(const char *what, const char *name) {
     }
 }
 
-static void cmd_cat(int argc, char **argv) {
-    if (argc < 2) {
-        kprintf("cat <file> [file...] -- see `ls`\n");
-        return;
+/* start a program, handing it everything after the command name as its
+ * arguments. a trailing & means the background */
+static void launch(const char *path, int argc, char **argv) {
+    bool background = (argc > 0 && strcmp(argv[argc - 1], "&") == 0);
+    if (background) {
+        argc--;
     }
-    for (int a = 1; a < argc; a++) {
-        struct ramdisk_file f;
-        if (!ramdisk_open(argv[a], &f)) {
-            missing("cat", argv[a]);
-            continue;
-        }
-        /* straight out of the archive, no copy, no allocation */
-        const char *p = f.data;
-        for (uint64_t i = 0; i < f.size; i++) {
-            kprintf("%c", p[i]);
-        }
-        if (f.size > 0 && p[f.size - 1] != '\n') {
-            kprintf("\n");
+
+    const char *why = NULL;
+    if (!user_run(path, argc, (const char *const *)argv, background, &why)) {
+        if (why == USER_RUN_NO_SUCH_FILE) {
+            missing("run", path);
+        } else {
+            kprintf("cannot run %s: %s\n", path, why);
         }
     }
 }
 
 static void cmd_run(int argc, char **argv) {
     if (argc < 2) {
-        kprintf("run <program> [&] -- try `run bin/hello`\n");
+        kprintf("run <program> [args...] [&] -- try `run bin/hello`\n");
         return;
     }
-    /* a trailing & puts it in the background, so you can have two
-     * programs at once and watch them not interfere */
-    bool background = (argc >= 3 && strcmp(argv[2], "&") == 0);
-
-    const char *why = NULL;
-    if (!user_run(argv[1], background, &why)) {
-        if (why == USER_RUN_NO_SUCH_FILE) {
-            missing("run", argv[1]);
-        } else {
-            kprintf("cannot run %s: %s\n", argv[1], why);
-        }
-    }
+    launch(argv[1], argc - 1, argv + 1);
 }
 
 static void cmd_dmesg(int argc, char **argv) {
@@ -586,15 +543,11 @@ static void cmd_reboot(int argc, char **argv) {
 static const struct command commands[] = {
     { "help",   "list what thou may command",           cmd_help, false },
     { "clear",  "wipe the screen clean",                cmd_clear, false },
-    { "echo",   "say something back",                   cmd_echo, false },
-    { "ls",     "what the ramdisk carries",             cmd_ls, false },
-    { "cat",    "read a file aloud",                    cmd_cat, true },
     { "run",    "give a program the outer ring; & for background", cmd_run, true },
     { "dmesg",  "everything boot said while you werent looking", cmd_dmesg, false },
     { "arcana", "the rank of this bond, and its making", cmd_arcana, false },
     { "persona","the face this machine wears",          cmd_persona, false },
     { "mem",    "frames and heap, honestly counted",    cmd_mem, false },
-    { "uptime", "how long since the bond was formed",   cmd_uptime, false },
     { "ps",     "the threads that walk this realm",     cmd_ps, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },
@@ -649,6 +602,24 @@ static void run_argv(int argc, char **argv) {
             return;
         }
     }
+    /* not a builtin. before deciding it is nothing, look for a program
+     * of that name -- which is how `cat` and `echo` keep working after
+     * moving out of the kernel and into ramdisk/bin */
+    {
+        char path[64] = "bin/";
+        size_t n = strlen(argv[0]);
+        if (n + 4 < sizeof path) {
+            for (size_t i = 0; i <= n; i++) {
+                path[4 + i] = argv[0][i];
+            }
+            struct ramdisk_file f;
+            if (ramdisk_open(path, &f)) {
+                launch(path, argc, argv);
+                return;
+            }
+        }
+    }
+
     /* before giving up, see if they nearly typed something real. we
      * only compare leading characters -- enough to catch a fumbled
      * ending like `dmseg`, and honest about not being spell check */
@@ -834,6 +805,27 @@ static void replace_word(char *line, size_t *len, size_t *pos,
     move_left((*len > was ? *len : was) - *pos);
 }
 
+/* does the line start with the name of a program in bin/? */
+static bool first_word_is_program(const char *line) {
+    size_t i = 0;
+    while (line[i] == ' ') i++;
+    size_t start = i;
+    while (line[i] != '\0' && line[i] != ' ') i++;
+
+    char path[64] = "bin/";
+    size_t n = i - start;
+    if (n == 0 || n + 4 >= sizeof path) {
+        return false;
+    }
+    for (size_t k = 0; k < n; k++) {
+        path[4 + k] = line[start + k];
+    }
+    path[4 + n] = '\0';
+
+    struct ramdisk_file f;
+    return ramdisk_open(path, &f);
+}
+
 /* which command the line begins with, or NULL if it is not one we know.
  * the line must already be terminated -- complete() sees to that */
 static const struct command *command_for_line(const char *line) {
@@ -880,10 +872,16 @@ static void gather(struct candidates *c, const char *line, size_t start,
         return;
     }
 
-    /* only offer filenames after a command that actually takes one --
+    /* offer filenames after a command that takes one, and after any
+     * program -- most of them take a filename, and the shell has no way
+     * to know which. a builtin that does not is left alone, since
      * completing `echo mo<tab>` into a filename would be surprising */
     const struct command *cmd = command_for_line(line);
-    if (cmd == NULL || !cmd->takes_file) {
+    if (cmd != NULL) {
+        if (!cmd->takes_file) {
+            return;
+        }
+    } else if (!first_word_is_program(line)) {
         return;
     }
 

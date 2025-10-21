@@ -23,19 +23,24 @@ const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
 struct user_start {
     uint64_t entry;
     uint64_t stack_top;
+    uint64_t argc;
+    uint64_t argv;      /* a user address, inside that same stack */
 };
 
 static void user_thread_start(void *arg) {
     struct user_start *u = arg;
     uint64_t entry = u->entry;
     uint64_t stack_top = u->stack_top;
+    uint64_t argc = u->argc;
+    uint64_t argv = u->argv;
     kfree(u);
 
     /* the scheduler loaded our address space and pointed the tss rsp0
      * and the syscall stack at our kernel stack when it switched us in,
      * so a trap from ring 3 lands somewhere we own. everything below
      * this line is one way */
-    enter_usermode(entry, stack_top, GDT_USER_CODE3, GDT_USER_DATA3);
+    enter_usermode(entry, stack_top, GDT_USER_CODE3, GDT_USER_DATA3,
+                   argc, argv);
 }
 
 /* collect anything that finished in the background and was never
@@ -62,7 +67,65 @@ static void reap_abandoned(void) {
     }
 }
 
-int user_spawn(const char *path, int parent, const char **error) {
+/* lay the arguments out on the program's own stack, top downwards:
+ * first the strings, then an array of pointers to them, then the stack
+ * pointer it will start on.
+ *
+ * we are writing into a stack that belongs to an address space nobody
+ * has loaded yet, so every store goes through the direct map while
+ * every *pointer* has to be the address the program will see. the two
+ * run in lockstep, which is what user_addr() keeps straight. */
+struct argblock {
+    uint64_t stack_top;     /* where rsp starts, 16-aligned */
+    uint64_t argv;          /* user address of the pointer array */
+    uint64_t argc;
+};
+
+static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
+                       struct argblock *out) {
+    uint8_t *base_k = pmm_phys_to_virt(stack_phys);
+    uint8_t *top_k  = base_k + USER_STACK_PAGES * PAGE_SIZE;
+
+    /* the kernel address of a given user address inside this stack */
+    #define user_addr(va) (top_k - (USER_STACK_TOP - (va)))
+
+    uint64_t sp = USER_STACK_TOP;
+    uint64_t str_va[MAX_ARGS];
+
+    if (argc > MAX_ARGS) {
+        argc = MAX_ARGS;
+    }
+
+    /* the strings themselves, backwards so argv[0] ends up lowest */
+    for (int i = argc - 1; i >= 0; i--) {
+        uint64_t len = strlen(argv[i]) + 1;
+        if (sp - len <= USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE + 256) {
+            return false;       /* leave the program some stack to run on */
+        }
+        sp -= len;
+        memcpy(user_addr(sp), argv[i], len);
+        str_va[i] = sp;
+    }
+
+    /* then the array of pointers to them, aligned */
+    sp &= ~15ull;
+    sp -= (uint64_t)(argc + 1) * 8;
+    uint64_t *arr = (uint64_t *)user_addr(sp);
+    for (int i = 0; i < argc; i++) {
+        arr[i] = str_va[i];
+    }
+    arr[argc] = 0;              /* the NULL every argv ends with */
+
+    out->argv = sp;
+    out->argc = (uint64_t)argc;
+    out->stack_top = sp & ~15ull;   /* sysv wants rsp 16-aligned at entry */
+
+    #undef user_addr
+    return true;
+}
+
+int user_spawn(const char *path, int argc, const char *const argv[],
+               int parent, const char **error) {
     reap_abandoned();
 
     struct ramdisk_file f;
@@ -117,8 +180,18 @@ int user_spawn(const char *path, int parent, const char **error) {
         *error = "no memory";
         return 0;
     }
-    start->entry = loaded.entry;
-    start->stack_top = USER_STACK_TOP & ~0xfull;   /* sysv wants 16-aligned */
+    struct argblock args;
+    if (!build_args(stack_phys, argc, argv, &args)) {
+        kfree(start);
+        addrspace_destroy(space);
+        *error = "those arguments do not fit on a stack";
+        return 0;
+    }
+
+    start->entry     = loaded.entry;
+    start->stack_top = args.stack_top;
+    start->argc      = args.argc;
+    start->argv      = args.argv;
 
     /* the process comes first, because it is what outlives the thread
      * and holds the exit code somebody will want to read */
@@ -166,8 +239,9 @@ bool user_wait(int pid, int *code) {
     return process_collect(pid, code);
 }
 
-bool user_run(const char *path, bool background, const char **error) {
-    int pid = user_spawn(path, 0, error);
+bool user_run(const char *path, int argc, const char *const argv[],
+              bool background, const char **error) {
+    int pid = user_spawn(path, argc, argv, 0, error);
     if (pid == 0) {
         return false;
     }

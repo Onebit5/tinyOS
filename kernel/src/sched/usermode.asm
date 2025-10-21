@@ -10,8 +10,8 @@ section .text
 
 global enter_usermode
 
-; enter_usermode(entry, user_stack_top, user_cs, user_ss)
-;                rdi    rsi              rdx      rcx
+; enter_usermode(entry, user_stack_top, user_cs, user_ss, argc, argv)
+;                rdi    rsi              rdx      rcx      r8    r9
 enter_usermode:
     ; the segment registers are not covered by iretq and would otherwise
     ; still hold kernel selectors in ring 3
@@ -27,14 +27,18 @@ enter_usermode:
     push rdx                ; cs
     push rdi                ; rip
 
-    ; nothing in ring 3 should inherit whatever we happened to be
-    ; holding. it can only learn what we hand it deliberately
+    ; the arguments, in the registers _start expects to find them. this
+    ; is the one thing ring 3 is told deliberately, so it goes in after
+    ; the frame is built and before everything else is wiped
+    mov rdi, r8             ; argc
+    mov rsi, r9             ; argv
+
+    ; nothing else is inherited. whatever we happened to be holding is
+    ; the kernel's business, not the program's
     xor rax, rax
     xor rbx, rbx
     xor rcx, rcx
     xor rdx, rdx
-    xor rsi, rsi
-    xor rdi, rdi
     xor rbp, rbp
     xor r8, r8
     xor r9, r9

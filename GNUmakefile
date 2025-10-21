@@ -84,7 +84,8 @@ UCFLAGS := -Wall -Wextra -std=gnu11 -O1 \
 ULDFLAGS := -nostdlib -static -T user/linker.ld
 
 USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail \
-              ramdisk/bin/reader ramdisk/bin/parent ramdisk/bin/ask
+              ramdisk/bin/reader ramdisk/bin/parent ramdisk/bin/ask \
+              ramdisk/bin/echo ramdisk/bin/cat ramdisk/bin/uptime ramdisk/bin/ls
 
 ramdisk/bin/%: user/%.c user/syscall.h user/linker.ld
 	@mkdir -p $(@D)

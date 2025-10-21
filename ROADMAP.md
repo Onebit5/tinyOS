@@ -29,11 +29,14 @@ should *own* the input queue, with ctrl+c delivered to it rather than
 handled on its behalf. that is the beginning of a controlling
 terminal.~~ **done in 0.1.3.**
 
-**0.1.4 a userspace toolbox.** `cat`, `echo`, `uptime` as real programs
+**0.1.4 a userspace toolbox.** ~~`cat`, `echo`, `uptime` as real programs
 in `ramdisk/bin` rather than kernel commands. the kernel shell keeps
 only what genuinely needs kernel access -- `vmm`, `bt`, `hexdump`, `ps`
 -- and everything else moves out. the point is to find out which
-commands were secretly using kernel internals.
+commands were secretly using kernel internals.~~ **done in 0.1.4**, and
+the answer was: `echo` needed only argv, `cat` and `uptime` needed
+nothing that did not already exist, and `ls` needed one new syscall
+because `open` can only answer about a name you already know.
 
 **0.1.5 users.** a read-only `passwd` in the ramdisk, a login prompt, a
 uid on each process, and syscalls that check it. worth saying: this

@@ -25,7 +25,9 @@ static void prompt_for(const char *what, char *buf, long max) {
     buf[n] = '\0';
 }
 
-void _start(void) {
+void _start(int argc, char **argv) {
+    (void)argc; (void)argv;
+
     char name[64];
 
     write("[ask] i am pid ");

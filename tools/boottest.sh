@@ -35,8 +35,10 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'bt\r';     sleep 2
     printf 'date\r';   sleep 1
     printf 'history\r'; sleep 1
-    printf 'ls\r';      sleep 1
-    printf 'cat motd.txt\r'; sleep 1
+    printf 'ls\r';      sleep 2
+    printf 'echo the bond endures\r'; sleep 2
+    printf 'uptime\r';  sleep 2
+    printf 'cat motd.txt\r'; sleep 2
     printf 'arcana\r';  sleep 1
     printf 'persona\r'; sleep 2
     printf 'run bin/hello\r'; sleep 6
@@ -94,7 +96,11 @@ check 'symbols work'  'shell_run+'
 check 'date works'    ':'
 check 'history works' 'uptime'
 check 'ramdisk mounted' 'ramdisk    :'
-check 'ls works'      'motd.txt'
+check 'ls is a program'  'bin/ls is pid'
+check 'ls works'         'motd.txt'
+check 'echo is a program' 'bin/echo is pid'
+check 'echo works'       'the bond endures'
+check 'uptime works'     'awake for'
 check 'cat works'     'Thou art I'
 check 'arcana works'  'COMPUTER ARCANA'
 check 'persona works' 'velvet@tinyOS'

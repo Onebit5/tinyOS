@@ -7,7 +7,9 @@
 
 #include "syscall.h"
 
-void _start(void) {
+void _start(int argc, char **argv) {
+    (void)argc; (void)argv;
+
     write("[reader] i am pid ");
     write_num(getpid());
     write(", and i shall read something\n\n");

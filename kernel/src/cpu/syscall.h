@@ -18,6 +18,7 @@
 #define SYS_GETPID 8    /* ()                 -> pid                  */
 #define SYS_SPAWN  9    /* (path, len)        -> pid of the new one   */
 #define SYS_WAIT   10   /* (pid, int *code)   -> pid, blocks          */
+#define SYS_READDIR 11  /* (n, buf, len)      -> name length, or -1    */
 
 /* wire up STAR/LSTAR/SFMASK and turn on EFER.SCE */
 void syscall_init(void);

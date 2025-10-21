@@ -81,9 +81,19 @@ void syscall_entry(void) { }
 
 /* a one-file ramdisk, so `open` has something to find */
 static const char motd[] = "hee-ho, from a file\n";
+static const struct ramdisk_file rd[] = {
+    { "./motd.txt", motd, sizeof motd - 1 },
+    { "./bin/",     "",   0 },
+    { "./bin/cat",  motd, 4 },
+};
 bool ramdisk_open(const char *name, struct ramdisk_file *out) {
     if (strcmp(name, "motd.txt") != 0) return false;
     out->name = "motd.txt"; out->data = motd; out->size = sizeof motd - 1;
+    return true;
+}
+bool ramdisk_stat(size_t i, struct ramdisk_file *out) {
+    if (i >= 3) return false;
+    *out = rd[i];
     return true;
 }
 
@@ -304,6 +314,31 @@ int main(void) {
     CHECK(call(SYS_WAIT, mine, (uint64_t)&codeout) == mine, "ours works");
     CHECK(codeout == 42, "and fills in how it went");
     CHECK(call(SYS_WAIT, 4242, 0) == -1, "waiting for nothing is refused");
+
+    /* ---- reading a directory ----
+     * `ls` was the only command that needed something new to leave the
+     * kernel: `open` can only answer about a name you already know */
+    user_extra = (uint64_t)sink;
+    memset(sink, 0, sizeof sink);
+    CHECK(call3(SYS_READDIR, 0, (uint64_t)sink, sizeof sink) == 8,
+          "readdir gives the first name");
+    CHECK(strcmp(sink, "motd.txt") == 0,
+          "with the leading ./ stripped, so it is a path open would take");
+
+    CHECK(call3(SYS_READDIR, 2, (uint64_t)sink, sizeof sink) == 7,
+          "and later ones by index");
+    CHECK(strcmp(sink, "bin/cat") == 0, "including nested paths");
+
+    CHECK(call3(SYS_READDIR, 99, (uint64_t)sink, sizeof sink) == -1,
+          "past the end says so rather than inventing a name");
+    CHECK(call3(SYS_READDIR, 0, kernel_page, 64) == -1,
+          "and a buffer the caller does not own is refused");
+
+    /* a name longer than the buffer is truncated, not written past */
+    memset(sink, 0xaa, sizeof sink);
+    CHECK(call3(SYS_READDIR, 0, (uint64_t)sink, 4) == 3,
+          "a short buffer takes what fits");
+    CHECK(strcmp(sink, "mot") == 0, "terminated, with nothing beyond it");
 
     /* ---- exit ---- */
     if (setjmp(jb) == 0) {

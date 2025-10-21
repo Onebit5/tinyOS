@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.3** (**the keyboard belongs to somebody now.** a foreground process owns the terminal, and ctrl+c is delivered *to* it rather than acted on for it -- so a program can finally read the keys it was always being denied)
+**version: 0.1.4** (**a userspace toolbox.** `cat`, `echo`, `uptime` and `ls` left the kernel and became real programs in ring 3. typing them looks no different; they just no longer have the kernel's memory to reach into)
 
 ## what it does
 
@@ -27,6 +27,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a process table: pids, parents, and exit codes that outlive the thread
 - [x] file descriptors, and `spawn`/`wait` -- a program can start a program
 - [x] a controlling terminal: a foreground process, and ctrl+c delivered to it
+- [x] arguments, and a toolbox that lives outside the kernel
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -193,6 +194,23 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### the toolbox moved out
+
+`cat`, `echo`, `uptime` and `ls` used to be kernel commands, with the whole kernel in reach. they are programs in `ramdisk/bin` now, running in ring 3 with an address space of their own, able to touch nothing they were not handed. typing `cat motd.txt` looks exactly the same: when a word is not a builtin, the shell looks for a program of that name in `bin/` and runs it.
+
+what made this possible was **arguments**. a program had no way to be told anything, so `cat` could not be told which file. now the loader lays argv out on the program's own stack before it starts -- the strings, then an array of pointers to them -- and hands `argc` and `argv` over in `rdi` and `rsi`. the awkward part is that every store goes through the direct map, while every *pointer written* has to be the address the program will see, since the space it belongs to is not loaded yet.
+
+the point of the exercise was to find out which commands were quietly using kernel internals, and the answer is worth recording:
+
+| | |
+|---|---|
+| `echo` | needed only argv |
+| `uptime` | needed nothing that did not already exist |
+| `cat` | needed nothing either -- `open`/`read` arrived in 0.1.2 |
+| `ls` | needed one new syscall. `open` can only answer about a name you already know, so listing a directory required `readdir` |
+
+what stayed behind genuinely could not leave: `vmm`, `bt`, `hexdump`, `ps`, `mem`, `dmesg` and `kill` all read kernel state directly, and `crash`, `smash`, `reboot` and `poweroff` exist to do things to the machine rather than with it.
+
 ### the keyboard belongs to somebody
 
 before this there was no answer to the question "whose keys are these". the shell sat in a loop peeking at the input while a program ran, watching for ctrl+c and killing on the program's behalf -- which meant a program could never actually read the keyboard, because the shell was standing in front of it.
@@ -330,6 +348,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.4** — a toolbox outside the kernel. `cat`, `echo`, `uptime` and `ls` are programs in `ramdisk/bin` now, and typing one looks no different because the shell falls back to looking for a program of that name. what made it possible was arguments: the loader builds argv on the program's own stack -- strings, then pointers to them -- and hands argc and argv over in registers, with every store going through the direct map while every pointer written is the address the program will see. the exercise was meant to reveal which commands were secretly using kernel internals, and it did: `echo` needed only argv, `cat` and `uptime` needed nothing new, and `ls` needed `readdir`, because `open` can only answer about a name you already know. what stayed behind reads kernel state or acts on the machine, and could not have left.
 - **0.1.3** — the keyboard belongs to somebody. a foreground process owns the terminal while it runs, and the shell stops peeking at keys on its behalf -- which is what made a program reading the keyboard impossible until now. ctrl+c aimed at a program is delivered to it rather than acted on for it: it never becomes a character, the process finds it on its next syscall, and a read or a sleep comes back -1 so a sleeping program hears about it at once. pressing it twice stops asking. only the foreground process may read stdin, so a background one cannot take keys meant for somebody else. the tty also owns the line discipline -- echo, backspace, and ignoring arrows -- because a program never sees the keys go past and cannot echo them itself; without it you type into a void. `bin/ask` reads a line and greets you, which is a thing that could not have worked a version ago.
 - **0.1.2** — the syscall table doubles: `open`/`close` and a `read` that takes a descriptor, so a program can read a file instead of only being loaded from one; `getpid`; and `spawn`/`wait`, which let a program start another and hear how it went. descriptors live on the process, so they close when it does, and a bookmark into a read-only archive costs nothing to allocate or free. a process may only wait for its own children. `read`/`write` gained an fd argument, a breaking change to the user abi and the right shape. also fixes a regression 0.1.0 shipped: user pointers were validated against the kernel's page tables, which since per-process address spaces map none of a program's memory -- so every syscall taking a pointer silently returned -1 and programs printed nothing at all. refusals are logged now, a test asserts which page tables get consulted, and the boot test fails if any pointer is ever refused. two new programs: `bin/reader` opens a file and reads it in bites, `bin/parent` spawns `bin/fail` and passes on its 42.
 - **0.1.1** — processes. a program now has a pid, a parent and an exit code, kept in a table that outlives the thread that ran it -- which is the only way an exit code can survive, since the thread and its whole address space are gone the moment it dies. `run` reports how a program went; `ps` shows threads and processes as the different things they are. and the caveat that has been in this file since m6 is retired: threads carry a pointer back to the waitq they are parked on, so `kill` can take one off that queue before the reaper frees it, instead of refusing. `bin/fail` exists to exit 42 and prove the number gets home.

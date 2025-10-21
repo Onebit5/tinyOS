@@ -7,7 +7,9 @@
 
 #include "syscall.h"
 
-void _start(void) {
+void _start(int argc, char **argv) {
+    (void)argc; (void)argv;
+
     write("[fail] i shall attempt something beyond me\n");
     sleep(300);
     write("[fail] as expected, it did not go well\n");
