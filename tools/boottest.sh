@@ -24,6 +24,8 @@ echo "booting $ISO and driving the shell over serial..."
 # before it can hear us, and each command needs a beat to answer
 {
     sleep 8
+    printf 'igor\r';   sleep 1
+    printf 'velvet\r'; sleep 2
     printf 'help\r';   sleep 1
     printf 'mem\r';    sleep 1
     printf 'ps\r';     sleep 1
@@ -38,6 +40,12 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'ls\r';      sleep 2
     printf 'echo the bond endures\r'; sleep 2
     printf 'uptime\r';  sleep 2
+    printf 'whoami\r';  sleep 1
+    printf 'run bin/whoami\r'; sleep 2
+    printf 'logout\r';  sleep 1
+    printf 'guest\r';   sleep 1
+    printf 'guest\r';   sleep 2
+    printf 'run bin/whoami\r'; sleep 2
     printf 'cat motd.txt\r'; sleep 2
     printf 'arcana\r';  sleep 1
     printf 'persona\r'; sleep 2
@@ -80,7 +88,9 @@ check 'tss loaded'         'tss loaded'
 check 'boot thread left'   '[boot] hath returned'
 check 'memory reclaimed'   'reclaimed'
 check 'scheduler started'  'the wheel turns'
-check 'reached the prompt' 'velvet>'
+check 'login prompt'       'name the guest'
+check 'login works'        'welcome, igor'
+check 'reached the prompt' 'igor@velvet#'
 
 # did it answer us
 check 'help works'    'call forth a persona thread'
@@ -101,6 +111,11 @@ check 'ls works'         'motd.txt'
 check 'echo is a program' 'bin/echo is pid'
 check 'echo works'       'the bond endures'
 check 'uptime works'     'awake for'
+check 'whoami works'     'uid 0'
+check 'root reads it'    'THE VELVET ROOM'
+check 'logout works'     'fare thee well'
+check 'guest logs in'    'thou art a guest'
+check 'guest is refused' 'may not read'
 check 'cat works'     'Thou art I'
 check 'arcana works'  'COMPUTER ARCANA'
 check 'persona works' 'velvet@tinyOS'

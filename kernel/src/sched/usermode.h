@@ -29,7 +29,7 @@ extern const char *const USER_RUN_NO_SUCH_FILE;
  * the pid that will be allowed to wait for it -- 0 means the kernel
  * shell, which is nobody's child */
 int user_spawn(const char *path, int argc, const char *const argv[],
-               int parent, const char **error);
+               int parent, int uid, const char **error);
 
 /* block until a pid has ended, then collect it. false if there is no
  * such process. whether the caller had any business waiting for it is
@@ -39,6 +39,6 @@ bool user_wait(int pid, int *code);
 /* the shell's way in: spawn, and unless told otherwise wait for it and
  * report how it went */
 bool user_run(const char *path, int argc, const char *const argv[],
-              bool background, const char **error);
+              int uid, bool background, const char **error);
 
 #endif

@@ -111,6 +111,7 @@ bool ramdisk_stat(size_t index, struct ramdisk_file *out) {
             out->name = h->name;
             out->size = parse_octal(h->size, sizeof h->size);
             out->data = archive + off + TAR_BLOCK;
+            out->mode = (uint32_t)parse_octal(h->mode, sizeof h->mode);
             return true;
         }
         off = next_offset(off, h);
@@ -136,6 +137,13 @@ bool ramdisk_open(const char *name, struct ramdisk_file *out) {
         }
     }
     return false;
+}
+
+bool ramdisk_may_read(const struct ramdisk_file *f, int uid) {
+    if (uid == 0) {
+        return true;        /* the master of the velvet room reads all */
+    }
+    return (f->mode & 0004) != 0;   /* everyone else needs other-read */
 }
 
 bool     ramdisk_present(void) { return archive != NULL && file_count > 0; }

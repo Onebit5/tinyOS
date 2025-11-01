@@ -13,6 +13,7 @@
 #include "cpu/cpuinfo.h"
 #include "fs/ramdisk.h"
 #include "sched/usermode.h"
+#include "sched/auth.h"
 #include "lib/ksyms.h"
 #include "version.h"
 #include "sched/sched.h"
@@ -38,6 +39,11 @@ struct command {
 static const struct command commands[];    /* defined below, after the handlers */
 static void run_argv(int argc, char **argv);
 static void launch(const char *path, int argc, char **argv);
+
+/* who is at the keyboard. every program the shell starts inherits it,
+ * and nothing in ring 3 can reach in and change it */
+static int current_uid;
+static char current_user[AUTH_NAME_MAX] = "nobody";
 static size_t common_prefix(const char *a, const char *b);
 
 /* ---- the personas one may summon ---------------------------------- */
@@ -309,7 +315,8 @@ static void launch(const char *path, int argc, char **argv) {
     }
 
     const char *why = NULL;
-    if (!user_run(path, argc, (const char *const *)argv, background, &why)) {
+    if (!user_run(path, argc, (const char *const *)argv,
+                  current_uid, background, &why)) {
         if (why == USER_RUN_NO_SUCH_FILE) {
             missing("run", path);
         } else {
@@ -325,6 +332,19 @@ static void cmd_run(int argc, char **argv) {
     }
     launch(argv[1], argc - 1, argv + 1);
 }
+
+static void cmd_whoami(int argc, char **argv) {
+    (void)argc; (void)argv;
+    const struct account *a = auth_find(current_user);
+    kprintf("%s, uid %d%s%s\n", current_user, current_uid,
+            (a != NULL && a->description[0]) ? " -- " : "",
+            (a != NULL) ? a->description : "");
+    if (current_uid == 0) {
+        kprintf("the velvet room answers to thee\n");
+    }
+}
+
+static void cmd_logout(int argc, char **argv);
 
 static void cmd_dmesg(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -544,6 +564,8 @@ static const struct command commands[] = {
     { "help",   "list what thou may command",           cmd_help, false },
     { "clear",  "wipe the screen clean",                cmd_clear, false },
     { "run",    "give a program the outer ring; & for background", cmd_run, true },
+    { "whoami", "who thou art, and what that permits",  cmd_whoami, false },
+    { "logout", "leave, and let somebody else in",      cmd_logout, false },
     { "dmesg",  "everything boot said while you werent looking", cmd_dmesg, false },
     { "arcana", "the rank of this bond, and its making", cmd_arcana, false },
     { "persona","the face this machine wears",          cmd_persona, false },
@@ -653,7 +675,7 @@ static void run_line(char *line) {
 
 static void prompt(void) {
     console_set_colors(COLOR_PROMPT, 0x101018);
-    kprintf("velvet> ");
+    kprintf("%s@velvet%s ", current_user, current_uid == 0 ? "#" : "$");
     console_set_colors(COLOR_TEXT, 0x101018);
 }
 
@@ -960,10 +982,95 @@ static void complete(char *line, size_t *len, size_t *pos) {
     move_left(*len - *pos);
 }
 
+/* read a line for the kernel's own prompts. `echo` off is for a
+ * password: the keys still arrive, they just leave no trace on the
+ * screen or in the scrollback for the next person to read */
+static void read_line(char *buf, size_t max, bool echo) {
+    size_t len = 0;
+    for (;;) {
+        int c = input_getchar_blocking();
+
+        if (c == '\n') {
+            kprintf("\n");
+            break;
+        }
+        if (c == '\b') {
+            if (len > 0) {
+                len--;
+                if (echo) {
+                    kprintf("\b \b");
+                }
+            }
+            continue;
+        }
+        if (c < ' ' || c > '~') {
+            continue;
+        }
+        if (len + 1 < max) {
+            buf[len++] = (char)c;
+            if (echo) {
+                kprintf("%c", (char)c);
+            }
+        }
+    }
+    buf[len] = '\0';
+}
+
+/* the door. it does not open until somebody names themselves */
+static void login(void) {
+    char name[AUTH_NAME_MAX];
+    char password[AUTH_NAME_MAX];
+
+    for (;;) {
+        console_set_colors(COLOR_PROMPT, 0x101018);
+        kprintf("\nname the guest: ");
+        console_set_colors(COLOR_TEXT, 0x101018);
+        read_line(name, sizeof name, true);
+
+        if (name[0] == '\0') {
+            continue;
+        }
+
+        console_set_colors(COLOR_PROMPT, 0x101018);
+        kprintf("and the word: ");
+        console_set_colors(COLOR_TEXT, 0x101018);
+        read_line(password, sizeof password, false);
+
+        int uid = auth_login(name, password);
+        if (uid < 0) {
+            /* one message for both, because saying which was wrong
+             * hands over half of it */
+            kprintf("that is not a name and a word i know.\n");
+            continue;
+        }
+
+        current_uid = uid;
+        for (size_t i = 0; i < sizeof current_user; i++) {
+            current_user[i] = name[i];
+            if (name[i] == '\0') break;
+        }
+
+        console_set_colors(COLOR_PROMPT, 0x101018);
+        kprintf("\nwelcome, %s.\n", name);
+        if (uid != 0) {
+            kprintf("thou art a guest here, and the room knows it.\n");
+        }
+        console_set_colors(COLOR_TEXT, 0x101018);
+        return;
+    }
+}
+
+static void cmd_logout(int argc, char **argv) {
+    (void)argc; (void)argv;
+    kprintf("fare thee well, %s\n", current_user);
+    login();
+}
+
 void shell_run(void) {
     char line[LINE_MAX];
 
     console_set_colors(COLOR_TEXT, 0x101018);
+    login();
 
     for (;;) {
         size_t len = 0;     /* characters in the line */

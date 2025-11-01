@@ -18,7 +18,16 @@ struct ramdisk_file {
     const char *name;
     const void *data;
     uint64_t    size;
+
+    /* the unix mode tar recorded. we only ever look at one bit of it --
+     * whether the world may read -- but that one bit is enough to give
+     * a uid something it can and cannot do */
+    uint32_t    mode;
 };
+
+/* may a process running as `uid` read this file? uid 0 may read
+ * anything; everybody else needs the other-read bit */
+bool ramdisk_may_read(const struct ramdisk_file *f, int uid);
 
 /* take the archive from limine. must run before the bootloader memory
  * is reclaimed, since the module list lives in it */

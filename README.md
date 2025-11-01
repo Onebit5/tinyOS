@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.4** (**a userspace toolbox.** `cat`, `echo`, `uptime` and `ls` left the kernel and became real programs in ring 3. typing them looks no different; they just no longer have the kernel's memory to reach into)
+**version: 0.1.5** (**users, and a boundary that means something.** a login prompt, a uid on every process, and a file a guest genuinely cannot read -- checked by the kernel, against a mode it read out of a tar header)
 
 ## what it does
 
@@ -28,6 +28,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] file descriptors, and `spawn`/`wait` -- a program can start a program
 - [x] a controlling terminal: a foreground process, and ctrl+c delivered to it
 - [x] arguments, and a toolbox that lives outside the kernel
+- [x] users: a login, a uid per process, and files a guest may not read
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -194,6 +195,16 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### users
+
+boot now stops at a login prompt and asks who you are. the accounts come from `passwd` in the ramdisk; the password is not echoed as you type it. every process carries the **uid** of whoever started it, and a program cannot ask to be somebody else -- it runs as the shell's user, and a child inherits its parent's. the prompt shows which you are: `igor@velvet#` for uid 0, `guest@velvet$` for anyone else.
+
+the check that gives this teeth is `open`. tar records a unix mode in every header, and the kernel weighs it against the calling process's uid: uid 0 reads anything, everyone else needs the other-read bit. `velvet-room.txt` ships mode 0600, so `cat velvet-room.txt` works as `igor` and is refused as `guest` -- and `bin/whoami` demonstrates it from ring 3, where it can be told no and do nothing about it.
+
+**the passwords are stored in the clear, and that is not a corner cut to be fixed later.** it is the honest shape of what this demonstrates. the interesting half of a user is not how the password is kept but what the uid can and cannot reach, and that half is enforced by hardware: ring 3, an address space of its own, and a kernel that checks before it hands anything over. without that boundary a "user" is a variable saying you are an admin. storing a password properly needs somewhere to write, which is what a real disk is for.
+
+login says the same thing for a wrong name as for a wrong password, because saying which was wrong hands over half of it.
+
 ### the toolbox moved out
 
 `cat`, `echo`, `uptime` and `ls` used to be kernel commands, with the whole kernel in reach. they are programs in `ramdisk/bin` now, running in ring 3 with an address space of their own, able to touch nothing they were not handed. typing `cat motd.txt` looks exactly the same: when a word is not a builtin, the shell looks for a program of that name in `bin/` and runs it.
@@ -272,6 +283,7 @@ $ make test
   process    ok        pids, zombies, fds, and a kill that races
   syscall    ok        dispatch, files, spawn, and every pointer refused
   tty        ok        who owns the keyboard, echo, and what ctrl+c means
+  auth       ok        accounts, and every malformed line refused
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -348,6 +360,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.5** — users. a login prompt reading accounts from `passwd` in the ramdisk, with the password not echoed; a uid on every process, inherited by children and unaskable-for by programs; and a check with real consequences -- `open` weighs the mode tar recorded against the caller's uid, so `velvet-room.txt` at 0600 is readable by `igor` and refused to `guest`. `whoami` exists twice on purpose: the builtin reads a variable the shell keeps, the program asks the kernel what uid it was given and cannot lie about the answer. the passwords are plaintext and the README says why that is the honest shape of this rather than a corner cut. the parser is tested mostly on malformed input, since a passwd file letting somebody in on a line it half understood is the worst thing it could do.
 - **0.1.4** — a toolbox outside the kernel. `cat`, `echo`, `uptime` and `ls` are programs in `ramdisk/bin` now, and typing one looks no different because the shell falls back to looking for a program of that name. what made it possible was arguments: the loader builds argv on the program's own stack -- strings, then pointers to them -- and hands argc and argv over in registers, with every store going through the direct map while every pointer written is the address the program will see. the exercise was meant to reveal which commands were secretly using kernel internals, and it did: `echo` needed only argv, `cat` and `uptime` needed nothing new, and `ls` needed `readdir`, because `open` can only answer about a name you already know. what stayed behind reads kernel state or acts on the machine, and could not have left.
 - **0.1.3** — the keyboard belongs to somebody. a foreground process owns the terminal while it runs, and the shell stops peeking at keys on its behalf -- which is what made a program reading the keyboard impossible until now. ctrl+c aimed at a program is delivered to it rather than acted on for it: it never becomes a character, the process finds it on its next syscall, and a read or a sleep comes back -1 so a sleeping program hears about it at once. pressing it twice stops asking. only the foreground process may read stdin, so a background one cannot take keys meant for somebody else. the tty also owns the line discipline -- echo, backspace, and ignoring arrows -- because a program never sees the keys go past and cannot echo them itself; without it you type into a void. `bin/ask` reads a line and greets you, which is a thing that could not have worked a version ago.
 - **0.1.2** — the syscall table doubles: `open`/`close` and a `read` that takes a descriptor, so a program can read a file instead of only being loaded from one; `getpid`; and `spawn`/`wait`, which let a program start another and hear how it went. descriptors live on the process, so they close when it does, and a bookmark into a read-only archive costs nothing to allocate or free. a process may only wait for its own children. `read`/`write` gained an fd argument, a breaking change to the user abi and the right shape. also fixes a regression 0.1.0 shipped: user pointers were validated against the kernel's page tables, which since per-process address spaces map none of a program's memory -- so every syscall taking a pointer silently returned -1 and programs printed nothing at all. refusals are logged now, a test asserts which page tables get consulted, and the boot test fails if any pointer is ever refused. two new programs: `bin/reader` opens a file and reads it in bites, `bin/parent` spawns `bin/fail` and passes on its 42.

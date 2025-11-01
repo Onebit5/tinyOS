@@ -14,6 +14,7 @@
 #include "mm/addrspace.h"
 #include "fs/ramdisk.h"
 #include "drivers/tty.h"
+#include "sched/auth.h"
 #include "lib/string.h"
 
 #define MSR_STAR   0xc0000081
@@ -172,6 +173,15 @@ static int64_t sys_open(uint64_t ptr, uint64_t len) {
     if (!ramdisk_open(path, &f)) {
         return -1;
     }
+
+    /* the boundary, in one line. the mode came out of the tar header
+     * and the uid off the process, and neither is anything ring 3 can
+     * reach in and change */
+    if (!ramdisk_may_read(&f, process_uid(caller_pid()))) {
+        kprintf("[kernel] pid %d (uid %d) may not read %s\n",
+                caller_pid(), process_uid(caller_pid()), path);
+        return -1;
+    }
     return process_fd_open(caller_pid(), f.data, f.size);
 }
 
@@ -210,10 +220,14 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
     }
     /* a spawned program gets its own path as argv[0], the way a shell
      * would give it. richer arguments want a syscall that can carry
-     * them, which is not this one */
+     * them, which is not this one.
+     *
+     * it also inherits our uid rather than choosing one: a program that
+     * could pick its own user would make the whole idea decorative */
     const char *why = NULL;
     const char *argv[1] = { path };
-    int pid = user_spawn(path, 1, argv, caller_pid(), &why);
+    int pid = user_spawn(path, 1, argv, caller_pid(),
+                         process_uid(caller_pid()), &why);
     return (pid == 0) ? -1 : pid;
 }
 
@@ -265,6 +279,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_wait(a0, a1);
     case SYS_READDIR:
         return sys_readdir(a0, a1, a2);
+    case SYS_GETUID:
+        return process_uid(caller_pid());
     case SYS_UPTIME:
         return (int64_t)pit_uptime_ms();
     case SYS_YIELD:

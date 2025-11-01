@@ -41,13 +41,23 @@ void klog_dump(void) { kprintf("<DMESG>"); }
 static bool run_ok = true;
 static const char *ran_path;
 #include "sched/usermode.h"
+#include "sched/auth.h"
 const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
+
+/* the accounts the shell reads at boot */
+static const char passwd_text[] =
+    "# a comment, and a blank line follow\n"
+    "\n"
+    "igor:velvet:0:master of the velvet room\n"
+    "guest:guest:1000:a visitor\n";
 static const char *run_error = "not an elf";
 static bool ran_background;
 static int ran_argc;
 static const char *ran_arg1;
+static int ran_uid = -1;
 bool user_run(const char *path, int argc, const char *const argv[],
-              bool background, const char **error) {
+              int uid, bool background, const char **error) {
+    ran_uid = uid;
     ran_path = path;
     ran_argc = argc;
     ran_arg1 = (argc > 1) ? argv[1] : NULL;
@@ -136,6 +146,8 @@ static void run(const char *line) {
 }
 
 int main(void) {
+    auth_load(passwd_text, sizeof passwd_text - 1);
+
     /* mount the archive the build just made, so completion is exercised
      * against the names the kernel really sees */
     {

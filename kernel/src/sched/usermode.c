@@ -125,7 +125,7 @@ static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
 }
 
 int user_spawn(const char *path, int argc, const char *const argv[],
-               int parent, const char **error) {
+               int parent, int uid, const char **error) {
     reap_abandoned();
 
     struct ramdisk_file f;
@@ -195,7 +195,9 @@ int user_spawn(const char *path, int argc, const char *const argv[],
 
     /* the process comes first, because it is what outlives the thread
      * and holds the exit code somebody will want to read */
-    int pid = process_create(path, parent, pit_uptime_ms());
+    /* a program cannot ask to be somebody else: it runs as whoever
+     * started it, and only the shell decides what that is */
+    int pid = process_create(path, parent, uid, pit_uptime_ms());
     if (pid == 0) {
         kfree(start);
         addrspace_destroy(space);
@@ -240,8 +242,8 @@ bool user_wait(int pid, int *code) {
 }
 
 bool user_run(const char *path, int argc, const char *const argv[],
-              bool background, const char **error) {
-    int pid = user_spawn(path, argc, argv, 0, error);
+              int uid, bool background, const char **error) {
+    int pid = user_spawn(path, argc, argv, 0, uid, error);
     if (pid == 0) {
         return false;
     }

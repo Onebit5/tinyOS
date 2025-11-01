@@ -38,8 +38,8 @@ the answer was: `echo` needed only argv, `cat` and `uptime` needed
 nothing that did not already exist, and `ls` needed one new syscall
 because `open` can only answer about a name you already know.
 
-**0.1.5 users.** a read-only `passwd` in the ramdisk, a login prompt, a
-uid on each process, and syscalls that check it. worth saying: this
+**0.1.5 users.** ~~a read-only `passwd` in the ramdisk, a login prompt, a
+uid on each process, and syscalls that check it.~~ **done in 0.1.5.** worth saying: this
 only means something because ring 3 exists -- without a boundary the
 hardware defends, a "user" is a variable that says you are an admin.
 persistence is not required for this; only *changing* users needs a

@@ -44,6 +44,7 @@ struct fd {
 struct process {
     int      pid;               /* 0 means the slot is free */
     int      parent;            /* pid of whoever started it, 0 for the shell */
+    int      uid;               /* who it runs as. 0 is the master */
     int      thread_id;         /* the thread running it, while it lives */
     char     name[PROC_NAME_MAX];
     bool     exited;
@@ -59,7 +60,11 @@ struct process {
 };
 
 /* claim a slot. returns the new pid, or 0 if the table is full */
-int  process_create(const char *name, int parent, uint64_t now_ms);
+int  process_create(const char *name, int parent, int uid, uint64_t now_ms);
+
+/* who a process runs as. -1 if there is no such pid, which callers
+ * treat as "not allowed" rather than "allowed" */
+int  process_uid(int pid);
 
 /* note which thread is running it, once there is one */
 void process_set_thread(int pid, int thread_id);

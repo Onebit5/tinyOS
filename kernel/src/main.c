@@ -19,6 +19,7 @@
 #include "mm/kmalloc.h"
 #include "mm/vmm.h"
 #include "fs/ramdisk.h"
+#include "sched/auth.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include "shell/shell.h"
@@ -216,6 +217,7 @@ void kmain(void) {
     /* before the shell reclaims limine's memory, since the module list
      * we read this out of is sitting in it */
     ramdisk_init();
+    auth_init();
     kprintf("\n");
 
     /* from here on this function is a thread like any other */

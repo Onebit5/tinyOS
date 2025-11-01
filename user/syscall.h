@@ -19,6 +19,7 @@
 #define SYS_SPAWN  9
 #define SYS_WAIT   10
 #define SYS_READDIR 11
+#define SYS_GETUID 12
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -73,6 +74,7 @@ static inline long readdir(long n, char *buf, long len) {
 /* ---- other programs ----------------------------------------------- */
 
 static inline long getpid(void) { return syscall0(SYS_GETPID); }
+static inline long getuid(void) { return syscall0(SYS_GETUID); }
 
 static inline long spawn(const char *path) {
     return syscall2(SYS_SPAWN, (long)path, (long)ustrlen(path));

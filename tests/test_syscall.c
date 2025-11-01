@@ -81,18 +81,26 @@ void syscall_entry(void) { }
 
 /* a one-file ramdisk, so `open` has something to find */
 static const char motd[] = "hee-ho, from a file\n";
+/* motd is readable by anyone; the secret is not. the mode comes out of
+ * the tar header, and the kernel is the only one who gets to weigh it */
 static const struct ramdisk_file rd[] = {
-    { "./motd.txt", motd, sizeof motd - 1 },
-    { "./bin/",     "",   0 },
-    { "./bin/cat",  motd, 4 },
+    { "./motd.txt",   motd, sizeof motd - 1, 0644 },
+    { "./bin/",       "",   0,               0755 },
+    { "./bin/cat",    motd, 4,               0755 },
+    { "./secret.txt", motd, 4,               0600 },
 };
+bool ramdisk_may_read(const struct ramdisk_file *f, int uid) {
+    return uid == 0 || (f->mode & 0004) != 0;
+}
 bool ramdisk_open(const char *name, struct ramdisk_file *out) {
-    if (strcmp(name, "motd.txt") != 0) return false;
-    out->name = "motd.txt"; out->data = motd; out->size = sizeof motd - 1;
-    return true;
+    for (size_t i = 0; i < 4; i++) {
+        const char *n = rd[i].name + 2;     /* past the ./ */
+        if (strcmp(name, n) == 0) { *out = rd[i]; return true; }
+    }
+    return false;
 }
 bool ramdisk_stat(size_t i, struct ramdisk_file *out) {
-    if (i >= 3) return false;
+    if (i >= 4) return false;
     *out = rd[i];
     return true;
 }
@@ -115,8 +123,12 @@ int64_t tty_read_line(int pid, char *buf, uint64_t len) {
 /* spawn and wait live in usermode.c, which needs a real cpu */
 static int spawned_parent = -1;
 static const char *spawned_path;
-int user_spawn(const char *path, int parent, const char **error) {
-    (void)error; spawned_path = path; spawned_parent = parent; return 77;
+static int spawned_uid = -1;
+int user_spawn(const char *path, int argc, const char *const argv[],
+               int parent, int uid, const char **error) {
+    (void)argc; (void)argv; (void)error;
+    spawned_path = path; spawned_parent = parent; spawned_uid = uid;
+    return 77;
 }
 static int wait_code = 5;
 bool user_wait(int pid, int *code) {
@@ -152,7 +164,7 @@ static int64_t read_from(uint64_t fd, uint64_t ptr, uint64_t len) {
 int main(void) {
     /* the caller is a process, since half of these calls are about what
      * that process owns */
-    me.pid = process_create("tester", 0, 0);
+    me.pid = process_create("tester", 0, 0, 0);
     foreground_pid = me.pid;    /* it holds the terminal, mostly */
 
     /* a page a user program could legitimately own */
@@ -302,18 +314,60 @@ int main(void) {
     CHECK(spawned_parent == me.pid,
           "and records the caller as its parent, so only it may wait");
 
-    int other = process_create("someone else's", 999, 0);
+    int other = process_create("someone else's", 999, 0, 0);
     CHECK(call(SYS_WAIT, other, 0) == -1,
           "waiting for another process's child is refused -- otherwise the "
           "exit code would go to the wrong place");
 
-    int mine = process_create("mine", me.pid, 0);
+    int mine = process_create("mine", me.pid, 0, 0);
     wait_code = 42;
     int codeout = 0;
     user_extra = (uint64_t)&codeout;
     CHECK(call(SYS_WAIT, mine, (uint64_t)&codeout) == mine, "ours works");
     CHECK(codeout == 42, "and fills in how it went");
     CHECK(call(SYS_WAIT, 4242, 0) == -1, "waiting for nothing is refused");
+
+    /* ---- a uid is a thing the kernel checks, not a thing you claim ----
+     * the mode came out of the tar header and the uid off the process.
+     * neither is anything ring 3 can reach in and alter, which is the
+     * only reason any of this means something */
+    CHECK(call(SYS_GETUID, 0, 0) == 0, "getuid reports what the process runs as");
+
+    strcpy(page, "secret.txt");
+    CHECK(call(SYS_OPEN, (uint64_t)page, 10) >= FD_FIRST_FILE,
+          "uid 0 may open a file nobody else may");
+
+    /* the same call, from a process that is not the master */
+    {
+        int guest = process_create("guest", 0, 1000, 0);
+        int was = me.pid;
+        me.pid = guest;
+        foreground_pid = guest;
+
+        out_reset();
+        CHECK(syscall_dispatch(SYS_OPEN, (uint64_t)page, 10, 0, 0, 0) == -1,
+              "and a guest may not");
+        CHECK(strstr(out, "may not read") != NULL, "and is told so plainly");
+
+        strcpy(page, "motd.txt");
+        CHECK(syscall_dispatch(SYS_OPEN, (uint64_t)page, 8, 0, 0, 0) >= FD_FIRST_FILE,
+              "but may still read what is readable by anyone");
+
+        CHECK(syscall_dispatch(SYS_GETUID, 0, 0, 0, 0, 0) == 1000,
+              "and getuid says who it really is");
+
+        /* a spawned child gets the uid of whoever started it -- a
+         * program picking its own would make the whole idea decorative */
+        strcpy(page, "bin/thing");
+        (void)syscall_dispatch(SYS_SPAWN, (uint64_t)page, 9, 0, 0, 0);
+        CHECK(spawned_uid == 1000, "a child inherits the uid it was started with");
+
+        me.pid = was;
+        foreground_pid = was;
+        process_exited(guest, 0, 0);
+        process_collect(guest, NULL);
+    }
+    strcpy(page, "motd.txt");
 
     /* ---- reading a directory ----
      * `ls` was the only command that needed something new to leave the

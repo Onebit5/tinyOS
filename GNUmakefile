@@ -85,7 +85,8 @@ ULDFLAGS := -nostdlib -static -T user/linker.ld
 
 USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail \
               ramdisk/bin/reader ramdisk/bin/parent ramdisk/bin/ask \
-              ramdisk/bin/echo ramdisk/bin/cat ramdisk/bin/uptime ramdisk/bin/ls
+              ramdisk/bin/echo ramdisk/bin/cat ramdisk/bin/uptime ramdisk/bin/ls \
+              ramdisk/bin/whoami
 
 ramdisk/bin/%: user/%.c user/syscall.h user/linker.ld
 	@mkdir -p $(@D)
@@ -100,6 +101,12 @@ RAMDISK_FILES := $(shell find ramdisk -type f 2>/dev/null)
 
 $(RAMDISK): $(USER_PROGS) $(RAMDISK_FILES)
 	@mkdir -p $(@D)
+	@# git only tracks the execute bit, so the modes that matter are set
+	@# here rather than trusted to the checkout. velvet-room.txt is the
+	@# one the kernel refuses to a guest
+	@chmod 600 ramdisk/velvet-room.txt
+	@chmod 644 ramdisk/passwd ramdisk/*.txt 2>/dev/null || true
+	@chmod 600 ramdisk/velvet-room.txt
 	tar --format=ustar --sort=name --owner=0 --group=0 --numeric-owner \
 		--mtime=@0 -cf $@ -C ramdisk .
 
@@ -143,7 +150,7 @@ HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
              bin/tests/ksyms bin/tests/rtc bin/tests/ramdisk bin/tests/elf \
              bin/tests/addrspace bin/tests/process \
-             bin/tests/syscall bin/tests/tty \
+             bin/tests/syscall bin/tests/tty bin/tests/auth \
              bin/tests/keyboard bin/tests/serial \
              bin/tests/shell bin/tests/switch
 
@@ -157,6 +164,8 @@ bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
 bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c
 bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c
 bin/tests/process:  tests/test_process.c  kernel/src/sched/process.c \
+                    kernel/src/lib/string.c
+bin/tests/auth:     tests/test_auth.c     kernel/src/sched/auth.c \
                     kernel/src/lib/string.c
 bin/tests/tty:      tests/test_tty.c      kernel/src/drivers/tty.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c
@@ -173,10 +182,10 @@ bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
                     kernel/src/drivers/input.c
 bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c \
-                    kernel/src/fs/ramdisk.c \
+                    kernel/src/fs/ramdisk.c kernel/src/sched/auth.c \
                     kernel/src/shell/shell.c kernel/src/version.h
 bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c \
-                           kernel/src/fs/ramdisk.c
+                           kernel/src/fs/ramdisk.c kernel/src/sched/auth.c
 
 # SRCS overrides what gets compiled, for tests that #include a kernel
 # .c file directly -- that file still belongs in the prerequisites so
