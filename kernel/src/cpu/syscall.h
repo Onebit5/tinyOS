@@ -21,8 +21,17 @@
 #define SYS_READDIR 11  /* (n, buf, len)      -> name length, or -1    */
 #define SYS_GETUID 12   /* ()                 -> who this runs as      */
 
+#define SYSCALL_COUNT 13
+
 /* wire up STAR/LSTAR/SFMASK and turn on EFER.SCE */
 void syscall_init(void);
+
+/* how many times each has been asked for, and what to call it. the
+ * numbers are the cheapest possible picture of what a program actually
+ * does -- one line of arithmetic per call, and afterwards you can say
+ * with certainty which door gets used */
+uint64_t syscall_times_called(unsigned nr);
+const char *syscall_name(unsigned nr);
 
 /* which kernel stack `syscall` should land on. the scheduler keeps this
  * pointed at the running thread, exactly like the tss rsp0 */

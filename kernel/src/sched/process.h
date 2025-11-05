@@ -45,6 +45,12 @@ struct process {
     int      pid;               /* 0 means the slot is free */
     int      parent;            /* pid of whoever started it, 0 for the shell */
     int      uid;               /* who it runs as. 0 is the master */
+
+    /* whether to narrate this one's comings and goings. `run bin/hello`
+     * is a demonstration and the ceremony is the point; `cat motd.txt`
+     * is somebody trying to read a file, and a line about souls
+     * returning to the sea is just noise on top of the answer */
+    bool     announce;
     int      thread_id;         /* the thread running it, while it lives */
     char     name[PROC_NAME_MAX];
     bool     exited;
@@ -60,7 +66,11 @@ struct process {
 };
 
 /* claim a slot. returns the new pid, or 0 if the table is full */
-int  process_create(const char *name, int parent, int uid, uint64_t now_ms);
+int  process_create(const char *name, int parent, int uid, bool announce,
+                    uint64_t now_ms);
+
+/* should this one's arrival and departure be narrated? */
+bool process_announces(int pid);
 
 /* who a process runs as. -1 if there is no such pid, which callers
  * treat as "not allowed" rather than "allowed" */

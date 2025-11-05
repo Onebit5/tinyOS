@@ -54,7 +54,7 @@ int main(void) {
     CHECK(!tty_intercept(KEY_UP), "including keys that are not characters");
 
     /* ---- a program takes the front ---- */
-    int pid = process_create("bin/ask", 0, 0, 0);
+    int pid = process_create("bin/ask", 0, 0, false, 0);
     process_set_thread(pid, 9);
     tty_set_foreground(pid);
     CHECK(tty_foreground() == pid, "a program can hold the terminal");
@@ -110,7 +110,7 @@ int main(void) {
      * a void and see nothing until the program answers -- which is
      * exactly how this felt before it existed */
     {
-        int pid2 = process_create("bin/ask", 0, 0, 0);
+        int pid2 = process_create("bin/ask", 0, 0, false, 0);
         process_set_thread(pid2, 11);
         tty_set_foreground(pid2);
 

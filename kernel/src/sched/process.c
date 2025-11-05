@@ -21,7 +21,8 @@ static struct process *slot_for(int pid) {
     return NULL;
 }
 
-int process_create(const char *name, int parent, int uid, uint64_t now_ms) {
+int process_create(const char *name, int parent, int uid, bool announce,
+                   uint64_t now_ms) {
     uint64_t flags = irq_save();
     int pid = 0;
 
@@ -34,6 +35,7 @@ int process_create(const char *name, int parent, int uid, uint64_t now_ms) {
         p->pid        = next_pid++;
         p->parent     = parent;
         p->uid        = uid;
+        p->announce   = announce;
         p->thread_id  = 0;
         p->exited     = false;
         p->exit_code  = 0;
@@ -103,6 +105,11 @@ bool process_collect(int pid, int *code) {
 
     irq_restore(flags);
     return collected;
+}
+
+bool process_announces(int pid) {
+    const struct process *p = slot_for(pid);
+    return p != NULL && p->announce;
 }
 
 int process_uid(int pid) {

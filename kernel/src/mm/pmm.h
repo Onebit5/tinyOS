@@ -56,6 +56,10 @@ uint64_t pmm_reclaim_bootloader(void);
  * to the tests, which check that limine's memory is inside the map */
 bool pmm_translate_is_tracked(uint64_t phys);
 
+/* the most memory that has ever been in use at once. a current figure
+ * tells you where you are; this tells you how close you came */
+uint64_t pmm_peak_bytes(void);
+
 uint64_t pmm_total_bytes(void);
 uint64_t pmm_free_bytes(void);
 uint64_t pmm_used_bytes(void);

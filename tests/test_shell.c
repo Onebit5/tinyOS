@@ -37,6 +37,12 @@ uint64_t pmm_free_bytes(void) { return 2045ull * 1024 * 1024; }
 uint64_t kheap_total_bytes(void) { return 36 * 1024; }
 uint64_t kheap_used_bytes(void) { return 512; }
 void sched_dump(void) { kprintf("<PS>"); }
+size_t process_count(void) { return 0; }
+uint64_t pmm_peak_bytes(void) { return 0; }
+uint64_t syscall_times_called(unsigned n) { (void)n; return 0; }
+const char *syscall_name(unsigned n) { (void)n; return "x"; }
+bool input_haskey(void) { return true; }
+int input_getchar(void) { return 'q'; }
 void klog_dump(void) { kprintf("<DMESG>"); }
 static bool run_ok = true;
 static const char *ran_path;
@@ -55,9 +61,11 @@ static bool ran_background;
 static int ran_argc;
 static const char *ran_arg1;
 static int ran_uid = -1;
+static bool ran_announce;
 bool user_run(const char *path, int argc, const char *const argv[],
-              int uid, bool background, const char **error) {
+              int uid, bool background, bool announce, const char **error) {
     ran_uid = uid;
+    ran_announce = announce;
     ran_path = path;
     ran_argc = argc;
     ran_arg1 = (argc > 1) ? argv[1] : NULL;
@@ -477,6 +485,13 @@ int main(void) {
     ran_path = NULL;
     run("cat motd.txt");
     CHECK(ran_path && strcmp(ran_path, "bin/cat") == 0, "and so is cat");
+
+    /* typing a program by name wants its output, not a commentary on
+     * it. running one deliberately is a demonstration, and the
+     * ceremony is the point */
+    CHECK(!ran_announce, "a command typed by name is not narrated");
+    run("run bin/cat motd.txt");
+    CHECK(ran_announce, "but one run deliberately is");
 
 
 

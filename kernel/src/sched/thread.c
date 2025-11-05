@@ -73,6 +73,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
 
     t->state       = THREAD_READY;
     t->wake_at     = 0;
+    t->cpu_ticks   = 0;
     t->entry       = entry;
     t->arg         = arg;
     t->id          = next_id++;
@@ -124,11 +125,17 @@ void thread_exit(int code) {
 
     /* tell the process table before the thread goes, because the
      * process is what a parent will still be able to ask */
+    bool narrate = true;
     if (me->pid != 0) {
+        narrate = process_announces(me->pid);
         process_exited(me->pid, code, pit_uptime_ms());
     }
 
-    kprintf("[%s] hath returned to the sea of souls\n", me->name);
+    /* a kernel thread always says so -- `summon` exists to be watched.
+     * a program says so only when it was run to be watched */
+    if (narrate) {
+        kprintf("[%s] hath returned to the sea of souls\n", me->name);
+    }
 
     uint64_t flags = irq_save();
     me->state = THREAD_DEAD;

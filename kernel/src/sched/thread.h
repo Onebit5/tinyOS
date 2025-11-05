@@ -30,6 +30,14 @@ struct thread {
     enum thread_state state;
     uint64_t wake_at;           /* tick to wake on, when SLEEPING */
 
+    /* how many timer ticks this thread was the one running when the
+     * timer went off. it is a sampling measure rather than a real
+     * accounting -- a thread that always yields just before the tick
+     * would look free -- but it is honest about being one, and it is
+     * what turns the scheduler from a claim into something you can
+     * watch */
+    uint64_t cpu_ticks;
+
     void (*entry)(void *);
     void *arg;
 

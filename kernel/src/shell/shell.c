@@ -14,10 +14,12 @@
 #include "fs/ramdisk.h"
 #include "sched/usermode.h"
 #include "sched/auth.h"
+#include "cpu/syscall.h"
 #include "lib/ksyms.h"
 #include "version.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
+#include "sched/process.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -38,7 +40,7 @@ struct command {
 
 static const struct command commands[];    /* defined below, after the handlers */
 static void run_argv(int argc, char **argv);
-static void launch(const char *path, int argc, char **argv);
+static void launch(const char *path, int argc, char **argv, bool announce);
 
 /* who is at the keyboard. every program the shell starts inherits it,
  * and nothing in ring 3 can reach in and change it */
@@ -139,6 +141,8 @@ static void cmd_mem(int argc, char **argv) {
     kprintf("  used   %lu KiB (%lu frames)\n", used / 1024, used / PAGE_SIZE);
     kprintf("  free   %lu MiB (%lu frames)\n", freeb / (1024 * 1024),
             freeb / PAGE_SIZE);
+    kprintf("  peak   %lu KiB ever in use at once\n",
+            pmm_peak_bytes() / 1024);
     kprintf("kernel heap\n");
     kprintf("  total  %lu KiB claimed from the pmm\n", kheap_total_bytes() / 1024);
     kprintf("  used   %lu bytes handed out\n", kheap_used_bytes());
@@ -308,7 +312,7 @@ static void missing(const char *what, const char *name) {
 
 /* start a program, handing it everything after the command name as its
  * arguments. a trailing & means the background */
-static void launch(const char *path, int argc, char **argv) {
+static void launch(const char *path, int argc, char **argv, bool announce) {
     bool background = (argc > 0 && strcmp(argv[argc - 1], "&") == 0);
     if (background) {
         argc--;
@@ -316,7 +320,7 @@ static void launch(const char *path, int argc, char **argv) {
 
     const char *why = NULL;
     if (!user_run(path, argc, (const char *const *)argv,
-                  current_uid, background, &why)) {
+                  current_uid, background, announce, &why)) {
         if (why == USER_RUN_NO_SUCH_FILE) {
             missing("run", path);
         } else {
@@ -330,7 +334,56 @@ static void cmd_run(int argc, char **argv) {
         kprintf("run <program> [args...] [&] -- try `run bin/hello`\n");
         return;
     }
-    launch(argv[1], argc - 1, argv + 1);
+    launch(argv[1], argc - 1, argv + 1, true);
+}
+
+/* a live picture, redrawn until somebody presses a key. everything it
+ * shows already existed -- the point of this version is that a number
+ * you can watch move tells you something a number you have to ask for
+ * twice does not */
+static void cmd_top(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    while (!input_haskey()) {
+        console_clear();
+
+        console_set_colors(COLOR_PROMPT, 0x101018);
+        kprintf("tinyOS %s -- press any key to stop watching\n\n", VERSION);
+        console_set_colors(COLOR_TEXT, 0x101018);
+
+        uint64_t ms = pit_uptime_ms();
+        kprintf("up %luh %lum %lus     %zu threads, %zu processes\n",
+                ms / 3600000, (ms / 60000) % 60, (ms / 1000) % 60,
+                sched_thread_count(), process_count());
+
+        kprintf("memory  %lu / %lu MiB in use, peaked at %lu MiB\n",
+                pmm_used_bytes() / (1024 * 1024),
+                pmm_total_bytes() / (1024 * 1024),
+                pmm_peak_bytes() / (1024 * 1024));
+        kprintf("heap    %lu KiB claimed, %lu bytes handed out\n\n",
+                kheap_total_bytes() / 1024, kheap_used_bytes());
+
+        sched_dump();
+
+        /* which doors ring 3 actually uses. a syscall nobody calls is
+         * worth knowing about too, so the unused ones are left out
+         * rather than listed as zero */
+        kprintf("\nsyscalls\n ");
+        bool any = false;
+        for (unsigned i = 0; i < SYSCALL_COUNT; i++) {
+            uint64_t n = syscall_times_called(i);
+            if (n > 0) {
+                kprintf(" %s=%lu", syscall_name(i), n);
+                any = true;
+            }
+        }
+        kprintf("%s\n", any ? "" : " none yet");
+
+        sleep_ms(500);
+    }
+
+    (void)input_getchar();      /* the key that stopped us is not a command */
+    console_clear();
 }
 
 static void cmd_whoami(int argc, char **argv) {
@@ -571,6 +624,7 @@ static const struct command commands[] = {
     { "persona","the face this machine wears",          cmd_persona, false },
     { "mem",    "frames and heap, honestly counted",    cmd_mem, false },
     { "ps",     "the threads that walk this realm",     cmd_ps, false },
+    { "top",    "the same, but watched rather than asked", cmd_top, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },
     { "bt",     "who called whom to get here",          cmd_bt, false },
@@ -636,7 +690,9 @@ static void run_argv(int argc, char **argv) {
             }
             struct ramdisk_file f;
             if (ramdisk_open(path, &f)) {
-                launch(path, argc, argv);
+                /* typed by name rather than through `run`: they want
+                 * the program's output, not a commentary on it */
+                launch(path, argc, argv, false);
                 return;
             }
         }

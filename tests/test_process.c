@@ -16,7 +16,7 @@ static int failures;
 
 int main(void) {
     /* ---- the ordinary life of one ---- */
-    int pid = process_create("bin/hello", 0, 0, 1000);
+    int pid = process_create("bin/hello", 0, 0, false, 1000);
     CHECK(pid > 0, "a process gets a pid");
     CHECK(process_count() == 1, "and occupies a slot");
 
@@ -49,15 +49,15 @@ int main(void) {
     CHECK(!process_collect(pid, &code), "and cannot be collected twice");
 
     /* ---- pids are not reused while anything remembers them ---- */
-    int a = process_create("one", 0, 0, 0);
-    int b = process_create("two", a, 0, 0);
+    int a = process_create("one", 0, 0, false, 0);
+    int b = process_create("two", a, 0, false, 0);
     CHECK(a != b, "two processes get different pids");
     CHECK(b > a, "and later ones are later");
     CHECK(process_find(b)->parent == a, "a parent is remembered");
 
     process_exited(a, 0, 10);
     process_collect(a, NULL);
-    int c = process_create("three", 0, 0, 0);
+    int c = process_create("three", 0, 0, false, 0);
     CHECK(c != a && c != b, "a freed slot does not hand back the old pid");
     CHECK(process_collect(a, NULL) == false,
           "and the collected pid stays meaningless");
@@ -71,7 +71,7 @@ int main(void) {
     CHECK(process_count() == 0, "table empty again");
 
     /* ---- killed, and killed twice ---- */
-    int k = process_create("victim", 0, 0, 0);
+    int k = process_create("victim", 0, 0, false, 0);
     process_exited(k, PROCESS_KILLED, 5);
     CHECK(process_find(k)->exit_code == PROCESS_KILLED, "a kill is recorded");
 
@@ -87,7 +87,7 @@ int main(void) {
     int ids[4];
     for (int i = 0; i < 4; i++) {
         char name[8] = { 'p', (char)('0' + i), 0 };
-        ids[i] = process_create(name, 0, 0, 0);
+        ids[i] = process_create(name, 0, 0, false, 0);
     }
     CHECK(process_count() == 4, "four in the table");
 
@@ -114,12 +114,12 @@ int main(void) {
     /* ---- a full table refuses rather than overwrites ---- */
     int made = 0;
     for (int i = 0; i < MAX_PROCESSES + 4; i++) {
-        if (process_create("crowd", 0, 0, 0) != 0) {
+        if (process_create("crowd", 0, 0, false, 0) != 0) {
             made++;
         }
     }
     CHECK(made == MAX_PROCESSES, "the table fills to exactly its size");
-    CHECK(process_create("one too many", 0, 0, 0) == 0,
+    CHECK(process_create("one too many", 0, 0, false, 0) == 0,
           "and then says no rather than trampling somebody");
 
     /* empty it again, or everything below would be testing a full table */
@@ -139,7 +139,7 @@ int main(void) {
     /* ---- file descriptors ---- */
     {
         static const char body[] = "hello there";
-        int fp = process_create("reader", 0, 0, 0);
+        int fp = process_create("reader", 0, 0, false, 0);
 
         CHECK(process_fd_count(fp) == 0, "a new process holds no files");
 

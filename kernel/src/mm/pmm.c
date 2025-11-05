@@ -25,6 +25,7 @@ static uint64_t total_frames;   /* usable frames overall */
 static uint64_t free_frames;
 static uint64_t search_hint;    /* frame index to start scanning from */
 static uint64_t highest_addr;   /* top of the direct map, see pmm.h */
+static uint64_t peak_used;      /* the high-water mark, in frames */
 
 /* limine's own memory, noted down at init because the memmap we would
  * otherwise read it from is itself sitting in that memory */
@@ -177,6 +178,9 @@ uint64_t pmm_alloc_pages(size_t count) {
                     bit_set(i);
                 }
                 free_frames -= count;
+                if (total_frames - free_frames > peak_used) {
+                    peak_used = total_frames - free_frames;
+                }
                 search_hint = f + 1;
                 irq_restore(flags);
                 return first * PAGE_SIZE;
@@ -249,6 +253,7 @@ bool pmm_translate_is_tracked(uint64_t phys) {
 uint64_t pmm_hhdm_offset(void)    { return hhdm_offset; }
 uint64_t pmm_highest_address(void) { return highest_addr; }
 
+uint64_t pmm_peak_bytes(void)  { return peak_used * PAGE_SIZE; }
 uint64_t pmm_total_bytes(void) { return total_frames * PAGE_SIZE; }
 uint64_t pmm_free_bytes(void)  { return free_frames * PAGE_SIZE; }
 uint64_t pmm_used_bytes(void)  { return (total_frames - free_frames) * PAGE_SIZE; }

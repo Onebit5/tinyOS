@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.5** (**users, and a boundary that means something.** a login prompt, a uid on every process, and a file a guest genuinely cannot read -- checked by the kernel, against a mode it read out of a tar header)
+**version: 0.1.6** (**a kernel that measures itself.** cpu time per thread, a peak memory mark, a count of every syscall asked for, and a `top` that redraws -- the scheduler stops being a claim and becomes something you can watch)
 
 ## what it does
 
@@ -29,6 +29,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a controlling terminal: a foreground process, and ctrl+c delivered to it
 - [x] arguments, and a toolbox that lives outside the kernel
 - [x] users: a login, a uid per process, and files a guest may not read
+- [x] cpu accounting, peak memory, syscall counts, and a live `top`
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -195,6 +196,18 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### measuring itself
+
+the timer tick charges itself to whoever was running when it arrived. that is a *sampling* measure rather than real accounting -- a thread that always yielded just before the tick would look free -- and it is worth being clear that is what it is, but it is one line of arithmetic in the interrupt that already existed, and it turns the scheduler from a claim into something you can watch. `ps` grows a cpu column; the idle thread usually holds most of it, which is the honest picture of a machine waiting for somebody to type.
+
+the pmm remembers its high-water mark, because a current figure tells you where you are and a peak tells you how close you came. every syscall is counted as it is dispatched, which is the cheapest possible picture of what a program really does -- afterwards you can say with certainty which doors get used, and `top` lists only the ones that ever were.
+
+`top` redraws all of it twice a second until you press a key. everything it shows already existed somewhere; the point is that a number you watch move tells you something a number you have to ask for twice does not.
+
+### running a program, quietly
+
+`run bin/hello` narrates: which pid it got, where it entered ring 3, when it departed. typing `cat motd.txt` says none of that, because you wanted the file, not a commentary on the reading of it. the difference is a flag on the process, set by the shell depending on how it was asked -- and a kernel thread from `summon` always narrates, since being watched is the entire reason it exists. being *killed* is always reported either way: somebody asked for that and deserves to know it happened.
+
 ### users
 
 boot now stops at a login prompt and asks who you are. the accounts come from `passwd` in the ramdisk; the password is not echoed as you type it. every process carries the **uid** of whoever started it, and a program cannot ask to be somebody else -- it runs as the shell's user, and a child inherits its parent's. the prompt shows which you are: `igor@velvet#` for uid 0, `guest@velvet$` for anyone else.
@@ -360,6 +373,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.6** — the kernel measures itself. the timer tick charges itself to whoever was running, so `ps` grows a cpu column and the scheduler stops being theoretical -- a sampling measure rather than real accounting, and the README says so. the pmm remembers its peak, every syscall is counted as it is dispatched, and `top` redraws the lot twice a second until you press a key. also quieter: a program typed by name no longer narrates its pid and its departure, because you wanted the output rather than a commentary on it. `run` still does, since that is a demonstration, and a kill is always reported.
 - **0.1.5** — users. a login prompt reading accounts from `passwd` in the ramdisk, with the password not echoed; a uid on every process, inherited by children and unaskable-for by programs; and a check with real consequences -- `open` weighs the mode tar recorded against the caller's uid, so `velvet-room.txt` at 0600 is readable by `igor` and refused to `guest`. `whoami` exists twice on purpose: the builtin reads a variable the shell keeps, the program asks the kernel what uid it was given and cannot lie about the answer. the passwords are plaintext and the README says why that is the honest shape of this rather than a corner cut. the parser is tested mostly on malformed input, since a passwd file letting somebody in on a line it half understood is the worst thing it could do.
 - **0.1.4** — a toolbox outside the kernel. `cat`, `echo`, `uptime` and `ls` are programs in `ramdisk/bin` now, and typing one looks no different because the shell falls back to looking for a program of that name. what made it possible was arguments: the loader builds argv on the program's own stack -- strings, then pointers to them -- and hands argc and argv over in registers, with every store going through the direct map while every pointer written is the address the program will see. the exercise was meant to reveal which commands were secretly using kernel internals, and it did: `echo` needed only argv, `cat` and `uptime` needed nothing new, and `ls` needed `readdir`, because `open` can only answer about a name you already know. what stayed behind reads kernel state or acts on the machine, and could not have left.
 - **0.1.3** — the keyboard belongs to somebody. a foreground process owns the terminal while it runs, and the shell stops peeking at keys on its behalf -- which is what made a program reading the keyboard impossible until now. ctrl+c aimed at a program is delivered to it rather than acted on for it: it never becomes a character, the process finds it on its next syscall, and a read or a sleep comes back -1 so a sleeping program hears about it at once. pressing it twice stops asking. only the foreground process may read stdin, so a background one cannot take keys meant for somebody else. the tty also owns the line discipline -- echo, backspace, and ignoring arrows -- because a program never sees the keys go past and cannot echo them itself; without it you type into a void. `bin/ask` reads a line and greets you, which is a thing that could not have worked a version ago.

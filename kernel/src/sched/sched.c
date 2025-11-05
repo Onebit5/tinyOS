@@ -242,6 +242,11 @@ void sched_tick(void) {
         return;     /* timer beat the scheduler to it, nothing to do yet */
     }
 
+    /* charge the tick to whoever was running when it arrived. the idle
+     * thread is charged too -- time spent doing nothing is still time,
+     * and seeing it is how you know the machine is mostly asleep */
+    current->cpu_ticks++;
+
     wake_sleepers();
 
     if (--quantum_left <= 0) {
@@ -255,6 +260,13 @@ static void dump_one(struct thread *t) {
         kprintf(" ");
     }
     kprintf("%-9s", thread_state_name(t->state));
+
+    /* what share of the ticks so far went to this one. the idle thread
+     * usually holds most of them, which is the honest picture of a
+     * machine waiting for somebody to type */
+    uint64_t total = pit_ticks();
+    uint64_t pct = (total > 0) ? (t->cpu_ticks * 100) / total : 0;
+    kprintf("%3lu%% ", pct);
 
     if (t->pid != 0) {
         kprintf("  pid %d, %lu pages", t->pid, addrspace_frames(t->space));
@@ -273,7 +285,7 @@ void sched_dump(void) {
     uint64_t flags = irq_save();
 
     kprintf("threads\n");
-    kprintf("  id  name             state    running\n");
+    kprintf("  id  name             state    cpu  running\n");
 
     /* the ring is in newest-first order, because sched_add splices each
      * new thread in just after current. that is fine for scheduling and
@@ -376,6 +388,7 @@ void sched_init(void) {
     boot_thread.stack_pages = 0;
     boot_thread.next = &boot_thread;    /* a ring of one, for now */
     boot_thread.wait_next = NULL;
+    boot_thread.cpu_ticks = 0;
     boot_thread.from_heap = false;      /* it lives in .bss */
 
     current = &boot_thread;

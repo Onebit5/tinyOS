@@ -164,7 +164,7 @@ static int64_t read_from(uint64_t fd, uint64_t ptr, uint64_t len) {
 int main(void) {
     /* the caller is a process, since half of these calls are about what
      * that process owns */
-    me.pid = process_create("tester", 0, 0, 0);
+    me.pid = process_create("tester", 0, 0, false, 0);
     foreground_pid = me.pid;    /* it holds the terminal, mostly */
 
     /* a page a user program could legitimately own */
@@ -314,12 +314,12 @@ int main(void) {
     CHECK(spawned_parent == me.pid,
           "and records the caller as its parent, so only it may wait");
 
-    int other = process_create("someone else's", 999, 0, 0);
+    int other = process_create("someone else's", 999, 0, false, 0);
     CHECK(call(SYS_WAIT, other, 0) == -1,
           "waiting for another process's child is refused -- otherwise the "
           "exit code would go to the wrong place");
 
-    int mine = process_create("mine", me.pid, 0, 0);
+    int mine = process_create("mine", me.pid, 0, false, 0);
     wait_code = 42;
     int codeout = 0;
     user_extra = (uint64_t)&codeout;
@@ -339,7 +339,7 @@ int main(void) {
 
     /* the same call, from a process that is not the master */
     {
-        int guest = process_create("guest", 0, 1000, 0);
+        int guest = process_create("guest", 0, 1000, false, 0);
         int was = me.pid;
         me.pid = guest;
         foreground_pid = guest;

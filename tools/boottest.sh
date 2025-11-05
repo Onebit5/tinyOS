@@ -41,6 +41,7 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'echo the bond endures\r'; sleep 2
     printf 'uptime\r';  sleep 2
     printf 'whoami\r';  sleep 1
+    printf 'mem\r';     sleep 1
     printf 'run bin/whoami\r'; sleep 2
     printf 'logout\r';  sleep 1
     printf 'guest\r';   sleep 1
@@ -112,6 +113,8 @@ check 'echo is a program' 'bin/echo is pid'
 check 'echo works'       'the bond endures'
 check 'uptime works'     'awake for'
 check 'whoami works'     'uid 0'
+check 'cpu accounted'    '% '
+check 'peak memory'      'ever in use at once'
 check 'root reads it'    'THE VELVET ROOM'
 check 'logout works'     'fare thee well'
 check 'guest logs in'    'thou art a guest'

@@ -29,6 +29,21 @@
 
 uint64_t syscall_kernel_rsp;
 
+static uint64_t call_counts[SYSCALL_COUNT];
+
+static const char *const call_names[SYSCALL_COUNT] = {
+    "exit", "write", "read", "uptime", "yield", "sleep",
+    "open", "close", "getpid", "spawn", "wait", "readdir", "getuid",
+};
+
+uint64_t syscall_times_called(unsigned nr) {
+    return (nr < SYSCALL_COUNT) ? call_counts[nr] : 0;
+}
+
+const char *syscall_name(unsigned nr) {
+    return (nr < SYSCALL_COUNT) ? call_names[nr] : "?";
+}
+
 /* implemented in syscall.asm */
 extern void syscall_entry(void);
 
@@ -227,7 +242,7 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
     const char *why = NULL;
     const char *argv[1] = { path };
     int pid = user_spawn(path, 1, argv, caller_pid(),
-                         process_uid(caller_pid()), &why);
+                         process_uid(caller_pid()), false, &why);
     return (pid == 0) ? -1 : pid;
 }
 
@@ -259,6 +274,10 @@ static int64_t sys_wait(uint64_t pid, uint64_t code_ptr) {
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4) {
     (void)a3; (void)a4;
+
+    if (nr < SYSCALL_COUNT) {
+        call_counts[nr]++;
+    }
 
     switch (nr) {
     case SYS_EXIT:

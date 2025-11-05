@@ -125,7 +125,7 @@ static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
 }
 
 int user_spawn(const char *path, int argc, const char *const argv[],
-               int parent, int uid, const char **error) {
+               int parent, int uid, bool announce, const char **error) {
     reap_abandoned();
 
     struct ramdisk_file f;
@@ -197,7 +197,7 @@ int user_spawn(const char *path, int argc, const char *const argv[],
      * and holds the exit code somebody will want to read */
     /* a program cannot ask to be somebody else: it runs as whoever
      * started it, and only the shell decides what that is */
-    int pid = process_create(path, parent, uid, pit_uptime_ms());
+    int pid = process_create(path, parent, uid, announce, pit_uptime_ms());
     if (pid == 0) {
         kfree(start);
         addrspace_destroy(space);
@@ -219,8 +219,10 @@ int user_spawn(const char *path, int argc, const char *const argv[],
     t->pid   = pid;
     process_set_thread(pid, t->id);
 
-    kprintf("[kernel] %s is pid %d, ring 3 at %p\n",
-            path, pid, (void *)loaded.entry);
+    if (announce) {
+        kprintf("[kernel] %s is pid %d, ring 3 at %p\n",
+                path, pid, (void *)loaded.entry);
+    }
     return pid;
 }
 
@@ -242,8 +244,8 @@ bool user_wait(int pid, int *code) {
 }
 
 bool user_run(const char *path, int argc, const char *const argv[],
-              int uid, bool background, const char **error) {
-    int pid = user_spawn(path, argc, argv, 0, uid, error);
+              int uid, bool background, bool announce, const char **error) {
+    int pid = user_spawn(path, argc, argv, 0, uid, announce, error);
     if (pid == 0) {
         return false;
     }
@@ -251,7 +253,9 @@ bool user_run(const char *path, int argc, const char *const argv[],
     if (background) {
         /* nobody is waiting, so nobody will collect it. the slot stays
          * for `ps` to show, and the next spawn sweeps it up */
-        kprintf("[kernel] pid %d runs in the background\n", pid);
+        if (announce) {
+            kprintf("[kernel] pid %d runs in the background\n", pid);
+        }
         return true;
     }
 
@@ -283,9 +287,12 @@ bool user_run(const char *path, int argc, const char *const argv[],
      * reason the process outlived the thread */
     int code = 0;
     if (process_collect(pid, &code)) {
+        /* being killed is always worth saying, because somebody asked
+         * for it and deserves to know it happened. an exit code is
+         * only interesting when the run was a demonstration */
         if (code == PROCESS_KILLED) {
             kprintf("[kernel] pid %d was killed\n", pid);
-        } else if (code != 0) {
+        } else if (announce && code != 0) {
             kprintf("[kernel] pid %d exited with %d\n", pid, code);
         }
     }

@@ -45,9 +45,10 @@ hardware defends, a "user" is a variable that says you are an admin.
 persistence is not required for this; only *changing* users needs a
 writable disk.
 
-**0.1.6 a kernel that measures itself.** per-process cpu time, so `ps`
+**0.1.6 a kernel that measures itself.** ~~per-process cpu time, so `ps`
 grows a cpu% column and the scheduler stops being theoretical. a `top`
-that redraws. peak memory. how many syscalls of each kind.
+that redraws. peak memory. how many syscalls of each kind.~~ **done in
+0.1.6.**
 
 **0.1.7 modern interrupt hardware.** acpi tables (limine hands over the
 rsdp), then the lapic and ioapic in place of the 8259, and the lapic
