@@ -50,10 +50,12 @@ grows a cpu% column and the scheduler stops being theoretical. a `top`
 that redraws. peak memory. how many syscalls of each kind.~~ **done in
 0.1.6.**
 
-**0.1.7 modern interrupt hardware.** acpi tables (limine hands over the
+**0.1.7 modern interrupt hardware.** ~~acpi tables (limine hands over the
 rsdp), then the lapic and ioapic in place of the 8259, and the lapic
 timer in place of the pit. lateral on its own -- the same behaviour on
-better hardware -- but it is the prerequisite for more than one cpu.
+better hardware -- but it is the prerequisite for more than one cpu.~~
+**done in 0.1.7**, with a fallback: if the firmware will not say where
+the apics are, the 8259 keeps the job and nothing above notices.
 
 **0.1.8 knowing what is plugged in.** pci enumeration and an `lspci`.
 small, satisfying, and the doorway to every real device driver.

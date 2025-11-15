@@ -2,6 +2,7 @@
 #define CPU_INTERRUPTS_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /* what isr_common in isr.asm leaves on the stack, low address first.
  * if you touch the push order over there, touch this too. the static
@@ -17,6 +18,20 @@ struct interrupt_frame {
 };
 
 void interrupt_dispatch(struct interrupt_frame *frame);
+
+/* bring up the apics if the firmware describes any, and move every
+ * interrupt over to them. returns false if we are staying on the 8259,
+ * which is not a failure -- it is the same behaviour by an older road */
+bool interrupts_use_apic(void);
+
+/* move the external interrupts to the io apic as well. deliberately not
+ * done at boot -- see the note in interrupts.c. returns false without
+ * changing anything if the routing cannot be verified */
+bool interrupts_use_ioapic(void);
+
+/* true once the move has happened. mostly so `dmesg` and the shell can
+ * say which hardware is actually carrying the interrupts */
+bool interrupts_on_apic(void);
 
 /* hook a handler onto one of the 16 pic irq lines (0 = pit, 1 = keyboard...).
  * dispatch takes care of spurious irqs and the eoi, handlers just do their thing */

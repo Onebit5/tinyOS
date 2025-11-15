@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.6** (**a kernel that measures itself.** cpu time per thread, a peak memory mark, a count of every syscall asked for, and a `top` that redraws -- the scheduler stops being a claim and becomes something you can watch)
+**version: 0.1.7** (**off the 8259 and onto the apics.** acpi tables read, interrupts routed through an io apic, and the timer moved to the local apic -- lateral on its own, and the thing a second cpu would need)
 
 ## what it does
 
@@ -30,6 +30,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] arguments, and a toolbox that lives outside the kernel
 - [x] users: a login, a uid per process, and files a guest may not read
 - [x] cpu accounting, peak memory, syscall counts, and a live `top`
+- [x] acpi, the lapic and io apic, and a timer that is part of the cpu
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -196,6 +197,32 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### modern interrupt hardware
+
+the 8259 is a single chip the whole machine shares. the local apic is a piece of the processor, which is why every core has one -- and why a kernel meaning to run on more than one cpu cannot be built on the old chip. this version moves everything across: acpi tables to find the hardware, an io apic to route the external interrupts, and the lapic's own timer in place of the pit.
+
+on its own that is **lateral** -- the same interrupts arriving by a better road, and nothing above the interrupt layer can tell. that is worth saying plainly. what it buys is everything after it.
+
+three things had to be got right rather than assumed:
+
+**the numbers everyone knows are wrong.** the pit is wired to irq 0 and the keyboard to irq 1, except that on most real machines they arrive at the io apic on different lines entirely. the madt's *interrupt source override* entries are the only way to know which, and a kernel that skips them gets no timer. so the routing asks acpi rather than asserting, and the polarity and trigger flags are honoured too -- a level-triggered line left as edge fires once and stops; an edge one treated as level fires forever.
+
+**the apics are not in ram.** both sit above every scrap of memory the machine has, so the direct map does not reach them and each needs a page mapped explicitly -- with caching *off*, since these are registers and the cpu must not remember what one of them said last time.
+
+**nobody documents the lapic timer's clock.** it runs at some fraction of the bus speed, which varies by machine, so it has to be measured -- against the pit, which is still ticking and still knows what a second is. calibrate for 50ms, work out the rate, start the periodic timer, and only then tell the pit to stop.
+
+**"is the timer on the lapic" and "are external interrupts on the io apic" are two questions.** they were one flag for about an hour, and the consequence was instructive: with the timer moved and the keyboard left behind, a keypress arriving from the 8259 was acknowledged at the lapic instead. the 8259 never heard that its interrupt had been handled, so it stopped delivering -- one character, then a machine that looked dead. an interrupt has to be acknowledged at whichever chip actually raised it, and while the two halves of this milestone are in different places, only two flags can say which that is.
+
+**and half of it is deliberately not automatic.** the lapic timer can be *proved*: start it, wait by some other means, see whether it delivered, and put the old one back if it did not. an io apic route cannot. its registers read back correctly and it still may deliver nothing -- and the way you find that out is that the keyboard stops, on a machine you can then no longer tell to try something else.
+
+so the boot moves the timer and leaves the keyboard and serial on the 8259, which demonstrably works. moving those too is the `ioapic` command, asked for from a shell that already works, where a mistake costs a reboot rather than the machine. that is a worse default and a far better way to find out. the routing verifies itself by read-back either way; it just cannot verify the part that matters.
+
+**the calibration cannot use the timer it is replacing.** the obvious way to wait 50ms is to count timer interrupts, and that is exactly wrong here: interrupts are still off this early in boot, and the chip that would deliver them is about to be masked. so the wait polls pit channel 2 instead, whose countdown reports itself through a bit on the keyboard controller's port and needs no interrupt at all. i learned this the direct way -- the first version hung on a blank screen.
+
+and then it is **proved before being trusted**. everything up to that point is register writes that either worked or did not, with no way to tell from where you are standing. so interrupts go on briefly, a polled wait passes, and if the new timer delivered nothing the old one goes straight back. ten lines later that would not be possible, and the symptom would be a machine that reaches a prompt and then never sleeps again.
+
+if the firmware describes no apics, none of this happens and the 8259 keeps the job. that is not a failure path bolted on; it is the same behaviour by an older road, and everything above the interrupt layer is written not to care which.
+
 ### measuring itself
 
 the timer tick charges itself to whoever was running when it arrived. that is a *sampling* measure rather than real accounting -- a thread that always yielded just before the tick would look free -- and it is worth being clear that is what it is, but it is one line of arithmetic in the interrupt that already existed, and it turns the scheduler from a claim into something you can watch. `ps` grows a cpu column; the idle thread usually holds most of it, which is the honest picture of a machine waiting for somebody to type.
@@ -297,6 +324,7 @@ $ make test
   syscall    ok        dispatch, files, spawn, and every pointer refused
   tty        ok        who owns the keyboard, echo, and what ctrl+c means
   auth       ok        accounts, and every malformed line refused
+  acpi       ok        firmware tables, and every malformed one refused
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -373,6 +401,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.7** — off the 8259 and onto the apics. acpi tables walked from the rsdp limine hands over, the io apic routing external interrupts, and the lapic's own timer in place of the pit -- calibrated against the pit first, because nobody documents what speed it runs at. the routing asks acpi where an irq really arrives rather than assuming the numbers everyone knows, since irq 0 is wired to line 2 on most real machines and a kernel that assumes gets no timer at all. both apics live above ram, so each needs a page mapped with caching off. the calibration polls pit channel 2 rather than counting its interrupts, because interrupts are off that early and the chip is about to be masked -- and the new timer is proved to deliver before the old one is given up. the io apic half is *not* automatic: a route that reads back correctly can still deliver nothing, and the symptom is a machine with no keyboard, so it lives behind an `ioapic` command you run from a shell that already works. and because the timer and the external interrupts now live on different chips, which one acknowledges an interrupt is two flags rather than one -- getting that wrong meant the 8259 never heard back, and stopped after a single keypress. lateral on its own and the readme says so; what it buys is a second cpu being possible. if the firmware describes no apics the 8259 keeps the job and nothing above notices. the parser is tested on malformed tables, because firmware bytes are the least trustworthy in the machine and the ones acted on earliest.
 - **0.1.6** — the kernel measures itself. the timer tick charges itself to whoever was running, so `ps` grows a cpu column and the scheduler stops being theoretical -- a sampling measure rather than real accounting, and the README says so. the pmm remembers its peak, every syscall is counted as it is dispatched, and `top` redraws the lot twice a second until you press a key. also quieter: a program typed by name no longer narrates its pid and its departure, because you wanted the output rather than a commentary on it. `run` still does, since that is a demonstration, and a kill is always reported.
 - **0.1.5** — users. a login prompt reading accounts from `passwd` in the ramdisk, with the password not echoed; a uid on every process, inherited by children and unaskable-for by programs; and a check with real consequences -- `open` weighs the mode tar recorded against the caller's uid, so `velvet-room.txt` at 0600 is readable by `igor` and refused to `guest`. `whoami` exists twice on purpose: the builtin reads a variable the shell keeps, the program asks the kernel what uid it was given and cannot lie about the answer. the passwords are plaintext and the README says why that is the honest shape of this rather than a corner cut. the parser is tested mostly on malformed input, since a passwd file letting somebody in on a line it half understood is the worst thing it could do.
 - **0.1.4** — a toolbox outside the kernel. `cat`, `echo`, `uptime` and `ls` are programs in `ramdisk/bin` now, and typing one looks no different because the shell falls back to looking for a program of that name. what made it possible was arguments: the loader builds argv on the program's own stack -- strings, then pointers to them -- and hands argc and argv over in registers, with every store going through the direct map while every pointer written is the address the program will see. the exercise was meant to reveal which commands were secretly using kernel internals, and it did: `echo` needed only argv, `cat` and `uptime` needed nothing new, and `ls` needed `readdir`, because `open` can only answer about a name you already know. what stayed behind reads kernel state or acts on the machine, and could not have left.

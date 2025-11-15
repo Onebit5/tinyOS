@@ -81,6 +81,8 @@ check() {
 check 'kernel banner'      'tinyOS v'
 check 'framebuffer found'  'framebuffer :'   # serial keeps everything
 check 'idt armed'          '256 gates armed'
+check 'acpi parsed'        'acpi       :'
+check 'interrupts routed'  'interrupts :'
 check 'memory map parsed'  'memory map, as declared by limine'
 check 'memory selftest'    'books balance'
 check 'own page tables'    'cr3 is ours'

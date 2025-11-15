@@ -42,6 +42,8 @@ uint64_t pmm_peak_bytes(void) { return 0; }
 uint64_t syscall_times_called(unsigned n) { (void)n; return 0; }
 const char *syscall_name(unsigned n) { (void)n; return "x"; }
 bool input_haskey(void) { return true; }
+bool interrupts_on_apic(void) { return false; }
+bool interrupts_use_ioapic(void) { return false; }
 int input_getchar(void) { return 'q'; }
 void klog_dump(void) { kprintf("<DMESG>"); }
 static bool run_ok = true;

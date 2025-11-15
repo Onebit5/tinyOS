@@ -17,6 +17,9 @@
 #define PTE_PRESENT (1ull << 0)
 #define PTE_WRITE   (1ull << 1)
 #define PTE_USER    (1ull << 2)
+#define PTE_WRITETHROUGH (1ull << 3)
+#define PTE_NO_CACHE (1ull << 4)    /* mmio: the cpu must not remember
+                                     * what a register said last time */
 #define PTE_HUGE    (1ull << 7)     /* at pd level: a 2MiB page */
 #define PTE_GLOBAL  (1ull << 8)
 #define PTE_NX      (1ull << 63)    /* needs EFER.NXE, or its a fault */

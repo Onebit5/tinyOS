@@ -5,6 +5,7 @@
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "cpu/pic.h"
+#include "cpu/interrupts.h"
 #include "cpu/tss.h"
 #include "cpu/syscall.h"
 #include "drivers/serial.h"
@@ -223,6 +224,15 @@ void kmain(void) {
     /* from here on this function is a thread like any other */
     sched_init();
     pit_init();
+
+    /* and now, if the firmware will say where they are, move every
+     * interrupt off the 8259 and onto the apics. this is lateral on its
+     * own -- the same interrupts by a better road -- and it is the
+     * thing a second cpu would need. if acpi tells us nothing we stay
+     * on the old chip, which works perfectly well */
+    if (!interrupts_use_apic()) {
+        kprintf("interrupts : staying on the 8259 and the pit\n");
+    }
 
     if (thread_create("shell", shell_thread, NULL) == NULL) {
         panic("no memory for a shell. there is nobody left to talk to");

@@ -1,5 +1,10 @@
 #include "cpu/interrupts.h"
 #include "cpu/pic.h"
+#include "cpu/acpi.h"
+#include "cpu/lapic.h"
+#include "cpu/ioapic.h"
+#include "cpu/idt.h"
+#include "drivers/pit.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
 #include "lib/backtrace.h"
@@ -64,6 +69,20 @@ static void dump_frame(struct interrupt_frame *f) {
 
 static void (*irq_handlers[16])(struct interrupt_frame *);
 
+/* two separate questions, and conflating them is what broke the
+ * keyboard: whether the *timer* comes from the lapic, and whether
+ * *external* interrupts come from the io apic. since 0.1.7 the first
+ * happens at boot and the second only if asked, so for a while the
+ * answer is yes to one and no to the other -- and an interrupt has to
+ * be acknowledged at whichever chip actually delivered it */
+static bool timer_on_lapic;
+static bool external_on_ioapic;
+static struct acpi_info acpi;
+
+bool interrupts_on_apic(void) {
+    return timer_on_lapic;
+}
+
 void irq_register(uint8_t irq, void (*handler)(struct interrupt_frame *)) {
     if (irq < 16) {
         irq_handlers[irq] = handler;
@@ -71,19 +90,46 @@ void irq_register(uint8_t irq, void (*handler)(struct interrupt_frame *)) {
 }
 
 void interrupt_dispatch(struct interrupt_frame *f) {
+    /* the apic timer arrives on a vector of its own, above the range
+     * the 8259 was remapped into */
+    if (f->vector == LAPIC_TIMER_VECTOR) {
+        lapic_eoi();
+        /* the same tick, arriving by a different road. everything above
+         * counts in these, so the change must be invisible from there */
+        pit_tick();
+        return;
+    }
+
+    /* an apic raises this when an interrupt is withdrawn before it can
+     * be delivered. it gets no eoi -- acknowledging one that never
+     * happened puts the controller out of step */
+    if (f->vector == LAPIC_SPURIOUS_VECTOR) {
+        return;
+    }
+
     if (f->vector >= PIC_IRQ_BASE && f->vector < PIC_IRQ_BASE + 16) {
         uint8_t irq = f->vector - PIC_IRQ_BASE;
-        if (pic_is_spurious(irq)) {
+
+        /* the 8259's ghosts are only the 8259's problem, and it is
+         * still the one delivering these unless we moved them */
+        if (!external_on_ioapic && pic_is_spurious(irq)) {
             return;
         }
         /* eoi goes BEFORE the handler, which looks wrong until you
          * remember the scheduler exists: the timer handler can switch
          * threads and never come back on this stack. a freshly created
          * thread has no half-finished irq frame to return through, so
-         * it would never send the eoi and the pic would go quiet
+         * it would never send the eoi and the controller would go quiet
          * forever. interrupts are off in here (interrupt gate), so
          * nothing can nest before we iretq */
-        pic_send_eoi(irq);
+        /* acknowledge whichever chip actually raised it. getting this
+         * backwards means the 8259 never hears that its interrupt was
+         * handled, and quietly stops delivering any more */
+        if (external_on_ioapic) {
+            lapic_eoi();
+        } else {
+            pic_send_eoi(irq);
+        }
         if (irq_handlers[irq]) {
             irq_handlers[irq](f);
         } else {
@@ -162,4 +208,147 @@ void interrupt_dispatch(struct interrupt_frame *f) {
     kbacktrace(f->rbp, f->rip);
 
     panic("%s at rip=%016lx", exception_names[f->vector], f->rip);
+}
+
+/* ---- moving onto the apics ---------------------------------------- */
+
+/* put everything back the way it was. this exists because the failure
+ * mode here is a machine with no keyboard, and a machine with no
+ * keyboard cannot be told to try something else -- so every doubt has
+ * to resolve itself before the boot finishes, not after */
+static void back_to_the_8259(const char *why) {
+    kprintf("interrupts : %s. putting the 8259 and the pit back\n", why);
+    timer_on_lapic = false;
+    external_on_ioapic = false;
+
+    pic_init();
+    pit_init();
+    pic_unmask(1);      /* keyboard */
+    pic_unmask(4);      /* serial */
+}
+
+bool interrupts_use_apic(void) {
+    acpi = acpi_init();
+    if (!acpi.found || acpi.lapic_address == 0 || acpi.ioapic_count == 0) {
+        return false;       /* the 8259 keeps the job */
+    }
+
+    if (!lapic_init(acpi.lapic_address)) {
+        return false;
+    }
+    if (!ioapic_init(acpi.ioapics[0].address, acpi.ioapics[0].gsi_base)) {
+        kprintf("interrupts : the io apic did not answer\n");
+        return false;
+    }
+
+    /* measure the lapic timer *first*, while everything old still
+     * works. it is driven by the bus clock, whose speed nobody
+     * documents, so it has to be counted against something that
+     * already knows what a second is.
+     *
+     * the wait polls the pit rather than counting its interrupts,
+     * which matters twice over: interrupts are still off this early in
+     * boot, and we are about to mask the very chip that would deliver
+     * them. a wait that needed either would spin here forever */
+    uint64_t hz = lapic_calibrate(pit_poll_wait, 50);
+    if (hz < 1000 || hz > 100000000000ull) {
+        /* an answer that absurd means the measurement failed, and a
+         * timer started from it would be worse than the pit */
+        kprintf("interrupts : lapic timer measured %lu Hz, which cannot be "
+                "right. staying on the pit\n", hz);
+        return false;
+    }
+
+    /* only the timer line goes. everything else stays on the 8259 --
+     * see the note above interrupts_use_ioapic() for why that is a
+     * decision rather than an omission. two timers would both fire,
+     * so this one has to be silenced either way */
+    pic_mask(0);
+
+    lapic_timer_start(PIT_HZ, hz);
+    pit_stop();
+    /* and now prove it, before anything depends on it.
+     *
+     * everything above this point is arithmetic and register writes
+     * that either worked or did not, and there is no way to tell from
+     * here. so let interrupts in briefly, wait by a means that needs no
+     * interrupt at all, and see whether the new timer actually
+     * delivered anything. if it did not we can still put the old one
+     * back; ten lines later we could not, and the symptom would be a
+     * machine that boots to a prompt and then never sleeps again */
+    uint64_t before = pit_ticks();
+    asm volatile ("sti");
+    pit_poll_wait(30);
+    asm volatile ("cli");
+
+    if (pit_ticks() == before) {
+        back_to_the_8259("the lapic timer was started and delivered nothing");
+        return false;
+    }
+    timer_on_lapic = true;
+    kprintf("interrupts : lapic %u, timer at %lu Hz measured against the pit\n",
+            lapic_id(), hz);
+    kprintf("             timer acknowledged at the lapic, everything else "
+            "still at the 8259\n");
+    return true;
+}
+
+/* ---- moving the external interrupts too -----------------------------
+ *
+ * this half is not done at boot, and the reason is worth writing down
+ * rather than leaving as an apparent oversight.
+ *
+ * the timer can be proved: start it, wait by other means, see whether
+ * it delivered. an io apic route cannot. the registers can be read back
+ * -- and are -- but a redirection entry that reads back perfectly and
+ * still delivers nothing is an ordinary failure, and the way you find
+ * out is that the keyboard stops. a machine with no keyboard cannot be
+ * told to try something else.
+ *
+ * so it lives behind a command instead. from a shell that already works
+ * you can ask for it, and if the keyboard goes quiet a reboot puts you
+ * back exactly where you were. that is a worse default and a much
+ * better way to find out. */
+bool interrupts_use_ioapic(void) {
+    if (!timer_on_lapic) {
+        kprintf("the lapic is not running; there is nothing to route to\n");
+        return false;
+    }
+    if (!ioapic_available()) {
+        kprintf("no io apic answered at boot\n");
+        return false;
+    }
+
+    static const uint8_t wired[] = { 1, 4 };    /* keyboard, serial */
+    uint32_t id = lapic_id();
+
+    for (size_t w = 0; w < sizeof wired; w++) {
+        uint8_t irq = wired[w];
+        uint32_t gsi = acpi_gsi_for_irq(&acpi, irq);
+
+        uint16_t flags = 0;
+        for (size_t i = 0; i < acpi.override_count; i++) {
+            if (acpi.overrides[i].isa_irq == irq) {
+                flags = acpi.overrides[i].flags;
+            }
+        }
+
+        if (!ioapic_route(gsi, (uint8_t)(PIC_IRQ_BASE + irq), id, flags)) {
+            kprintf("routing irq %u failed; nothing has been changed\n", irq);
+            return false;
+        }
+        kprintf("  irq %u -> line %u -> vector %u\n",
+                irq, gsi, PIC_IRQ_BASE + irq);
+    }
+
+    /* only now silence the old chip. a masked 8259 still asserts its
+     * line on some hardware, so it goes entirely rather than quietly */
+    for (uint8_t i = 0; i < 16; i++) {
+        pic_mask(i);
+    }
+    /* only now does an external interrupt get acknowledged at the
+     * lapic, because only now is the lapic the one delivering it */
+    external_on_ioapic = true;
+    kprintf("the 8259 is masked. if the keyboard has gone quiet, reboot\n");
+    return true;
 }

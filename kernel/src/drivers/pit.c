@@ -5,7 +5,16 @@
 #include "sched/sched.h"
 
 #define PIT_CH0  0x40
+#define PIT_CH2  0x42
 #define PIT_CMD  0x43
+
+/* channel 2's gate and its output, on the keyboard controller of all
+ * places. bit 0 gates the count, bit 1 is the speaker (which we leave
+ * firmly off), and bit 5 reads back whether the count has finished */
+#define PORT_61       0x61
+#define P61_GATE      0x01
+#define P61_SPEAKER   0x02
+#define P61_CH2_OUT   0x20
 #define PIT_IRQ  0
 
 /* the crystal runs at 1.193182 MHz because of a 1981 decision to reuse
@@ -14,12 +23,26 @@
 
 static volatile uint64_t ticks;
 
-static void pit_irq(struct interrupt_frame *f) {
-    (void)f;
+void pit_tick(void) {
     ticks++;
     /* hand the tick to the scheduler, which decides if the running
      * thread has had enough of the cpu */
     sched_tick();
+}
+
+static void pit_irq(struct interrupt_frame *f) {
+    (void)f;
+    pit_tick();
+}
+
+void pit_stop(void) {
+    /* mode 0, and no reload: it counts down once and stops. the tick
+     * counter stays exactly where it was, because uptime and every
+     * sleep in the system are measured in it */
+    outb(PIT_CMD, 0x30);
+    outb(PIT_CH0, 0);
+    outb(PIT_CH0, 0);
+    pic_mask(PIT_IRQ);
 }
 
 void pit_init(void) {
@@ -40,6 +63,38 @@ uint64_t pit_ticks(void) {
 
 uint64_t pit_uptime_ms(void) {
     return ticks * (1000 / PIT_HZ);
+}
+
+void pit_poll_wait(uint64_t ms) {
+    if (ms > 50) {
+        ms = 50;        /* 16 bits at 1.193 MHz runs out just past 54 */
+    }
+    uint64_t count = (PIT_BASE_HZ * ms) / 1000;
+    if (count == 0 || count > 0xffff) {
+        count = 0xffff;
+    }
+
+    uint8_t saved = inb(PORT_61);
+
+    /* gate open, speaker off. nobody wants to calibrate audibly */
+    outb(PORT_61, (uint8_t)((saved & ~P61_SPEAKER) | P61_GATE));
+
+    /* channel 2, lobyte then hibyte, mode 0: the output goes low when
+     * the count is loaded and high again when it reaches zero */
+    outb(PIT_CMD, 0xb0);
+    outb(PIT_CH2, (uint8_t)(count & 0xff));
+    outb(PIT_CH2, (uint8_t)(count >> 8));
+
+    /* bounded, because this runs before anything can report a problem.
+     * a machine that does not wire channel 2 to this bit would
+     * otherwise spin here forever, with a blank screen and no clue --
+     * and a wrong measurement is recoverable where a hang is not */
+    uint64_t spins = 200000000;
+    while (!(inb(PORT_61) & P61_CH2_OUT) && spins-- > 0) {
+        asm volatile ("pause");
+    }
+
+    outb(PORT_61, saved);
 }
 
 void pit_busy_wait(uint64_t ms) {

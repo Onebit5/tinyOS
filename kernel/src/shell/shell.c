@@ -15,6 +15,7 @@
 #include "sched/usermode.h"
 #include "sched/auth.h"
 #include "cpu/syscall.h"
+#include "cpu/interrupts.h"
 #include "lib/ksyms.h"
 #include "version.h"
 #include "sched/sched.h"
@@ -341,6 +342,27 @@ static void cmd_run(int argc, char **argv) {
  * shows already existed -- the point of this version is that a number
  * you can watch move tells you something a number you have to ask for
  * twice does not */
+/* the half of 0.1.7 that cannot be proved before it is trusted, so it
+ * is asked for from a shell that already works rather than done to you
+ * at boot. if the keyboard goes quiet afterwards, a reboot undoes it */
+static void cmd_ioapic(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    if (!interrupts_on_apic()) {
+        kprintf("interrupts are still on the 8259; there is nothing to "
+                "move them from\n");
+        return;
+    }
+
+    kprintf("moving the keyboard and serial onto the io apic.\n");
+    kprintf("if this was a mistake, the keyboard will simply stop and a\n");
+    kprintf("reboot will put everything back.\n\n");
+
+    if (interrupts_use_ioapic()) {
+        kprintf("\npress a key. if this echoes, it worked.\n");
+    }
+}
+
 static void cmd_top(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -625,6 +647,7 @@ static const struct command commands[] = {
     { "mem",    "frames and heap, honestly counted",    cmd_mem, false },
     { "ps",     "the threads that walk this realm",     cmd_ps, false },
     { "top",    "the same, but watched rather than asked", cmd_top, false },
+    { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },
     { "bt",     "who called whom to get here",          cmd_bt, false },
