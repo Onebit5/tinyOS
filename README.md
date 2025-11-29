@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.7** (**off the 8259 and onto the apics.** acpi tables read, interrupts routed through an io apic, and the timer moved to the local apic -- lateral on its own, and the thing a second cpu would need)
+**version: 0.1.8** (**knowing what is plugged in.** the pci bus enumerated at boot and an `lspci` to show it -- small and satisfying on its own, and the doorway to every real device driver)
 
 ## what it does
 
@@ -31,6 +31,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] users: a login, a uid per process, and files a guest may not read
 - [x] cpu accounting, peak memory, syscall counts, and a live `top`
 - [x] acpi, the lapic and io apic, and a timer that is part of the cpu
+- [x] pci enumeration, and an `lspci` that says what this machine is
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -197,6 +198,20 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### what is plugged in
+
+every device on the pci bus answers to 256 bytes of configuration space whose first few fields are identical on all of them: who made it, what it is, and roughly what sort of thing that makes it. reading those is the whole of enumeration, and `lspci` prints the result -- vendor and device ids, a class in words, the base address registers saying where it listens, and its interrupt line.
+
+two parts of a scan are easy to get wrong and are the reason this has a test:
+
+**a multifunction device only admits it in one bit.** a single physical part can present several devices, and the only clue is a bit in function zero's header. miss it and the second half of an ich9 -- its smbus controller, say -- simply does not exist as far as the kernel is concerned.
+
+**a bridge hides a whole bus behind it.** the devices there are every bit as real as the ones in front, and are found only by reading the bridge's secondary bus number and walking through. the walk has a depth limit, because bridges are *supposed* to form a tree and a machine whose firmware disagrees should not be able to make the kernel recurse forever.
+
+the scan takes config space as a function rather than reaching for the ports itself, which is the same trick the memory map and the acpi tables use: the test builds a machine with a bridge, a multifunction part and empty slots between them, and checks the walk finds exactly what is there.
+
+reading config space is two port writes that must not be interleaved with anybody else's, so it is done with interrupts off. there is a memory-mapped way in on newer firmware which reaches further, but nothing here needs the parts it reaches.
+
 ### modern interrupt hardware
 
 the 8259 is a single chip the whole machine shares. the local apic is a piece of the processor, which is why every core has one -- and why a kernel meaning to run on more than one cpu cannot be built on the old chip. this version moves everything across: acpi tables to find the hardware, an io apic to route the external interrupts, and the lapic's own timer in place of the pit.
@@ -325,6 +340,7 @@ $ make test
   tty        ok        who owns the keyboard, echo, and what ctrl+c means
   auth       ok        accounts, and every malformed line refused
   acpi       ok        firmware tables, and every malformed one refused
+  pci        ok        a fabricated machine, walked bridges and all
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -401,6 +417,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.8** — the pci bus, enumerated at boot and shown by `lspci`: vendor and device ids, the class in words, the base address registers saying where each device listens, and its interrupt line. the scan takes config space as a function rather than reaching for the ports, so the test builds its own machine -- a bridge with a device behind it, a multifunction part, empty slots between -- and checks the walk finds exactly what is there. the two things worth getting right are that a multifunction part only admits to its other functions in one bit of function zero, and that a bridge hides an entire bus that has to be walked through; the walk is depth-limited, because firmware that disagrees about bridges forming a tree should not be able to make the kernel recurse forever.
 - **0.1.7** — off the 8259 and onto the apics. acpi tables walked from the rsdp limine hands over, the io apic routing external interrupts, and the lapic's own timer in place of the pit -- calibrated against the pit first, because nobody documents what speed it runs at. the routing asks acpi where an irq really arrives rather than assuming the numbers everyone knows, since irq 0 is wired to line 2 on most real machines and a kernel that assumes gets no timer at all. both apics live above ram, so each needs a page mapped with caching off. the calibration polls pit channel 2 rather than counting its interrupts, because interrupts are off that early and the chip is about to be masked -- and the new timer is proved to deliver before the old one is given up. the io apic half is *not* automatic: a route that reads back correctly can still deliver nothing, and the symptom is a machine with no keyboard, so it lives behind an `ioapic` command you run from a shell that already works. and because the timer and the external interrupts now live on different chips, which one acknowledges an interrupt is two flags rather than one -- getting that wrong meant the 8259 never heard back, and stopped after a single keypress. lateral on its own and the readme says so; what it buys is a second cpu being possible. if the firmware describes no apics the 8259 keeps the job and nothing above notices. the parser is tested on malformed tables, because firmware bytes are the least trustworthy in the machine and the ones acted on earliest.
 - **0.1.6** — the kernel measures itself. the timer tick charges itself to whoever was running, so `ps` grows a cpu column and the scheduler stops being theoretical -- a sampling measure rather than real accounting, and the README says so. the pmm remembers its peak, every syscall is counted as it is dispatched, and `top` redraws the lot twice a second until you press a key. also quieter: a program typed by name no longer narrates its pid and its departure, because you wanted the output rather than a commentary on it. `run` still does, since that is a demonstration, and a kill is always reported.
 - **0.1.5** — users. a login prompt reading accounts from `passwd` in the ramdisk, with the password not echoed; a uid on every process, inherited by children and unaskable-for by programs; and a check with real consequences -- `open` weighs the mode tar recorded against the caller's uid, so `velvet-room.txt` at 0600 is readable by `igor` and refused to `guest`. `whoami` exists twice on purpose: the builtin reads a variable the shell keeps, the program asks the kernel what uid it was given and cannot lie about the answer. the passwords are plaintext and the README says why that is the honest shape of this rather than a corner cut. the parser is tested mostly on malformed input, since a passwd file letting somebody in on a line it half understood is the worst thing it could do.

@@ -13,6 +13,7 @@
 #include "drivers/keyboard.h"
 #include "drivers/input.h"
 #include "drivers/pit.h"
+#include "drivers/pci.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
 #include "lib/string.h"
@@ -217,6 +218,9 @@ void kmain(void) {
 
     /* before the shell reclaims limine's memory, since the module list
      * we read this out of is sitting in it */
+    pci_scan();
+    kprintf("pci        : %zu devices on the bus\n", pci_count());
+
     ramdisk_init();
     auth_init();
     kprintf("\n");

@@ -16,6 +16,7 @@
 #include "sched/auth.h"
 #include "cpu/syscall.h"
 #include "cpu/interrupts.h"
+#include "drivers/pci.h"
 #include "lib/ksyms.h"
 #include "version.h"
 #include "sched/sched.h"
@@ -345,6 +346,58 @@ static void cmd_run(int argc, char **argv) {
 /* the half of 0.1.7 that cannot be proved before it is trusted, so it
  * is asked for from a shell that already works rather than done to you
  * at boot. if the keyboard goes quiet afterwards, a reboot undoes it */
+static void cmd_lspci(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    if (pci_count() == 0) {
+        kprintf("nothing answered on the pci bus\n");
+        return;
+    }
+
+    for (size_t i = 0; ; i++) {
+        const struct pci_device *d = pci_at(i);
+        if (d == NULL) {
+            break;
+        }
+
+        kprintf("  %02x:%02x.%u  %04x:%04x  %s",
+                d->bus, d->slot, d->function, d->vendor, d->device,
+                pci_class_name(d->class_code, d->subclass));
+
+        const char *name = pci_device_name(d->vendor, d->device);
+        const char *maker = pci_vendor_name(d->vendor);
+        if (name != NULL) {
+            kprintf("  -- %s", name);
+        } else if (maker != NULL) {
+            kprintf("  -- %s, model unknown to us", maker);
+        }
+        kprintf("\n");
+
+        /* where it listens. a device with no bars is one that is
+         * spoken to some other way, which is worth seeing too */
+        bool any_bar = false;
+        for (size_t b = 0; b < 6; b++) {
+            struct pci_bar bar = pci_decode_bar(d->bar[b]);
+            if (bar.address == 0) {
+                continue;
+            }
+            if (!any_bar) {
+                kprintf("           ");
+                any_bar = true;
+            }
+            kprintf(" bar%zu=%s%p%s", b, bar.is_io ? "io " : "mem ",
+                    (void *)bar.address, bar.is_64bit ? " (64-bit)" : "");
+        }
+        if (any_bar) {
+            kprintf("\n");
+        }
+        if (d->irq_line != 0 && d->irq_line != 0xff) {
+            kprintf("            irq %u\n", d->irq_line);
+        }
+    }
+    kprintf("  %zu devices\n", pci_count());
+}
+
 static void cmd_ioapic(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -647,6 +700,7 @@ static const struct command commands[] = {
     { "mem",    "frames and heap, honestly counted",    cmd_mem, false },
     { "ps",     "the threads that walk this realm",     cmd_ps, false },
     { "top",    "the same, but watched rather than asked", cmd_top, false },
+    { "lspci",  "what is plugged into this machine",    cmd_lspci, false },
     { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },

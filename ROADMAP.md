@@ -57,8 +57,9 @@ better hardware -- but it is the prerequisite for more than one cpu.~~
 **done in 0.1.7**, with a fallback: if the firmware will not say where
 the apics are, the 8259 keeps the job and nothing above notices.
 
-**0.1.8 knowing what is plugged in.** pci enumeration and an `lspci`.
-small, satisfying, and the doorway to every real device driver.
+**0.1.8 knowing what is plugged in.** ~~pci enumeration and an `lspci`.
+small, satisfying, and the doorway to every real device driver.~~
+**done in 0.1.8.**
 
 **0.1.9 allocators worth the name.** the pmm is a linear bitmap scan; a
 buddy allocator would make it logarithmic. a slab allocator for the
