@@ -43,6 +43,7 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'whoami\r';  sleep 1
     printf 'mem\r';     sleep 1
     printf 'lspci\r';   sleep 2
+    printf 'slabs\r';   sleep 2
     printf 'run bin/whoami\r'; sleep 2
     printf 'logout\r';  sleep 1
     printf 'guest\r';   sleep 1
@@ -120,6 +121,10 @@ check 'cpu accounted'    '% '
 check 'peak memory'      'ever in use at once'
 check 'pci scanned'      'pci        :'
 check 'lspci works'      'host bridge'
+check 'blocks merge'     'blocks merge'
+check 'free block shape' 'free blocks, by size'
+check 'slab caches'      'kmalloc-'
+check 'thread cache'     'addrspace'
 check 'root reads it'    'THE VELVET ROOM'
 check 'logout works'     'fare thee well'
 check 'guest logs in'    'thou art a guest'

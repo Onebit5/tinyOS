@@ -61,10 +61,10 @@ the apics are, the 8259 keeps the job and nothing above notices.
 small, satisfying, and the doorway to every real device driver.~~
 **done in 0.1.8.**
 
-**0.1.9 allocators worth the name.** the pmm is a linear bitmap scan; a
+**0.1.9 allocators worth the name.** ~~the pmm is a linear bitmap scan; a
 buddy allocator would make it logarithmic. a slab allocator for the
 fixed-size things we allocate constantly (threads, address spaces). a
-`kmalloc` that is not first-fit.
+`kmalloc` that is not first-fit.~~ **done in 0.1.9.**
 
 **0.1.10 a real filesystem, on a real disk.**
 

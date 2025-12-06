@@ -47,8 +47,8 @@ int main(void) {
 
     uint64_t usable = (MiB - 0x1000) + 6 * MiB;
     CHECK(pmm_total_bytes() == usable, "total == sum of usable regions");
-    /* bitmap for 8MiB of frames fits in one page, parked in e0 */
-    CHECK(pmm_free_bytes() == usable - PAGE_SIZE, "free == total - bitmap page");
+    /* the buddy's books for 8MiB of frames fit in one page, parked in e0 */
+    CHECK(pmm_free_bytes() == usable - PAGE_SIZE, "free == total - the books");
 
     /* single frame round trip */
     uint64_t f = pmm_alloc();
@@ -64,6 +64,21 @@ int main(void) {
     CHECK(run != 0, "got a 4-frame run");
     memset(pmm_phys_to_virt(run), 0xcd, 4 * PAGE_SIZE);
     pmm_free_pages(run, 4);
+
+    /* the buddy rounds up to a power of two, which is the one piece of
+     * it that leaks through this interface. three pages costs four */
+    uint64_t before3 = pmm_free_bytes();
+    uint64_t three = pmm_alloc_pages(3);
+    CHECK(three != 0, "got a 3-frame run");
+    CHECK(pmm_free_bytes() == before3 - 4 * PAGE_SIZE,
+          "three pages costs four, and the books say so");
+    memset(pmm_phys_to_virt(three), 0xef, 3 * PAGE_SIZE);
+    pmm_free_pages(three, 3);
+    CHECK(pmm_free_bytes() == before3, "freeing with the same count balances");
+
+    /* nothing may be bigger than the largest block */
+    CHECK(pmm_alloc_pages(1u << 20) == 0,
+          "an absurd run is refused, not quietly served something small");
 
     /* drain it dry: every frame handed out exactly once, no overlaps */
     uint64_t expect_frames = pmm_free_bytes() / PAGE_SIZE;
@@ -108,14 +123,19 @@ int main(void) {
     for (int i = 0; i < 6; i++) kfree(p[order[i]]);
     CHECK(kheap_used_bytes() == used0, "heap books balance");
 
-    /* coalescing: three smalls freed then one bigger alloc, heap total
-     * must not grow (the merged block gets reused) */
+    /* size classes: a hundred small blocks of the same size share a
+     * handful of pages rather than taking one each, and the heap gives
+     * every one of those pages back when they are returned */
     uint64_t total0 = kheap_total_bytes();
-    uint8_t *a = kmalloc(100), *b = kmalloc(100), *c = kmalloc(100);
-    kfree(a); kfree(b); kfree(c);
-    uint8_t *big = kmalloc(300);
-    CHECK(kheap_total_bytes() == total0, "coalesced space reused, no growth");
-    kfree(big);
+    uint8_t *many[100];
+    for (int i = 0; i < 100; i++) {
+        many[i] = kmalloc(100);
+        CHECK(many[i] != NULL, "a run of same-size allocations all succeed");
+    }
+    CHECK(kheap_total_bytes() - total0 <= 8 * PAGE_SIZE,
+          "a hundred small blocks share a few pages");
+    for (int i = 0; i < 100; i++) kfree(many[i]);
+    CHECK(kheap_total_bytes() == total0, "and the pages went back");
 
     /* zero and absurd */
     CHECK(kmalloc(0) == NULL, "kmalloc(0) is NULL");
@@ -127,8 +147,8 @@ int main(void) {
     /* ---- reclaiming limine's memory ----
      * a fresh map with a bootloader-reclaimable region ABOVE the last
      * usable one, which is where it really sits on a pc -- if the
-     * bitmap is only sized to cover usable ram, those frames fall off
-     * the end and reclaiming them silently does nothing */
+     * allocator is only sized to cover usable ram, those frames fall
+     * off the end and reclaiming them silently does nothing */
     struct limine_memmap_entry r0 = { .base = 0x1000, .length = MiB - 0x1000,
                                       .type = LIMINE_MEMMAP_USABLE };
     struct limine_memmap_entry r1 = { .base = 2 * MiB, .length = 4 * MiB,
@@ -143,8 +163,9 @@ int main(void) {
     uint64_t free_before  = pmm_free_bytes();
     CHECK(total_before == (MiB - 0x1000) + 4 * MiB,
           "reclaimable memory is not counted as ram until we take it");
-    /* it must be beyond the usable regions but still inside the bitmap */
-    CHECK(pmm_translate_is_tracked(6 * MiB), "the bitmap reaches limine's memory");
+    /* it must be beyond the usable regions but still covered */
+    CHECK(pmm_translate_is_tracked(6 * MiB),
+          "the allocator reaches limine's memory");
 
     uint64_t gained = pmm_reclaim_bootloader();
     CHECK(gained == MiB, "the whole reclaimable region came back");

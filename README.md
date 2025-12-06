@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.8** (**knowing what is plugged in.** the pci bus enumerated at boot and an `lspci` to show it -- small and satisfying on its own, and the doorway to every real device driver)
+**version: 0.1.9** (**allocators worth the name.** a buddy allocator under the pmm, slab caches for the structs a kernel makes over and over, and a `kmalloc` that never searches for anything)
 
 ## what it does
 
@@ -32,6 +32,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] cpu accounting, peak memory, syscall counts, and a live `top`
 - [x] acpi, the lapic and io apic, and a timer that is part of the cpu
 - [x] pci enumeration, and an `lspci` that says what this machine is
+- [x] a buddy page allocator, slab caches, and a heap that stopped searching
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -198,6 +199,70 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### allocators that stopped searching
+
+the first three allocators here were all honest and all linear. the pmm
+walked a bitmap looking for a run of free bits. the heap walked a free
+list looking for a block big enough. both get slower the longer the
+kernel runs, because a machine that has been up a while has its free
+memory in more pieces than a machine that just booted.
+
+**the pmm is a buddy allocator now.** memory is kept as free lists, one
+per block size, so taking a block is following a pointer rather than
+searching. the interesting half is on the way back: every block has
+exactly one partner it could have been split from -- its buddy, found by
+flipping a single bit of its frame number -- so freeing means asking "is
+my buddy also free?", and if it is, the two merge into one block of the
+next size up, and the question is asked again. large blocks reassemble
+themselves out of small ones with nobody keeping a record of what was
+split from what.
+
+the price is rounding: ask for five pages and you get eight. that waste
+is real, so it is counted honestly rather than hidden -- `mem` reports
+what is actually consumed. the free lists also give `mem` something it
+could not show before, which is the *shape* of free memory:
+
+```
+free blocks, by size
+  1x4K 1x8K 2x64K 1x512K 511x4M
+```
+
+a machine with plenty free and none of it contiguous is a machine about
+to fail a large request, and that is invisible in a single "free" number.
+
+**fixed-size things get object caches.** a kernel spends most of its
+allocations on a handful of structs whose size never changes -- a
+thread, an address space -- and for those, "how big?" and "where does it
+fit?" have the same answer every time. a slab cache answers them once:
+take a page, cut it into objects of exactly that size, thread a free
+list through the unused ones. allocation is taking a list head.
+
+each page carries a small header naming the cache it belongs to, which
+is what lets `slab_free` take a bare pointer and work out where it came
+from -- mask off the low twelve bits and the answer is right there -- and
+what lets a page whose objects have all come home go back to the pmm
+instead of being held forever. `slabs` shows the lot:
+
+```
+cache            size  /page   live   peak  pages
+thread            128     31      4      7      1
+addrspace          32    126      0      2      0
+kmalloc-64         64     63      9     22      1
+```
+
+**and `kmalloc` no longer searches at all.** anything that fits a size
+class comes from a slab cache; anything larger takes whole pages with a
+sixteen-byte header on the front. which of the two a pointer came from
+is written on the page it sits in, so `kfree` costs one read rather than
+a walk. the classes are powers of two, so the worst case wastes just
+under half -- a good trade in a kernel where nearly every allocation is
+one of a dozen structs.
+
+the boot self-test now asks for two contiguous megabytes *after* all its
+allocating and freeing is done. if the halves were never merging, that
+is where it is found out, rather than the first time something large is
+needed.
+
 ### what is plugged in
 
 every device on the pci bus answers to 256 bytes of configuration space whose first few fields are identical on all of them: who made it, what it is, and roughly what sort of thing that makes it. reading those is the whole of enumeration, and `lspci` prints the result -- vendor and device ids, a class in words, the base address registers saying where it listens, and its interrupt line.
@@ -341,6 +406,8 @@ $ make test
   auth       ok        accounts, and every malformed line refused
   acpi       ok        firmware tables, and every malformed one refused
   pci        ok        a fabricated machine, walked bridges and all
+  buddy      ok        splitting, merging, and every frame handed out once
+  slab       ok        object caches, and pages that go back when empty
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -417,6 +484,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.9** — the allocators, rebuilt. the pmm is a buddy allocator: free lists per block size, and blocks that put themselves back together when both halves come home, found by flipping one bit of a frame number. fixed-size structs (threads, address spaces) get slab caches, where each page carries a header naming its cache so a bare pointer can be traced back to where it came from -- and so a page whose objects have all returned goes back to the pmm rather than being held forever. `kmalloc` sits on top of those and no longer searches for anything: size classes below 1 KiB, whole pages above. `mem` gained the shape of free memory rather than just the amount of it, and `slabs` shows what each cache is holding. the cost, stated plainly, is that the buddy rounds up -- five pages costs eight -- which `mem` now counts honestly instead of hiding.
 - **0.1.8** — the pci bus, enumerated at boot and shown by `lspci`: vendor and device ids, the class in words, the base address registers saying where each device listens, and its interrupt line. the scan takes config space as a function rather than reaching for the ports, so the test builds its own machine -- a bridge with a device behind it, a multifunction part, empty slots between -- and checks the walk finds exactly what is there. the two things worth getting right are that a multifunction part only admits to its other functions in one bit of function zero, and that a bridge hides an entire bus that has to be walked through; the walk is depth-limited, because firmware that disagrees about bridges forming a tree should not be able to make the kernel recurse forever.
 - **0.1.7** — off the 8259 and onto the apics. acpi tables walked from the rsdp limine hands over, the io apic routing external interrupts, and the lapic's own timer in place of the pit -- calibrated against the pit first, because nobody documents what speed it runs at. the routing asks acpi where an irq really arrives rather than assuming the numbers everyone knows, since irq 0 is wired to line 2 on most real machines and a kernel that assumes gets no timer at all. both apics live above ram, so each needs a page mapped with caching off. the calibration polls pit channel 2 rather than counting its interrupts, because interrupts are off that early and the chip is about to be masked -- and the new timer is proved to deliver before the old one is given up. the io apic half is *not* automatic: a route that reads back correctly can still deliver nothing, and the symptom is a machine with no keyboard, so it lives behind an `ioapic` command you run from a shell that already works. and because the timer and the external interrupts now live on different chips, which one acknowledges an interrupt is two flags rather than one -- getting that wrong meant the 8259 never heard back, and stopped after a single keypress. lateral on its own and the readme says so; what it buys is a second cpu being possible. if the firmware describes no apics the 8259 keeps the job and nothing above notices. the parser is tested on malformed tables, because firmware bytes are the least trustworthy in the machine and the ones acted on earliest.
 - **0.1.6** — the kernel measures itself. the timer tick charges itself to whoever was running, so `ps` grows a cpu column and the scheduler stops being theoretical -- a sampling measure rather than real accounting, and the README says so. the pmm remembers its peak, every syscall is counted as it is dispatched, and `top` redraws the lot twice a second until you press a key. also quieter: a program typed by name no longer narrates its pid and its departure, because you wanted the output rather than a commentary on it. `run` still does, since that is a demonstration, and a kill is always reported.

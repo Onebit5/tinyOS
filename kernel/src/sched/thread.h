@@ -79,6 +79,10 @@ void thread_set_name(struct thread *t, const char *name);
  * run queue ready to go. returns NULL if memory says no */
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg);
 
+/* give a dead thread's struct back. does nothing for the boot thread,
+ * which was never allocated in the first place */
+void thread_free(struct thread *t);
+
 /* hand a dead thread's stack back to the pmm, guard page and all */
 void thread_free_stack(struct thread *t);
 

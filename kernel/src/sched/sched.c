@@ -66,9 +66,7 @@ static void reap_dead(void) {
         if (t->state == THREAD_DEAD) {
             prev->next = t->next;
             thread_free_stack(t);
-            if (t->from_heap) {
-                kfree(t);   /* the boot thread is a global, leave it be */
-            }
+            thread_free(t);     /* a no-op for the boot thread */
             t = prev->next;
         } else {
             prev = t;

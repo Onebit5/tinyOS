@@ -40,6 +40,11 @@ void pmm_free_pages(uint64_t phys, size_t count) {
     outstanding -= count;
 }
 void *pmm_phys_to_virt(uint64_t phys) { return arena + phys; }
+uint64_t pmm_alloc(void)         { return pmm_alloc_pages(1); }
+void     pmm_free(uint64_t phys) { pmm_free_pages(phys, 1); }
+/* the slab caches turn an object pointer back into a physical address
+ * by subtracting this, so it has to be where the arena really is */
+uint64_t pmm_hhdm_offset(void)   { return (uint64_t)arena; }
 void kprintf(const char *f, ...) { (void)f; }
 void panic(const char *f, ...) { (void)f; printf("PANIC\n"); exit(1); }
 void *kmalloc(size_t n) { return malloc(n); }

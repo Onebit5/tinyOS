@@ -2,6 +2,7 @@
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "mm/kmalloc.h"
+#include "mm/slab.h"
 #include "lib/string.h"
 
 /* the lower half is per-process, the upper half is everyone's. the
@@ -15,15 +16,19 @@ static uint64_t *table_at(uint64_t phys) {
     return pmm_phys_to_virt(phys);
 }
 
+static struct slab_cache addrspace_cache;
+
 struct addrspace *addrspace_create(uint64_t kernel_pml4) {
-    struct addrspace *as = kmalloc(sizeof *as);
+    slab_cache_init(&addrspace_cache, "addrspace", sizeof(struct addrspace));
+
+    struct addrspace *as = slab_alloc(&addrspace_cache);
     if (as == NULL) {
         return NULL;
     }
 
     as->pml4 = vmm_new_address_space();
     if (as->pml4 == 0) {
-        kfree(as);
+        slab_free(as);
         return NULL;
     }
 
@@ -82,7 +87,7 @@ void addrspace_destroy(struct addrspace *as) {
     }
 
     free_level(as->pml4, 4);
-    kfree(as);
+    slab_free(as);
 }
 
 uint64_t addrspace_frames(struct addrspace *as) {

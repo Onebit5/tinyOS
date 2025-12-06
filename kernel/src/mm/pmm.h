@@ -6,8 +6,14 @@
 #include <stdbool.h>
 #include "limine.h"
 
-/* physical memory manager. a bitmap over every 4k frame of usable ram,
- * one bit each. frames come and go, the bitmap remembers */
+/* physical memory manager. a buddy allocator underneath (see buddy.h):
+ * free lists per block size, and blocks that put themselves back
+ * together when both halves come home.
+ *
+ * one consequence leaks through this interface: sizes are rounded up to
+ * a power of two, so asking for five pages costs eight. the count you
+ * free with must be the count you allocated with, since that is what
+ * says which list the block belongs on */
 
 #define PAGE_SIZE 4096
 
@@ -52,7 +58,14 @@ uint64_t pmm_highest_address(void);
  * returns how many bytes were recovered. calling twice is harmless. */
 uint64_t pmm_reclaim_bootloader(void);
 
-/* does the bitmap have a bit for this address at all? only interesting
+/* what the allocator's own bookkeeping costs, and how many free blocks
+ * of each size there are -- the shape of the free memory, not just how
+ * much of it there is. a machine with plenty free and none of it
+ * contiguous is a machine about to fail a large allocation */
+uint64_t pmm_metadata_bytes(void);
+uint64_t pmm_blocks_at(unsigned order);
+
+/* is this address covered by the allocator at all? only interesting
  * to the tests, which check that limine's memory is inside the map */
 bool pmm_translate_is_tracked(uint64_t phys);
 

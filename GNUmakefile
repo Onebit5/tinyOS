@@ -147,7 +147,8 @@ run-uefi: iso
 HOSTCC    := gcc
 HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
 
-TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
+TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
+             bin/tests/vmm bin/tests/gdt \
              bin/tests/ksyms bin/tests/rtc bin/tests/ramdisk bin/tests/elf \
              bin/tests/addrspace bin/tests/process \
              bin/tests/syscall bin/tests/tty bin/tests/auth bin/tests/acpi bin/tests/pci \
@@ -156,9 +157,16 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/vmm bin/tests/gdt \
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
 bin/tests/mm:       tests/test_mm.c       kernel/src/mm/pmm.c \
+                    kernel/src/mm/buddy.c kernel/src/mm/slab.c \
+                    kernel/src/mm/kmalloc.c kernel/src/lib/string.c
+bin/tests/buddy:    tests/test_buddy.c    kernel/src/mm/buddy.c \
+                    kernel/src/lib/string.c
+bin/tests/slab:     tests/test_slab.c     kernel/src/mm/slab.c \
+                    kernel/src/mm/pmm.c kernel/src/mm/buddy.c \
                     kernel/src/mm/kmalloc.c kernel/src/lib/string.c
 bin/tests/addrspace: tests/test_addrspace.c kernel/src/mm/addrspace.c \
-                    kernel/src/mm/vmm.c kernel/src/lib/string.c
+                    kernel/src/mm/vmm.c kernel/src/mm/slab.c \
+                    kernel/src/lib/string.c
 bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
                     kernel/src/lib/string.c
 bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c

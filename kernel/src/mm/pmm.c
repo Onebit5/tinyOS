@@ -1,4 +1,5 @@
 #include "mm/pmm.h"
+#include "mm/buddy.h"
 #include "lib/kprintf.h"
 #include "cpu/interrupts.h"
 #include <stdbool.h>
@@ -19,13 +20,16 @@ static volatile struct limine_hhdm_request hhdm_request = {
 };
 
 static uint64_t hhdm_offset;
-static uint64_t *bitmap;        /* 1 bit per frame, set = used */
-static uint64_t bitmap_frames;  /* how many frames the bitmap tracks */
-static uint64_t total_frames;   /* usable frames overall */
-static uint64_t free_frames;
-static uint64_t search_hint;    /* frame index to start scanning from */
-static uint64_t highest_addr;   /* top of the direct map, see pmm.h */
-static uint64_t peak_used;      /* the high-water mark, in frames */
+static uint64_t managed_frames;  /* how many frames the allocator covers */
+static uint64_t total_frames;    /* usable frames overall */
+static uint64_t highest_addr;    /* top of the direct map, see pmm.h */
+static uint64_t peak_used;       /* the high-water mark, in frames */
+static uint64_t meta_bytes;      /* what the buddy's bookkeeping costs */
+
+/* the frames the bookkeeping itself lives in, so we know not to give
+ * them away. an allocator that hands out its own records is briefly
+ * very fast and then very confused */
+static uint64_t meta_first, meta_last;
 
 /* limine's own memory, noted down at init because the memmap we would
  * otherwise read it from is itself sitting in that memory */
@@ -47,9 +51,44 @@ static const char *memmap_type_name(uint64_t type) {
     }
 }
 
-static inline void bit_set(uint64_t frame)   { bitmap[frame / 64] |=  (1ull << (frame % 64)); }
-static inline void bit_clear(uint64_t frame) { bitmap[frame / 64] &= ~(1ull << (frame % 64)); }
-static inline bool bit_test(uint64_t frame)  { return bitmap[frame / 64] & (1ull << (frame % 64)); }
+/* the buddy threads its free lists through the free pages themselves,
+ * so it needs a way to reach one. through the hhdm, same as everything */
+static void *frame_to_virt(uint64_t frame) {
+    return (void *)(frame * PAGE_SIZE + hhdm_offset);
+}
+
+/* hand [first, last) to the allocator, minus the two things that are
+ * never anyone's to allocate: frame 0, so that a physical address of 0
+ * can safely mean "no", and whatever the bookkeeping sits in. returns
+ * how many frames actually went in */
+static uint64_t give_away(uint64_t first, uint64_t last) {
+    if (first == 0) {
+        first = 1;
+    }
+    if (last > managed_frames) {
+        last = managed_frames;
+    }
+    if (first >= last) {
+        return 0;
+    }
+
+    /* if the metadata is somewhere in the middle, give away the two
+     * halves on either side of it. neither of those overlaps it, so
+     * this recurses exactly one level deep */
+    if (meta_first < last && meta_last > first) {
+        uint64_t added = 0;
+        if (meta_first > first) {
+            added += give_away(first, meta_first);
+        }
+        if (meta_last < last) {
+            added += give_away(meta_last, last);
+        }
+        return added;
+    }
+
+    buddy_add_range(first, last - first);
+    return last - first;
+}
 
 void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
                        uint64_t hhdm) {
@@ -59,6 +98,8 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
     uint64_t highest = 0;
     total_frames = 0;
     highest_addr = 0;
+    reclaim_count = 0;
+    peak_used = 0;
     for (size_t i = 0; i < count; i++) {
         struct limine_memmap_entry *e = entries[i];
         kprintf("  %016lx - %016lx  %s\n", e->base, e->base + e->length,
@@ -71,9 +112,10 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
         if (e->type == LIMINE_MEMMAP_USABLE) {
             total_frames += e->length / PAGE_SIZE;
         }
-        /* the bitmap has to cover limine's memory too, or we would have
-         * nowhere to record those frames when we reclaim them later --
-         * they sit above the last usable region on most machines */
+        /* the allocator has to cover limine's memory too, or we would
+         * have nowhere to record those frames when we reclaim them
+         * later -- they sit above the last usable region on most
+         * machines */
         if (e->type == LIMINE_MEMMAP_USABLE
             || e->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE) {
             if (e->base + e->length > highest) {
@@ -88,53 +130,36 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
         }
     }
 
-    bitmap_frames = highest / PAGE_SIZE;
-    uint64_t bitmap_bytes = (bitmap_frames + 7) / 8;
+    managed_frames = highest / PAGE_SIZE;
+    meta_bytes = buddy_metadata_bytes(managed_frames);
 
-    /* pass 2: find a usable region big enough to park the bitmap in */
-    bitmap = NULL;
+    /* pass 2: find a usable region big enough to park the bookkeeping */
+    void *meta = NULL;
     for (size_t i = 0; i < count; i++) {
         struct limine_memmap_entry *e = entries[i];
-        if (e->type == LIMINE_MEMMAP_USABLE && e->length >= bitmap_bytes) {
-            bitmap = (uint64_t *)(e->base + hhdm_offset);
+        if (e->type == LIMINE_MEMMAP_USABLE && e->length >= meta_bytes) {
+            meta = (void *)(e->base + hhdm_offset);
+            meta_first = e->base / PAGE_SIZE;
+            meta_last  = (e->base + meta_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
             break;
         }
     }
-    if (bitmap == NULL) {
-        panic("nowhere to put the pmm bitmap (%lu bytes). how little ram is this?",
-              bitmap_bytes);
+    if (meta == NULL) {
+        panic("nowhere to put the page allocator's books (%lu bytes). "
+              "how little ram is this?", meta_bytes);
     }
 
-    /* everything starts used, then usable regions get freed, then the
-     * bitmap makes its own bed */
-    memset(bitmap, 0xff, bitmap_bytes);
-    free_frames = 0;
+    buddy_init(managed_frames, meta, frame_to_virt);
+
+    /* pass 3: everything starts taken, and the usable regions are given
+     * away one at a time */
     for (size_t i = 0; i < count; i++) {
         struct limine_memmap_entry *e = entries[i];
         if (e->type != LIMINE_MEMMAP_USABLE) {
             continue;
         }
-        for (uint64_t f = e->base / PAGE_SIZE;
-             f < (e->base + e->length) / PAGE_SIZE; f++) {
-            bit_clear(f);
-            free_frames++;
-        }
+        give_away(e->base / PAGE_SIZE, (e->base + e->length) / PAGE_SIZE);
     }
-
-    uint64_t bitmap_phys = (uint64_t)bitmap - hhdm_offset;
-    for (uint64_t f = bitmap_phys / PAGE_SIZE;
-         f < (bitmap_phys + bitmap_bytes + PAGE_SIZE - 1) / PAGE_SIZE; f++) {
-        bit_set(f);
-        free_frames--;
-    }
-
-    /* frame 0 stays ours forever so phys addr 0 can mean "nope" */
-    if (bitmap_frames > 0 && !bit_test(0)) {
-        bit_set(0);
-        free_frames--;
-    }
-
-    search_hint = 0;
 }
 
 void pmm_init(void) {
@@ -145,69 +170,55 @@ void pmm_init(void) {
     pmm_init_from_map(memmap_request.response->entries,
                       memmap_request.response->entry_count,
                       hhdm_request.response->offset);
-    kprintf("  -> %lu MiB usable, %lu KiB spent on the bitmap\n",
-            pmm_total_bytes() / (1024 * 1024),
-            (bitmap_frames / 8) / 1024);
+    kprintf("  -> %lu MiB usable, %lu KiB spent on the buddy's books\n",
+            pmm_total_bytes() / (1024 * 1024), meta_bytes / 1024);
 }
 
 uint64_t pmm_alloc_pages(size_t count) {
-    if (count == 0 || count > bitmap_frames) {
+    if (count == 0) {
         return 0;
     }
 
-    /* same story as the heap: threads can be preempted mid-scan and the
-     * bitmap would hand the same frame to two of them */
+    /* the buddy rounds up to a power of two, so five pages costs eight.
+     * a request too large for the biggest block gets an order it will
+     * refuse rather than a block that is quietly too small */
+    unsigned order = buddy_order_for(count);
+
+    /* threads can be preempted mid-list and the allocator would hand
+     * the same block to two of them */
     uint64_t flags = irq_save();
 
-    /* dumb linear scan for a run of free bits, starting at the hint.
-     * two passes: hint..end, then 0..hint, so freed low memory gets
-     * found again. o(n) and proud of it */
-    for (int pass = 0; pass < 2; pass++) {
-        uint64_t start = pass == 0 ? search_hint : 0;
-        uint64_t end   = pass == 0 ? bitmap_frames : search_hint;
-        uint64_t run = 0;
-        for (uint64_t f = start; f < end; f++) {
-            if (bit_test(f)) {
-                run = 0;
-                continue;
-            }
-            run++;
-            if (run == count) {
-                uint64_t first = f - count + 1;
-                for (uint64_t i = first; i <= f; i++) {
-                    bit_set(i);
-                }
-                free_frames -= count;
-                if (total_frames - free_frames > peak_used) {
-                    peak_used = total_frames - free_frames;
-                }
-                search_hint = f + 1;
-                irq_restore(flags);
-                return first * PAGE_SIZE;
-            }
-        }
+    uint64_t frame = buddy_alloc(order);
+    if (frame == BUDDY_NO_BLOCK) {
+        irq_restore(flags);
+        return 0;       /* the well is dry */
     }
+
+    uint64_t used = total_frames - buddy_free_frames();
+    if (used > peak_used) {
+        peak_used = used;
+    }
+
     irq_restore(flags);
-    return 0;   /* the well is dry */
+    return frame * PAGE_SIZE;
 }
 
 void pmm_free_pages(uint64_t phys, size_t count) {
     if (phys % PAGE_SIZE != 0) {
         panic("pmm_free_pages: %016lx is not page aligned, what is this", phys);
     }
-    uint64_t first = phys / PAGE_SIZE;
+    if (count == 0) {
+        return;
+    }
+
+    uint64_t frame = phys / PAGE_SIZE;
+    unsigned order = buddy_order_for(count);
+
     uint64_t flags = irq_save();
-    for (uint64_t f = first; f < first + count; f++) {
-        if (f >= bitmap_frames || !bit_test(f)) {
-            panic("pmm: freeing frame %016lx which was never thine to free",
-                  f * PAGE_SIZE);
-        }
-        bit_clear(f);
-        free_frames++;
+    if (frame >= managed_frames || buddy_is_free_block(frame, order)) {
+        panic("pmm: freeing frame %016lx which was never thine to free", phys);
     }
-    if (first < search_hint) {
-        search_hint = first;
-    }
+    buddy_free(frame, order);
     irq_restore(flags);
 }
 
@@ -226,34 +237,31 @@ uint64_t pmm_reclaim_bootloader(void) {
         uint64_t first = (reclaim[i].base + PAGE_SIZE - 1) / PAGE_SIZE;
         uint64_t last  = (reclaim[i].base + reclaim[i].length) / PAGE_SIZE;
 
-        for (uint64_t f = first; f < last; f++) {
-            /* frame 0 is ours forever so that phys 0 can mean "no" */
-            if (f == 0 || f >= bitmap_frames || !bit_test(f)) {
-                continue;
-            }
-            bit_clear(f);
-            free_frames++;
-            total_frames++;     /* it counts as ram from now on */
-            gained += PAGE_SIZE;
-        }
+        uint64_t added = give_away(first, last);
+        total_frames += added;      /* it counts as ram from now on */
+        gained += added * PAGE_SIZE;
     }
 
     /* forget the ranges, so a second call cant double free them */
     reclaim_count = 0;
-    search_hint = 0;            /* theres cheap memory down low again */
 
     irq_restore(flags);
     return gained;
 }
 
 bool pmm_translate_is_tracked(uint64_t phys) {
-    return phys / PAGE_SIZE < bitmap_frames;
+    return phys / PAGE_SIZE < managed_frames;
 }
 
-uint64_t pmm_hhdm_offset(void)    { return hhdm_offset; }
+uint64_t pmm_hhdm_offset(void)     { return hhdm_offset; }
 uint64_t pmm_highest_address(void) { return highest_addr; }
+
+uint64_t pmm_metadata_bytes(void)  { return meta_bytes; }
+uint64_t pmm_blocks_at(unsigned order) { return buddy_blocks_at(order); }
 
 uint64_t pmm_peak_bytes(void)  { return peak_used * PAGE_SIZE; }
 uint64_t pmm_total_bytes(void) { return total_frames * PAGE_SIZE; }
-uint64_t pmm_free_bytes(void)  { return free_frames * PAGE_SIZE; }
-uint64_t pmm_used_bytes(void)  { return (total_frames - free_frames) * PAGE_SIZE; }
+uint64_t pmm_free_bytes(void)  { return buddy_free_frames() * PAGE_SIZE; }
+uint64_t pmm_used_bytes(void)  {
+    return (total_frames - buddy_free_frames()) * PAGE_SIZE;
+}

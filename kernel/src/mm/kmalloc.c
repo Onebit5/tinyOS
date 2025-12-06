@@ -1,120 +1,88 @@
 #include "mm/kmalloc.h"
+#include "mm/slab.h"
 #include "mm/pmm.h"
 #include "lib/panic.h"
 #include "cpu/interrupts.h"
 
-#define KMALLOC_MAGIC   0xa110c8ed
-#define CHUNK_MIN_PAGES 4           /* dont bother the pmm for crumbs */
+/* the heap, which is now mostly not a heap.
+ *
+ * the old one was a single free list walked from the front on every
+ * call: correct, and slower the longer it ran, since a long-lived
+ * kernel's list fills up with small holes that every future allocation
+ * has to walk past. this one sorts requests by size instead.
+ *
+ * anything that fits in a size class comes from a slab cache, so the
+ * search is gone entirely -- there is no list to walk, only a free list
+ * head to take. anything larger gets whole pages from the pmm with a
+ * small header on the front, because at that size the rounding no
+ * longer matters and the page allocator is already good at it.
+ *
+ * the classes are powers of two, so the worst case wastes just under
+ * half. that is the price of never searching, and it is a good trade in
+ * a kernel where nearly every allocation is one of a dozen structs. */
 
-/* every block, free or not, carries one of these. size is the whole
- * block including the header. blocks are chained in address order,
- * which is what makes coalescing a simple neighbour check */
-struct block {
-    uint64_t size;
-    struct block *next;
-    uint32_t magic;
-    uint32_t free;
-} __attribute__((aligned(16)));
+#define LARGE_MAGIC 0x1a46e51a6e900d5ull
 
-static struct block *head;
-static uint64_t heap_total;
-static uint64_t heap_used;
+/* exactly 16 bytes, so the payload after it stays 16-byte aligned and a
+ * request of 4080 still fits in a single page */
+struct large {
+    uint64_t magic;
+    uint64_t pages;
+};
 
-#define ALIGN16(x) (((x) + 15) & ~15ull)
+static const size_t class_size[] = { 16, 32, 64, 128, 256, 512, 1024 };
+#define CLASS_COUNT (sizeof(class_size) / sizeof(class_size[0]))
+#define LARGEST_CLASS 1024
 
-/* grab a fresh contiguous chunk from the pmm and slot it into the list
- * at its address-ordered spot. returns the new block or NULL when the
- * pmm says no */
-static struct block *grow(uint64_t need) {
-    size_t pages = (need + PAGE_SIZE - 1) / PAGE_SIZE;
-    if (pages < CHUNK_MIN_PAGES) {
-        pages = CHUNK_MIN_PAGES;
+static struct slab_cache classes[CLASS_COUNT];
+static const char *const class_name[CLASS_COUNT] = {
+    "kmalloc-16",  "kmalloc-32",  "kmalloc-64", "kmalloc-128",
+    "kmalloc-256", "kmalloc-512", "kmalloc-1024",
+};
+
+static uint64_t large_pages;    /* pages held by over-sized allocations */
+
+static void ensure_classes(void) {
+    if (classes[0].obj_size != 0) {
+        return;
     }
-
-    uint64_t phys = pmm_alloc_pages(pages);
-    if (phys == 0) {
-        return NULL;
-    }
-
-    struct block *b = pmm_phys_to_virt(phys);
-    b->size = pages * PAGE_SIZE;
-    b->magic = KMALLOC_MAGIC;
-    b->free = 1;
-    heap_total += b->size;
-
-    if (head == NULL || b < head) {
-        b->next = head;
-        head = b;
-    } else {
-        struct block *cur = head;
-        while (cur->next && cur->next < b) {
-            cur = cur->next;
-        }
-        b->next = cur->next;
-        cur->next = b;
-    }
-    return b;
-}
-
-/* merge every pair of address-adjacent free blocks. blocks from
- * different pmm chunks are never adjacent so they never merge, which
- * is exactly right */
-static void coalesce(void) {
-    for (struct block *cur = head; cur && cur->next; ) {
-        if (cur->free && cur->next->free
-            && (uint8_t *)cur + cur->size == (uint8_t *)cur->next) {
-            cur->size += cur->next->size;
-            cur->next = cur->next->next;
-        } else {
-            cur = cur->next;
-        }
+    for (size_t i = 0; i < CLASS_COUNT; i++) {
+        slab_cache_init(&classes[i], class_name[i], class_size[i]);
     }
 }
-
-static void *carve(struct block *b, uint64_t need) {
-    /* split if whats left is worth keeping as its own block */
-    if (b->size - need >= sizeof(struct block) + 16) {
-        struct block *rest = (struct block *)((uint8_t *)b + need);
-        rest->size = b->size - need;
-        rest->next = b->next;
-        rest->magic = KMALLOC_MAGIC;
-        rest->free = 1;
-        b->size = need;
-        b->next = rest;
-    }
-    b->free = 0;
-    heap_used += b->size;
-    return (uint8_t *)b + sizeof(struct block);
-}
-
-/* the free list is walked and rewritten on every call, so a thread
- * preempted halfway through would hand the next one a heap in pieces.
- * interrupts off for the duration -- these are short */
 
 void *kmalloc(size_t size) {
     if (size == 0) {
         return NULL;
     }
 
-    uint64_t need = ALIGN16(size) + sizeof(struct block);
-    uint64_t flags = irq_save();
+    ensure_classes();
 
-    for (struct block *cur = head; cur; cur = cur->next) {
-        if (cur->free && cur->size >= need) {
-            void *p = carve(cur, need);
-            irq_restore(flags);
-            return p;
+    if (size <= LARGEST_CLASS) {
+        for (size_t i = 0; i < CLASS_COUNT; i++) {
+            if (size <= class_size[i]) {
+                return slab_alloc(&classes[i]);
+            }
         }
     }
 
-    struct block *fresh = grow(need);
-    if (fresh == NULL) {
-        irq_restore(flags);
-        return NULL;    /* memory hath forsaken us */
+    /* too big for a class. whole pages, with a header saying how many,
+     * since kfree is given only the pointer and has to know */
+    size_t pages = (size + sizeof(struct large) + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t phys = pmm_alloc_pages(pages);
+    if (phys == 0) {
+        return NULL;        /* memory hath forsaken us */
     }
-    void *p = carve(fresh, need);
+
+    struct large *h = pmm_phys_to_virt(phys);
+    h->magic = LARGE_MAGIC;
+    h->pages = pages;
+
+    uint64_t flags = irq_save();
+    large_pages += pages;
     irq_restore(flags);
-    return p;
+
+    return (uint8_t *)h + sizeof(struct large);
 }
 
 void kfree(void *ptr) {
@@ -122,20 +90,40 @@ void kfree(void *ptr) {
         return;
     }
 
-    struct block *b = (struct block *)((uint8_t *)ptr - sizeof(struct block));
-    if (b->magic != KMALLOC_MAGIC) {
+    /* which of the two it came from is written on the page it sits in,
+     * so this costs one read rather than a search */
+    if (slab_owns(ptr)) {
+        slab_free(ptr);
+        return;
+    }
+
+    struct large *h = (struct large *)((uint8_t *)ptr - sizeof(struct large));
+    if (h->magic != LARGE_MAGIC) {
         panic("kfree: %p knows not this heap. whence came it?", ptr);
     }
 
+    uint64_t pages = h->pages;
+    h->magic = 0;               /* so a second kfree is caught, not repeated */
+
     uint64_t flags = irq_save();
-    if (b->free) {
-        panic("kfree: %p hath already been returned. a bond broken twice", ptr);
-    }
-    b->free = 1;
-    heap_used -= b->size;
-    coalesce();
+    large_pages -= pages;
     irq_restore(flags);
+
+    pmm_free_pages((uint64_t)h - pmm_hhdm_offset(), pages);
 }
 
-uint64_t kheap_total_bytes(void) { return heap_total; }
-uint64_t kheap_used_bytes(void)  { return heap_used; }
+uint64_t kheap_total_bytes(void) {
+    uint64_t pages = large_pages;
+    for (struct slab_cache *c = slab_first_cache(); c != NULL; c = c->next) {
+        pages += c->pages;
+    }
+    return pages * PAGE_SIZE;
+}
+
+uint64_t kheap_used_bytes(void) {
+    uint64_t used = large_pages * PAGE_SIZE;
+    for (struct slab_cache *c = slab_first_cache(); c != NULL; c = c->next) {
+        used += c->in_use * c->obj_size;
+    }
+    return used;
+}

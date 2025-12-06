@@ -7,6 +7,7 @@
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
+#include "mm/slab.h"
 #include "mm/vmm.h"
 #include "lib/backtrace.h"
 #include "drivers/rtc.h"
@@ -145,9 +146,49 @@ static void cmd_mem(int argc, char **argv) {
             freeb / PAGE_SIZE);
     kprintf("  peak   %lu KiB ever in use at once\n",
             pmm_peak_bytes() / 1024);
+    kprintf("  books  %lu KiB, what the allocator spends on itself\n",
+            pmm_metadata_bytes() / 1024);
+
+    /* how much is free matters less than what shape it is in. a machine
+     * with megabytes free and none of it contiguous cannot satisfy a
+     * large request, and this is the only view that would show it */
+    kprintf("free blocks, by size\n ");
+    for (unsigned order = 0; order <= 10; order++) {
+        uint64_t blocks = pmm_blocks_at(order);
+        if (blocks == 0) {
+            continue;
+        }
+        uint64_t kib = (PAGE_SIZE << order) / 1024;
+        if (kib < 1024) {
+            kprintf(" %lux%luK", blocks, kib);
+        } else {
+            kprintf(" %lux%luM", blocks, kib / 1024);
+        }
+    }
+    kprintf("\n");
+
     kprintf("kernel heap\n");
     kprintf("  total  %lu KiB claimed from the pmm\n", kheap_total_bytes() / 1024);
     kprintf("  used   %lu bytes handed out\n", kheap_used_bytes());
+}
+
+static void cmd_slabs(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    kprintf("%-14s %6s %6s %6s %6s %6s\n",
+            "cache", "size", "/page", "live", "peak", "pages");
+
+    uint64_t held = 0, wanted = 0;
+    for (struct slab_cache *c = slab_first_cache(); c != NULL; c = c->next) {
+        kprintf("%-14s %6zu %6zu %6zu %6zu %6zu\n",
+                c->name, c->obj_size, c->per_slab,
+                c->in_use, c->high_water, c->pages);
+        held += c->pages * PAGE_SIZE;
+        wanted += c->in_use * c->obj_size;
+    }
+
+    kprintf("holding %lu KiB for %lu KiB of objects\n",
+            held / 1024, wanted / 1024);
 }
 
 static void cmd_ps(int argc, char **argv) {
@@ -701,6 +742,7 @@ static const struct command commands[] = {
     { "ps",     "the threads that walk this realm",     cmd_ps, false },
     { "top",    "the same, but watched rather than asked", cmd_top, false },
     { "lspci",  "what is plugged into this machine",    cmd_lspci, false },
+    { "slabs",  "the object caches, and what they hold", cmd_slabs, false },
     { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },

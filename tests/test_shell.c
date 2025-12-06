@@ -39,6 +39,9 @@ uint64_t kheap_used_bytes(void) { return 512; }
 void sched_dump(void) { kprintf("<PS>"); }
 size_t process_count(void) { return 0; }
 uint64_t pmm_peak_bytes(void) { return 0; }
+uint64_t pmm_metadata_bytes(void) { return 64 * 1024; }
+uint64_t pmm_blocks_at(unsigned order) { return order == 10 ? 511 : 0; }
+struct slab_cache *slab_first_cache(void) { return NULL; }
 uint64_t syscall_times_called(unsigned n) { (void)n; return 0; }
 const char *syscall_name(unsigned n) { (void)n; return "x"; }
 bool input_haskey(void) { return true; }
@@ -87,7 +90,10 @@ void rtc_read(struct rtc_time *t) {
 }
 void cpu_brand(char *buf) { strcpy(buf, "Imaginary CPU @ 1 Hz"); }
 void console_size(size_t *c, size_t *r, size_t *w, size_t *h) {
-    if (c) *c = 160; if (r) *r = 50; if (w) *w = 1280; if (h) *h = 800;
+    if (c) *c = 160;
+    if (r) *r = 50;
+    if (w) *w = 1280;
+    if (h) *h = 800;
 }
 const unsigned long ksym_count = 442;
 

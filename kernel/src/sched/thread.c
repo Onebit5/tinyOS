@@ -4,6 +4,7 @@
 #include "mm/vmm.h"
 #include "mm/addrspace.h"
 #include "mm/kmalloc.h"
+#include "mm/slab.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "cpu/interrupts.h"
@@ -50,8 +51,14 @@ static void thread_bootstrap(void) {
     thread_exit(0);     /* a thread that simply returned did fine */
 }
 
+/* threads are all exactly the same size and get created and destroyed
+ * constantly, which is precisely what an object cache is for */
+static struct slab_cache thread_cache;
+
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg) {
-    struct thread *t = kmalloc(sizeof *t);
+    slab_cache_init(&thread_cache, "thread", sizeof(struct thread));
+
+    struct thread *t = slab_alloc(&thread_cache);
     if (t == NULL) {
         return NULL;
     }
@@ -64,7 +71,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
      * thread's stack and a bug you would chase for a week */
     uint64_t phys = pmm_alloc_pages(THREAD_STACK_PAGES + 1);
     if (phys == 0) {
-        kfree(t);
+        slab_free(t);
         return NULL;
     }
 
@@ -171,4 +178,14 @@ void thread_free_stack(struct thread *t) {
     }
 
     pmm_free_pages(t->stack_phys, t->stack_pages);
+}
+
+/* the boot thread is a global that was never allocated, so it must not
+ * be handed to any allocator. keeping that check here means the
+ * scheduler does not have to know how a thread was made */
+void thread_free(struct thread *t) {
+    if (t == NULL || !t->from_heap) {
+        return;
+    }
+    slab_free(t);
 }

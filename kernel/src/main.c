@@ -108,6 +108,16 @@ static void memory_selftest(void) {
     if (kheap_used_bytes() != used_before) {
         panic("selftest: heap books dont balance after round trip");
     }
+
+    /* the buddy's whole point is that memory comes back *together*, not
+     * merely back. after all that churn a big contiguous run must still
+     * be there -- if the halves never merged, this is where we find out
+     * rather than the first time something large is asked for */
+    uint64_t big = pmm_alloc_pages(512);
+    if (big == 0) {
+        panic("selftest: 2 MiB contiguous is already gone. blocks are not merging");
+    }
+    pmm_free_pages(big, 512);
 }
 
 /* what the user actually sees at boot: the name, the contract, and
@@ -199,7 +209,8 @@ void kmain(void) {
 
     pmm_init();
     memory_selftest();
-    kprintf("  -> selftest: 8 frames + 5 heap blocks round-tripped, books balance\n");
+    kprintf("  -> selftest: frames and heap blocks round-tripped, blocks merge, "
+            "books balance\n");
     kprintf("memory      : %lu MiB free of %lu MiB, heap warmed to %lu KiB\n\n",
             pmm_free_bytes() / (1024 * 1024),
             pmm_total_bytes() / (1024 * 1024),
