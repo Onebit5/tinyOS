@@ -20,6 +20,7 @@
 #define SYS_WAIT   10
 #define SYS_READDIR 11
 #define SYS_GETUID 12
+#define SYS_CREATE 13
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -33,6 +34,21 @@ static inline long syscall3(long nr, long a0, long a1, long a2) {
     __asm__ volatile ("syscall"
                       : "=a"(ret)
                       : "a"(nr), "D"(a0), "S"(a1), "d"(a2)
+                      : "rcx", "r11", "memory");
+    return ret;
+}
+
+/* five arguments needs the other two registers by name: the kernel's
+ * entry stub expects the fourth in r10, because the syscall instruction
+ * destroys rcx before anyone could have read it */
+static inline long syscall5(long nr, long a0, long a1, long a2,
+                            long a3, long a4) {
+    long ret;
+    register long r10 __asm__("r10") = a3;
+    register long r8  __asm__("r8")  = a4;
+    __asm__ volatile ("syscall"
+                      : "=a"(ret)
+                      : "a"(nr), "D"(a0), "S"(a1), "d"(a2), "r"(r10), "r"(r8)
                       : "rcx", "r11", "memory");
     return ret;
 }
@@ -69,6 +85,19 @@ static inline long close(long fd) { return syscall1(SYS_CLOSE, fd); }
 /* the nth name in the ramdisk, or -1 once there are no more */
 static inline long readdir(long n, char *buf, long len) {
     return syscall3(SYS_READDIR, n, (long)buf, len);
+}
+
+/* the same, but of a directory somewhere. the ramdisk has no
+ * directories to name, so it is the one you get when you name none */
+static inline long readdir_at(long n, char *buf, long len, const char *path) {
+    return syscall5(SYS_READDIR, n, (long)buf, len,
+                    (long)path, (long)ustrlen(path));
+}
+
+/* open for writing, making the file if it is not there. only the disk
+ * can do this -- the ramdisk is a tar file in read-only memory */
+static inline long create(const char *path) {
+    return syscall2(SYS_CREATE, (long)path, (long)ustrlen(path));
 }
 
 /* ---- other programs ----------------------------------------------- */

@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.9** (**allocators worth the name.** a buddy allocator under the pmm, slab caches for the structs a kernel makes over and over, and a `kmalloc` that never searches for anything)
+**version: 0.1.10** (**a real filesystem, on a real disk.** an ahci driver that talks to a sata drive by dma, and fat32 on top of it -- read and write, so what you type survives the power going off)
 
 ## what it does
 
@@ -33,6 +33,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] acpi, the lapic and io apic, and a timer that is part of the cpu
 - [x] pci enumeration, and an `lspci` that says what this machine is
 - [x] a buddy page allocator, slab caches, and a heap that stopped searching
+- [x] a sata driver and fat32: files on a real disk, that survive a reboot
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -198,6 +199,68 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### a disk, and a filesystem on it
+
+everything before this forgot. the ramdisk is a tar file limine hands
+over at boot -- read-only, in memory, gone when the power goes. this is
+the other thing.
+
+**the drive is reached over ahci**, which is what the sata controller
+found in 0.1.8 actually speaks. it is nothing like the ide interface it
+replaced, where you wrote a command to a port and waited. here the
+command is built in ram: a header saying how long it is and where its
+table lives, a table holding the frame the drive will receive, and a
+scatter list of physical addresses the data should be moved to. then one
+bit is set to say slot zero is ready, and the controller does the whole
+transfer itself and clears the bit when it is done. the cpu never
+touches the bytes.
+
+we poll rather than take an interrupt, and every wait is bounded --
+a controller that never answers must not be able to hang the boot, which
+is a lesson this project learned the hard way in 0.1.7.
+
+**the filesystem is fat32**, which is worth knowing precisely because it
+is so nearly nothing:
+
+- a boot sector describing the layout
+- a table with one entry per cluster, where entry N holds the number of
+  the cluster that follows N. a linked list with all its pointers
+  gathered in one place, which is why it is called a file allocation
+  table
+- directories, which are not a special kind of object at all -- a
+  directory is a file whose contents happen to be 32-byte records
+
+long filenames are the one genuinely strange part. 8.3 names have no
+room for `velvet-room.txt`, so the long one is smuggled into extra
+records placed *before* the real one, thirteen utf-16 characters at a
+time, in three runs at odd offsets because those were the only bytes
+left unused. a checksum of the short name ties them together, so a tool
+that only understands 8.3 can delete a file without leaving its long
+half behind. we read those, and check every piece arrived before
+trusting the result -- a name assembled from an incomplete set would be
+silently truncated, which is a worse answer than falling back.
+
+writing works: to existing files, past their end (growing the chain a
+cluster at a time), and to files that did not exist. new files get short
+names only, and a name that will not fit is refused rather than mangled.
+
+tab completion follows the disk into its directories. the ramdisk is
+flat and has no leading slash on any name, so a word that starts with
+one is unambiguously the disk's, and gets completed a directory at a
+time -- with a trailing slash on directories, so tabbing again carries
+on into them rather than stopping at a name that cannot be opened.
+
+**the filesystem never touches hardware.** it is handed two functions
+that move sectors, the same shape as the pci scan being handed a way to
+read config space. that is what lets the test suite run the real parser
+against a real filesystem image on a machine with no disk at all.
+
+which matters, because the formatter and the parser were written by the
+same hand -- exactly the trap that has caught this project twice. so the
+check that counts is not in the test suite: **mount the image on linux**.
+a driver nobody here wrote reading files this kernel wrote is the only
+evidence that the layout is right rather than merely self-consistent.
 
 ### allocators that stopped searching
 
@@ -408,6 +471,7 @@ $ make test
   pci        ok        a fabricated machine, walked bridges and all
   buddy      ok        splitting, merging, and every frame handed out once
   slab       ok        object caches, and pages that go back when empty
+  fat32      ok        a real image: long names, subdirectories, writes
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -484,6 +548,7 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.10** — a disk, and a filesystem on it that remembers. an ahci driver reaches the sata controller pci enumeration found: commands are built in ram -- a header, a table holding the frame the drive receives, a scatter list of physical addresses -- and one bit says go, after which the controller moves every byte itself. polled rather than interrupt-driven, with every wait bounded. on top of that, fat32: cluster chains, subdirectories, and long filenames assembled from the records hidden in front of the short ones (checked for completeness, since a half-assembled name is worse than none). writes go to existing files, past their end, and to files that did not exist yet. `ls /disk`, `cat /disk/welcome.txt`, and `write /disk/notes.txt something` -- then reboot and it is still there. the filesystem takes its disk as two functions, so the suite runs the real parser against a real image; but the formatter and the parser share an author, so the check that counts is mounting the image on linux.
 - **0.1.9** — the allocators, rebuilt. the pmm is a buddy allocator: free lists per block size, and blocks that put themselves back together when both halves come home, found by flipping one bit of a frame number. fixed-size structs (threads, address spaces) get slab caches, where each page carries a header naming its cache so a bare pointer can be traced back to where it came from -- and so a page whose objects have all returned goes back to the pmm rather than being held forever. `kmalloc` sits on top of those and no longer searches for anything: size classes below 1 KiB, whole pages above. `mem` gained the shape of free memory rather than just the amount of it, and `slabs` shows what each cache is holding. the cost, stated plainly, is that the buddy rounds up -- five pages costs eight -- which `mem` now counts honestly instead of hiding.
 - **0.1.8** — the pci bus, enumerated at boot and shown by `lspci`: vendor and device ids, the class in words, the base address registers saying where each device listens, and its interrupt line. the scan takes config space as a function rather than reaching for the ports, so the test builds its own machine -- a bridge with a device behind it, a multifunction part, empty slots between -- and checks the walk finds exactly what is there. the two things worth getting right are that a multifunction part only admits to its other functions in one bit of function zero, and that a bridge hides an entire bus that has to be walked through; the walk is depth-limited, because firmware that disagrees about bridges forming a tree should not be able to make the kernel recurse forever.
 - **0.1.7** — off the 8259 and onto the apics. acpi tables walked from the rsdp limine hands over, the io apic routing external interrupts, and the lapic's own timer in place of the pit -- calibrated against the pit first, because nobody documents what speed it runs at. the routing asks acpi where an irq really arrives rather than assuming the numbers everyone knows, since irq 0 is wired to line 2 on most real machines and a kernel that assumes gets no timer at all. both apics live above ram, so each needs a page mapped with caching off. the calibration polls pit channel 2 rather than counting its interrupts, because interrupts are off that early and the chip is about to be masked -- and the new timer is proved to deliver before the old one is given up. the io apic half is *not* automatic: a route that reads back correctly can still deliver nothing, and the symptom is a machine with no keyboard, so it lives behind an `ioapic` command you run from a shell that already works. and because the timer and the external interrupts now live on different chips, which one acknowledges an interrupt is two flags rather than one -- getting that wrong meant the 8259 never heard back, and stopped after a single keypress. lateral on its own and the readme says so; what it buys is a second cpu being possible. if the firmware describes no apics the 8259 keeps the job and nothing above notices. the parser is tested on malformed tables, because firmware bytes are the least trustworthy in the machine and the ones acted on earliest.

@@ -66,6 +66,6 @@ buddy allocator would make it logarithmic. a slab allocator for the
 fixed-size things we allocate constantly (threads, address spaces). a
 `kmalloc` that is not first-fit.~~ **done in 0.1.9.**
 
-**0.1.10 a real filesystem, on a real disk.**
+**0.1.10 a real filesystem, on a real disk.** ~~an ahci driver and fat32, read and write.~~ **done in 0.1.10.**
 
 **0.1.11 our own bootloader.**

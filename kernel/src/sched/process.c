@@ -186,7 +186,9 @@ int process_fd_open(int pid, const void *data, uint64_t size) {
                 continue;
             }
             p->fds[i].open = true;
+            p->fds[i].on_disk = false;
             p->fds[i].data = data;
+            p->fds[i].cluster = 0;
             p->fds[i].size = size;
             p->fds[i].pos  = 0;
             fd = i;
@@ -198,12 +200,75 @@ int process_fd_open(int pid, const void *data, uint64_t size) {
     return fd;
 }
 
+int process_fd_open_disk(int pid, uint32_t cluster, uint64_t size,
+                         uint64_t entry_sector, uint32_t entry_offset) {
+    uint64_t flags = irq_save();
+    int fd = -1;
+
+    struct process *p = slot_for(pid);
+    if (p != NULL) {
+        for (int i = FD_FIRST_FILE; i < MAX_FDS; i++) {
+            if (p->fds[i].open) {
+                continue;
+            }
+            p->fds[i].open = true;
+            p->fds[i].on_disk = true;
+            p->fds[i].data = NULL;
+            p->fds[i].cluster = cluster;
+            p->fds[i].entry_sector = entry_sector;
+            p->fds[i].entry_offset = entry_offset;
+            p->fds[i].size = size;
+            p->fds[i].pos  = 0;
+            fd = i;
+            break;
+        }
+    }
+
+    irq_restore(flags);
+    return fd;
+}
+
+bool process_fd_disk(int pid, int fd, struct fd_disk *out) {
+    uint64_t flags = irq_save();
+    bool ok = false;
+
+    struct process *p = slot_for(pid);
+    if (p != NULL && fd >= FD_FIRST_FILE && fd < MAX_FDS
+        && p->fds[fd].open && p->fds[fd].on_disk) {
+        struct fd *f = &p->fds[fd];
+        out->cluster = f->cluster;
+        out->size = f->size;
+        out->pos = f->pos;
+        out->remaining = (f->pos < f->size) ? f->size - f->pos : 0;
+        out->entry_sector = f->entry_sector;
+        out->entry_offset = f->entry_offset;
+        ok = true;
+    }
+
+    irq_restore(flags);
+    return ok;
+}
+
+void process_fd_grew(int pid, int fd, uint32_t cluster, uint64_t size) {
+    uint64_t flags = irq_save();
+
+    struct process *p = slot_for(pid);
+    if (p != NULL && fd >= FD_FIRST_FILE && fd < MAX_FDS
+        && p->fds[fd].open && p->fds[fd].on_disk) {
+        p->fds[fd].cluster = cluster;
+        p->fds[fd].size = size;
+    }
+
+    irq_restore(flags);
+}
+
 bool process_fd_peek(int pid, int fd, const void **data, uint64_t *remaining) {
     uint64_t flags = irq_save();
     bool ok = false;
 
     struct process *p = slot_for(pid);
-    if (p != NULL && fd >= FD_FIRST_FILE && fd < MAX_FDS && p->fds[fd].open) {
+    if (p != NULL && fd >= FD_FIRST_FILE && fd < MAX_FDS && p->fds[fd].open
+        && !p->fds[fd].on_disk) {
         struct fd *f = &p->fds[fd];
         if (data != NULL) {
             *data = f->data + f->pos;

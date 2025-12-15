@@ -105,6 +105,66 @@ bool ramdisk_stat(size_t i, struct ramdisk_file *out) {
     return true;
 }
 
+/* the disk. the real one wants a sata controller, and what this file is
+ * responsible for is not fat32 -- test_fat32 runs that against a real
+ * image -- but the *routing*: that a path under the mount point reaches
+ * the disk and one that is not reaches the ramdisk. so this stub
+ * records what it was asked, and the tests check who got asked */
+#include "fs/disk.h"
+static const char disk_text[] = "on the disk\n";
+static int disk_lookups, disk_creates;
+static bool disk_is_ready = true;
+
+bool disk_owns_path(const char *path) {
+    return strncmp(path, "/disk", 5) == 0
+        && (path[5] == '\0' || path[5] == '/');
+}
+bool disk_ready(void) { return disk_is_ready; }
+bool disk_lookup(const char *path, struct disk_entry *out) {
+    disk_lookups++;
+    if (!disk_is_ready || strcmp(path, "/disk/hello.txt") != 0) {
+        return false;
+    }
+    memset(out, 0, sizeof *out);
+    strcpy(out->name, "hello.txt");
+    out->size = sizeof disk_text - 1;
+    out->cluster = 7;
+    out->entry_sector = 100;
+    return true;
+}
+bool disk_readdir(const char *path, size_t index, struct disk_entry *out) {
+    if (!disk_is_ready || strcmp(path, "/disk") != 0 || index > 0) {
+        return false;
+    }
+    memset(out, 0, sizeof *out);
+    strcpy(out->name, "hello.txt");
+    return true;
+}
+int64_t disk_read(uint32_t cluster, uint64_t size, uint64_t offset,
+                  void *buf, uint64_t len) {
+    (void)size;
+    if (cluster != 7 || offset >= sizeof disk_text - 1) return 0;
+    uint64_t left = (sizeof disk_text - 1) - offset;
+    if (len > left) len = left;
+    memcpy(buf, disk_text + offset, len);
+    return (int64_t)len;
+}
+bool disk_create(const char *path, struct disk_entry *out) {
+    disk_creates++;
+    if (!disk_is_ready) return false;
+    (void)path;
+    memset(out, 0, sizeof *out);
+    strcpy(out->name, "new.txt");
+    out->entry_sector = 200;
+    return true;
+}
+int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
+                      uint64_t len) {
+    (void)buf;
+    e->size = offset + len;
+    return (int64_t)len;
+}
+
 /* the terminal, whose real version needs a scheduler to wake threads */
 #include "drivers/tty.h"
 static int foreground_pid = TTY_SHELL;

@@ -13,6 +13,8 @@
 #include "drivers/rtc.h"
 #include "cpu/cpuinfo.h"
 #include "fs/ramdisk.h"
+#include "fs/disk.h"
+#include "drivers/ahci.h"
 #include "sched/usermode.h"
 #include "sched/auth.h"
 #include "cpu/syscall.h"
@@ -170,6 +172,33 @@ static void cmd_mem(int argc, char **argv) {
     kprintf("kernel heap\n");
     kprintf("  total  %lu KiB claimed from the pmm\n", kheap_total_bytes() / 1024);
     kprintf("  used   %lu bytes handed out\n", kheap_used_bytes());
+}
+
+static void cmd_disk(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    if (!disk_ready()) {
+        kprintf("no disk. this machine has only the ramdisk, which is a tar\n");
+        kprintf("file limine handed us and which forgets everything on reboot.\n");
+        kprintf("give qemu a drive and there will be somewhere to write.\n");
+        return;
+    }
+
+    kprintf("drive      %s\n", disk_model());
+    kprintf("capacity   %lu MiB (%lu sectors)\n",
+            disk_bytes() / (1024 * 1024), disk_bytes() / AHCI_SECTOR);
+    kprintf("filesystem fat32, labelled \"%s\", at %s\n",
+            disk_label(), DISK_PREFIX);
+    kprintf("clusters   %lu bytes each\n", (uint64_t)disk_cluster_bytes());
+
+    uint64_t used = 0, total = 0;
+    if (disk_usage(&used, &total)) {
+        kprintf("used       %lu KiB of %lu MiB\n",
+                used / 1024, total / (1024 * 1024));
+    }
+
+    kprintf("\ntry: ls /disk, cat /disk/welcome.txt,\n");
+    kprintf("     write /disk/notes.txt something worth keeping\n");
 }
 
 static void cmd_slabs(int argc, char **argv) {
@@ -743,6 +772,7 @@ static const struct command commands[] = {
     { "top",    "the same, but watched rather than asked", cmd_top, false },
     { "lspci",  "what is plugged into this machine",    cmd_lspci, false },
     { "slabs",  "the object caches, and what they hold", cmd_slabs, false },
+    { "disk",   "the drive, and the filesystem on it",  cmd_disk, false },
     { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },
@@ -842,9 +872,33 @@ static void run_argv(int argc, char **argv) {
     }
 }
 
+/* there are no pipes and no redirection here. saying so is worth doing,
+ * because otherwise `cat x | head` hands cat two filenames it cannot
+ * find and the complaint lands on `|` rather than on the shell */
+static bool shell_metacharacter(int argc, char **argv) {
+    for (int i = 0; i < argc; i++) {
+        for (const char *p = argv[i]; *p != '\0'; p++) {
+            if (*p != '|' && *p != '<' && *p != '>') {
+                continue;
+            }
+            kprintf("no pipes or redirection yet -- the shell does not know "
+                    "what to do with '%c'.\n", *p);
+            kprintf("everything after it would be handed to %s as a filename, "
+                    "which is not\n", argc > 0 ? argv[0] : "the command");
+            kprintf("what you meant. to put something in a file: "
+                    "write /disk/notes.txt some words\n");
+            return true;
+        }
+    }
+    return false;
+}
+
 static void run_line(char *line) {
     char *argv[ARGV_MAX];
     int argc = split(line, argv, ARGV_MAX);
+    if (shell_metacharacter(argc, argv)) {
+        return;
+    }
     run_argv(argc, argv);   /* argc 0 just means they pressed enter */
 }
 
@@ -1044,13 +1098,108 @@ static const struct command *command_for_line(const char *line) {
     return NULL;
 }
 
-/* candidates come from one of two places depending on where you are:
+/* candidates come from one of three places depending on where you are:
  * command names in the first word, ramdisk filenames after a command
- * that takes one */
+ * that takes one, and -- once a word starts looking like a path -- the
+ * disk, which unlike the ramdisk is a real tree and has to be walked a
+ * directory at a time.
+ *
+ * they are whole words rather than bare names, because a whole word is
+ * what gets replaced: completing `notes` in `cat /disk/no` has to put
+ * back `/disk/notes/`, not `notes` */
+#define MAX_CANDIDATES 24
+#define CAND_MAX       96
+
 struct candidates {
-    const char *items[32];
-    int count;
+    char items[MAX_CANDIDATES][CAND_MAX];
+    int  count;
 };
+
+static void add_candidate(struct candidates *c, const char *dir,
+                          const char *name, bool is_dir) {
+    if (c->count >= MAX_CANDIDATES) {
+        return;
+    }
+    char *out = c->items[c->count];
+    size_t n = 0;
+
+    while (*dir != '\0' && n < CAND_MAX - 3) {
+        out[n++] = *dir++;
+    }
+    if (name != NULL) {
+        if (n > 0 && out[n - 1] != '/' && n < CAND_MAX - 3) {
+            out[n++] = '/';
+        }
+        while (*name != '\0' && n < CAND_MAX - 3) {
+            out[n++] = *name++;
+        }
+    }
+    /* a directory gets a slash, so tab again carries straight on into
+     * it rather than stopping at a name you cannot open */
+    if (is_dir && n < CAND_MAX - 2) {
+        out[n++] = '/';
+    }
+
+    out[n] = '\0';
+    c->count++;
+}
+
+/* a word that begins with a slash is heading for the disk */
+static void gather_disk(struct candidates *c, const char *word, size_t wlen) {
+    size_t mount = strlen(DISK_PREFIX);
+
+    /* still typing the mount point itself: "/d", or "/disk" with no
+     * slash yet. either way the useful answer is "/disk/" */
+    if (wlen <= mount) {
+        if (common_prefix(DISK_PREFIX, word) >= wlen) {
+            add_candidate(c, DISK_PREFIX, NULL, true);
+        }
+        return;
+    }
+    if (!disk_ready()) {
+        return;
+    }
+
+    /* split at the last slash: what comes before names the directory to
+     * look in, what comes after is the part being matched */
+    size_t cut = 0;
+    bool have_slash = false;
+    for (size_t i = 0; i < wlen; i++) {
+        if (word[i] == '/') {
+            cut = i;
+            have_slash = true;
+        }
+    }
+    if (!have_slash) {
+        return;
+    }
+
+    char dir[CAND_MAX];
+    size_t dlen = (cut == 0) ? 1 : cut;
+    if (dlen >= sizeof dir) {
+        return;
+    }
+    memcpy(dir, word, dlen);
+    dir[dlen] = '\0';
+    if (!disk_owns_path(dir)) {
+        return;
+    }
+
+    const char *partial = word + cut + 1;
+    size_t plen = wlen - cut - 1;
+
+    struct disk_entry e;
+    for (size_t i = 0; disk_readdir(dir, i, &e); i++) {
+        size_t n = strlen(e.name);
+        if (n < plen || common_prefix(e.name, partial) < plen) {
+            continue;
+        }
+        add_candidate(c, dir, e.name, e.is_dir);
+        if (c->count >= MAX_CANDIDATES) {
+            break;
+        }
+    }
+}
 
 static void gather(struct candidates *c, const char *line, size_t start,
                    size_t pos, bool first_word) {
@@ -1061,9 +1210,8 @@ static void gather(struct candidates *c, const char *line, size_t start,
     if (first_word) {
         for (const struct command *cmd = commands; cmd->name; cmd++) {
             if (strlen(cmd->name) >= plen
-                && common_prefix(cmd->name, prefix) >= plen
-                && c->count < 32) {
-                c->items[c->count++] = cmd->name;
+                && common_prefix(cmd->name, prefix) >= plen) {
+                add_candidate(c, cmd->name, NULL, false);
             }
         }
         return;
@@ -1082,18 +1230,25 @@ static void gather(struct candidates *c, const char *line, size_t start,
         return;
     }
 
+    /* a path is the disk's business. the ramdisk has no leading slash
+     * on anything, so the two can never be confused */
+    if (prefix[0] == '/') {
+        gather_disk(c, prefix, plen);
+        return;
+    }
+
     struct ramdisk_file f;
-    for (size_t i = 0; ramdisk_stat(i, &f) && c->count < 32; i++) {
+    for (size_t i = 0; ramdisk_stat(i, &f) && c->count < MAX_CANDIDATES; i++) {
         const char *name = f.name;
         if (name[0] == '.' && name[1] == '/') {
             name += 2;
         }
         size_t n = strlen(name);
         if (n == 0 || name[n - 1] == '/') {
-            continue;       /* directories arent worth offering */
+            continue;       /* tar's directory records have nothing behind them */
         }
         if (n >= plen && common_prefix(name, prefix) >= plen) {
-            c->items[c->count++] = name;
+            add_candidate(c, name, NULL, false);
         }
     }
 }
@@ -1115,7 +1270,9 @@ static void complete(char *line, size_t *len, size_t *pos) {
         return;
     }
 
-    struct candidates c;
+    /* two kilobytes, which is more than the shell thread's stack wants
+     * to spare, and the shell is the only thing that completes anything */
+    static struct candidates c;
     gather(&c, line, start, *pos, first_word);
 
     if (c.count == 0) {

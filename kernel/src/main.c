@@ -21,6 +21,7 @@
 #include "mm/kmalloc.h"
 #include "mm/vmm.h"
 #include "fs/ramdisk.h"
+#include "fs/disk.h"
 #include "sched/auth.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
@@ -231,6 +232,21 @@ void kmain(void) {
      * we read this out of is sitting in it */
     pci_scan();
     kprintf("pci        : %zu devices on the bus\n", pci_count());
+
+    /* the first time anything is done with a device we found rather
+     * than merely counted. a machine with no disk carries on exactly as
+     * it did before there was any of this */
+    if (disk_mount()) {
+        uint64_t used = 0, total = 0;
+        disk_usage(&used, &total);
+        kprintf("disk       : %s, %lu MiB, fat32 \"%s\" mounted at %s\n",
+                disk_model(), disk_bytes() / (1024 * 1024),
+                disk_label(), DISK_PREFIX);
+        kprintf("             %lu KiB used of %lu MiB\n",
+                used / 1024, total / (1024 * 1024));
+    } else {
+        kprintf("disk       : none found. the ramdisk is all there is\n");
+    }
 
     ramdisk_init();
     auth_init();

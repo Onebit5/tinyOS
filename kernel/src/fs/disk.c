@@ -1,0 +1,197 @@
+#include "fs/disk.h"
+#include "fs/fat32.h"
+#include "drivers/ahci.h"
+#include "lib/string.h"
+#include "cpu/interrupts.h"
+
+static struct fat32 fs;
+static bool ready;
+
+/* the filesystem keeps one sector of scratch and every path through it
+ * assumes nobody else is halfway through another. two threads reading
+ * at once would hand each other the wrong sector, so they do not */
+static uint64_t enter(void) { return irq_save(); }
+static void leave(uint64_t flags) { irq_restore(flags); }
+
+bool disk_ready(void) { return ready; }
+
+bool disk_mount(void) {
+    ready = false;
+    if (!ahci_init()) {
+        return false;
+    }
+    if (!fat32_mount(&fs, ahci_read, ahci_write, NULL)) {
+        return false;
+    }
+    ready = true;
+    return true;
+}
+
+/* ---- paths --------------------------------------------------------- */
+
+static size_t prefix_len(void) {
+    return strlen(DISK_PREFIX);
+}
+
+bool disk_owns_path(const char *path) {
+    size_t n = prefix_len();
+    for (size_t i = 0; i < n; i++) {
+        if (path[i] != DISK_PREFIX[i]) {
+            return false;
+        }
+    }
+    /* "/disk" and "/disk/..." are ours; "/diskette" is not */
+    return path[n] == '\0' || path[n] == '/';
+}
+
+/* strip the mount point, leaving what the filesystem understands */
+static const char *below(const char *path) {
+    const char *rest = path + prefix_len();
+    while (*rest == '/') {
+        rest++;
+    }
+    return rest;
+}
+
+static void fill(struct disk_entry *out, const struct fat32_file *f) {
+    size_t i = 0;
+    while (f->name[i] != '\0' && i < DISK_NAME_MAX - 1) {
+        out->name[i] = f->name[i];
+        i++;
+    }
+    out->name[i] = '\0';
+    out->size = f->size;
+    out->cluster = f->first_cluster;
+    out->is_dir = f->is_dir;
+    out->entry_sector = f->entry_sector;
+    out->entry_offset = f->entry_offset;
+}
+
+/* ---- the calls above us make --------------------------------------- */
+
+bool disk_lookup(const char *path, struct disk_entry *out) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    struct fat32_file f;
+    bool ok = fat32_lookup(&fs, below(path), &f);
+    if (ok) {
+        fill(out, &f);
+    }
+    leave(flags);
+    return ok;
+}
+
+bool disk_readdir(const char *path, size_t index, struct disk_entry *out) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+
+    struct fat32_file dir;
+    bool ok = fat32_lookup(&fs, below(path), &dir) && dir.is_dir;
+    if (ok) {
+        struct fat32_file f;
+        ok = fat32_readdir(&fs, dir.first_cluster, index, &f);
+        if (ok) {
+            fill(out, &f);
+        }
+    }
+
+    leave(flags);
+    return ok;
+}
+
+int64_t disk_read(uint32_t cluster, uint64_t size, uint64_t offset,
+                  void *buf, uint64_t len) {
+    if (!ready) {
+        return -1;
+    }
+    uint64_t flags = enter();
+
+    /* a descriptor remembers where a file starts and how big it is,
+     * which is all fat32_read needs to find any byte of it */
+    struct fat32_file f;
+    memset(&f, 0, sizeof f);
+    f.first_cluster = cluster;
+    f.size = (uint32_t)size;
+    f.is_dir = false;
+
+    int64_t n = fat32_read(&fs, &f, offset, buf, len);
+    leave(flags);
+    return n;
+}
+
+bool disk_create(const char *path, struct disk_entry *out) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    struct fat32_file f;
+    bool ok = fat32_create(&fs, below(path), &f);
+    if (ok) {
+        fill(out, &f);
+    }
+    leave(flags);
+    return ok;
+}
+
+int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
+                      uint64_t len) {
+    if (!ready || e->is_dir || e->entry_sector == 0) {
+        return -1;
+    }
+    uint64_t flags = enter();
+
+    /* rebuild what the filesystem wants out of what the descriptor
+     * remembered. the record's address is the part that matters -- it
+     * is what lets the new size be written back where it belongs */
+    struct fat32_file f;
+    memset(&f, 0, sizeof f);
+    f.first_cluster = e->cluster;
+    f.size = (uint32_t)e->size;
+    f.is_dir = false;
+    f.attr = FAT32_ATTR_ARCHIVE;
+    f.entry_sector = e->entry_sector;
+    f.entry_offset = e->entry_offset;
+
+    int64_t n = fat32_write(&fs, &f, offset, buf, len);
+    if (n > 0) {
+        e->size = f.size;
+        e->cluster = f.first_cluster;
+    }
+
+    leave(flags);
+    return n;
+}
+
+/* ---- what to say about it ------------------------------------------ */
+
+const char *disk_label(void) { return ready ? fs.label : ""; }
+const char *disk_model(void) { return ahci_model(); }
+
+uint64_t disk_bytes(void) {
+    return ahci_sectors() * AHCI_SECTOR;
+}
+
+uint32_t disk_cluster_bytes(void) {
+    return ready ? fat32_cluster_bytes(&fs) : 0;
+}
+
+bool disk_usage(uint64_t *used_bytes, uint64_t *total_bytes) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    uint32_t used, total;
+    bool ok = fat32_usage(&fs, &used, &total);
+    leave(flags);
+
+    if (ok) {
+        uint64_t per = fat32_cluster_bytes(&fs);
+        *used_bytes = (uint64_t)used * per;
+        *total_bytes = (uint64_t)total * per;
+    }
+    return ok;
+}

@@ -10,6 +10,13 @@
 set -eu
 
 ISO="${1:-tinyos.iso}"
+
+# a disk of its own, built fresh, because this test writes to it and a
+# run that only passes on the leavings of the last one proves nothing
+DISK="$(mktemp -t tinyos-boottest-XXXXXX.img)"
+trap 'rm -f "$DISK"' EXIT
+python3 "$(dirname "$0")/mkfat.py" "$DISK" \
+        "$(dirname "$0")/../diskroot" 64 >/dev/null
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 
@@ -44,6 +51,11 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'mem\r';     sleep 1
     printf 'lspci\r';   sleep 2
     printf 'slabs\r';   sleep 2
+    printf 'disk\r';    sleep 2
+    printf 'ls /disk\r'; sleep 2
+    printf 'cat /disk/welcome.txt\r'; sleep 2
+    printf 'write /disk/proof.txt the bond endures\r'; sleep 3
+    printf 'cat /disk/proof.txt\r'; sleep 2
     printf 'run bin/whoami\r'; sleep 2
     printf 'logout\r';  sleep 1
     printf 'guest\r';   sleep 1
@@ -64,8 +76,10 @@ echo "booting $ISO and driving the shell over serial..."
     printf '\003';    sleep 2
     printf 'ps\r';     sleep 1
     printf 'dmesg\r';  sleep 2
-} | timeout 60 qemu-system-x86_64 \
-        -M q35 -m 2G -cdrom "$ISO" \
+} | timeout 90 qemu-system-x86_64 \
+        -M q35 -m 2G -cdrom "$ISO" -boot d \
+        -drive id=disk,file="$DISK",format=raw,if=none \
+        -device ich9-ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
         -display none -serial stdio -no-reboot \
         > "$LOG" 2>&1 || true
 
@@ -125,6 +139,11 @@ check 'blocks merge'     'blocks merge'
 check 'free block shape' 'free blocks, by size'
 check 'slab caches'      'kmalloc-'
 check 'thread cache'     'addrspace'
+check 'disk mounted'     'fat32 \"TINYOS\" mounted'
+check 'disk listed'      'welcome.txt'
+check 'disk file read'   'Thou art I... And I am thou.'
+check 'wrote to disk'    'bytes are now on the disk'
+check 'read back'        'the bond endures'
 check 'root reads it'    'THE VELVET ROOM'
 check 'logout works'     'fare thee well'
 check 'guest logs in'    'thou art a guest'

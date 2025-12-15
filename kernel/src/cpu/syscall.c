@@ -13,6 +13,7 @@
 #include "sched/usermode.h"
 #include "mm/addrspace.h"
 #include "fs/ramdisk.h"
+#include "fs/disk.h"
 #include "drivers/tty.h"
 #include "sched/auth.h"
 #include "lib/string.h"
@@ -34,6 +35,7 @@ static uint64_t call_counts[SYSCALL_COUNT];
 static const char *const call_names[SYSCALL_COUNT] = {
     "exit", "write", "read", "uptime", "yield", "sleep",
     "open", "close", "getpid", "spawn", "wait", "readdir", "getuid",
+    "create",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -123,12 +125,40 @@ static bool copy_path(uint64_t ptr, uint64_t len, char *out, size_t max) {
 static int64_t sys_write_console(uint64_t ptr, uint64_t len);
 
 static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
-    /* nothing here is writable but the console: a descriptor onto the
-     * ramdisk is a bookmark into read-only memory */
-    if (fd != FD_STDOUT && fd != FD_STDERR) {
+    if (fd == FD_STDOUT || fd == FD_STDERR) {
+        return sys_write_console(ptr, len);
+    }
+
+    /* a descriptor onto the ramdisk is a bookmark into read-only
+     * memory, so it stays unwritable. one onto the disk is not */
+    struct fd_disk d;
+    if (!process_fd_disk(caller_pid(), (int)fd, &d)) {
         return -1;
     }
-    return sys_write_console(ptr, len);
+    if (len > WRITE_MAX) {
+        len = WRITE_MAX;
+    }
+    if (!user_range_ok(ptr, len)) {
+        return -1;
+    }
+
+    /* the descriptor remembered where this file's directory record is,
+     * which is what lets the new size be written back to the right place
+     * without looking the path up all over again */
+    struct disk_entry e;
+    memset(&e, 0, sizeof e);
+    e.cluster = d.cluster;
+    e.size = d.size;
+    e.is_dir = false;
+    e.entry_sector = d.entry_sector;
+    e.entry_offset = d.entry_offset;
+
+    int64_t n = disk_write_at(&e, d.pos, (const void *)ptr, len);
+    if (n > 0) {
+        process_fd_grew(caller_pid(), (int)fd, e.cluster, e.size);
+        process_fd_advance(caller_pid(), (int)fd, (uint64_t)n);
+    }
+    return n;
 }
 
 static int64_t sys_write_console(uint64_t ptr, uint64_t len) {
@@ -164,8 +194,26 @@ static int64_t sys_read(uint64_t fd, uint64_t ptr, uint64_t len) {
         return sys_read_stdin(ptr, len);
     }
 
-    /* a file. the bytes are already in memory -- the descriptor only
-     * says how far through them we had got */
+    /* a file on the disk. the bytes are not in memory, so the
+     * descriptor's position and the file's first cluster are enough to
+     * go and get them */
+    struct fd_disk d;
+    if (process_fd_disk(caller_pid(), (int)fd, &d)) {
+        if (d.remaining == 0) {
+            return 0;           /* the end, which is not an error */
+        }
+        if (len > d.remaining) {
+            len = d.remaining;
+        }
+        int64_t n = disk_read(d.cluster, d.size, d.pos, (void *)ptr, len);
+        if (n > 0) {
+            process_fd_advance(caller_pid(), (int)fd, (uint64_t)n);
+        }
+        return n;
+    }
+
+    /* a file in the ramdisk. the bytes are already in memory -- the
+     * descriptor only says how far through them we had got */
     const void *data = NULL;
     uint64_t left = 0;
     if (!process_fd_peek(caller_pid(), (int)fd, &data, &left)) {
@@ -184,6 +232,18 @@ static int64_t sys_open(uint64_t ptr, uint64_t len) {
     if (!copy_path(ptr, len, path, sizeof path)) {
         return -1;
     }
+    /* the disk is mounted under a prefix, so which filesystem a path
+     * means is decided by the path itself. there is no lookup table and
+     * no root filesystem -- two mounts, and a name says which */
+    if (disk_owns_path(path)) {
+        struct disk_entry e;
+        if (!disk_lookup(path, &e) || e.is_dir) {
+            return -1;
+        }
+        return process_fd_open_disk(caller_pid(), e.cluster, e.size,
+                                    e.entry_sector, e.entry_offset);
+    }
+
     struct ramdisk_file f;
     if (!ramdisk_open(path, &f)) {
         return -1;
@@ -200,13 +260,73 @@ static int64_t sys_open(uint64_t ptr, uint64_t len) {
     return process_fd_open(caller_pid(), f.data, f.size);
 }
 
+/* make a file on the disk, or open one that is there, for writing. the
+ * ramdisk cannot do this and says so -- it is a tar file in read-only
+ * memory, and there is nowhere for a new file to go */
+static int64_t sys_create(uint64_t ptr, uint64_t len) {
+    char path[64];
+    if (!copy_path(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    if (!disk_owns_path(path)) {
+        return -1;
+    }
+    if (process_uid(caller_pid()) != 0) {
+        kprintf("[kernel] pid %d (uid %d) may not write to the disk\n",
+                caller_pid(), process_uid(caller_pid()));
+        return -1;
+    }
+
+    struct disk_entry e;
+    if (!disk_create(path, &e)) {
+        return -1;
+    }
+    return process_fd_open_disk(caller_pid(), e.cluster, e.size,
+                                e.entry_sector, e.entry_offset);
+}
+
 /* the nth file in the ramdisk, by name. this is the whole of readdir:
  * there are no directories to descend into, so an index and a name is
  * the entire interface. `ls` needed exactly this and nothing else --
  * it was the only thing keeping it inside the kernel */
-static int64_t sys_readdir(uint64_t index, uint64_t ptr, uint64_t len) {
+static int64_t sys_readdir(uint64_t index, uint64_t ptr, uint64_t len,
+                           uint64_t path_ptr, uint64_t path_len) {
     if (len == 0 || !user_range_ok(ptr, len)) {
         return -1;
+    }
+
+    /* no path means the ramdisk, which has no directories to name. a
+     * path means the disk, where they are the whole point */
+    if (path_len > 0) {
+        char path[64];
+        if (!copy_path(path_ptr, path_len, path, sizeof path)) {
+            return -1;
+        }
+        if (!disk_owns_path(path)) {
+            return -1;
+        }
+
+        struct disk_entry e;
+        if (!disk_readdir(path, (size_t)index, &e)) {
+            return -1;
+        }
+
+        /* a directory comes back with a trailing slash, which is how
+         * everyone has said "this one can be descended into" since
+         * long before any of us. no protocol needed */
+        uint64_t dn = strlen(e.name);
+        if (e.is_dir) {
+            dn++;
+        }
+        if (dn >= len) {
+            dn = len - 1;
+        }
+        memcpy((void *)ptr, e.name, dn);
+        if (e.is_dir && dn > 0) {
+            ((char *)ptr)[dn - 1] = '/';
+        }
+        ((char *)ptr)[dn] = '\0';
+        return (int64_t)dn;
     }
 
     struct ramdisk_file f;
@@ -273,8 +393,6 @@ static int64_t sys_wait(uint64_t pid, uint64_t code_ptr) {
  * there for us) and r8. returns into rax */
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4) {
-    (void)a3; (void)a4;
-
     if (nr < SYSCALL_COUNT) {
         call_counts[nr]++;
     }
@@ -297,7 +415,9 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_WAIT:
         return sys_wait(a0, a1);
     case SYS_READDIR:
-        return sys_readdir(a0, a1, a2);
+        return sys_readdir(a0, a1, a2, a3, a4);
+    case SYS_CREATE:
+        return sys_create(a0, a1);
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

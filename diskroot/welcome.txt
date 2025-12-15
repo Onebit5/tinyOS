@@ -1,0 +1,4 @@
+Thou art I... And I am thou.
+
+This file lives on a real disk, in a real filesystem.
+Write to it, reboot, and it will still be here.

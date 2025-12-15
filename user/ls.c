@@ -1,9 +1,13 @@
 /* ls, which used to be a kernel command.
  *
- * this one genuinely needed something new: a way to ask what is in the
- * ramdisk. `open` can only answer about a name you already know. so
- * SYS_READDIR exists now -- an index and a name, which is the whole of
- * a directory when there are no directories. */
+ * this one genuinely needed something new: a way to ask what is in a
+ * filesystem. `open` can only answer about a name you already know. so
+ * SYS_READDIR exists -- an index and a name.
+ *
+ * with a disk mounted there are two filesystems now, and which one you
+ * mean is decided by whether you name a path. no argument is the
+ * ramdisk, which has no directories to name; `ls /disk` is the disk,
+ * where directories come back with a slash on the end. */
 
 #include "syscall.h"
 
@@ -14,26 +18,51 @@ static long ends_with_slash(const char *s) {
 }
 
 void _start(int argc, char **argv) {
-    (void)argc; (void)argv;
+    const char *path = (argc > 1) ? argv[1] : 0;
 
     char name[128];
     long files = 0;
+    long dirs = 0;
 
     for (long i = 0; ; i++) {
-        if (readdir(i, name, sizeof name) < 0) {
+        long n = path ? readdir_at(i, name, sizeof name, path)
+                      : readdir(i, name, sizeof name);
+        if (n < 0) {
             break;
         }
-        /* tar keeps directory entries; they have nothing to open */
-        if (name[0] == '\0' || ends_with_slash(name)) {
+        if (name[0] == '\0') {
             continue;
         }
+
+        if (ends_with_slash(name)) {
+            /* on the disk that means a directory, worth showing. in the
+             * ramdisk it is one of tar's directory records, which has
+             * nothing behind it to open */
+            if (!path) {
+                continue;
+            }
+            dirs++;
+        } else {
+            files++;
+        }
+
         write("  ");
         write(name);
         write("\n");
-        files++;
+    }
+
+    if (files == 0 && dirs == 0 && path) {
+        write("nothing there, or no such directory\n");
+        exit(1);
     }
 
     write_num(files);
-    write(" files\n");
+    write(" files");
+    if (dirs > 0) {
+        write(", ");
+        write_num(dirs);
+        write(" directories");
+    }
+    write("\n");
     exit(0);
 }

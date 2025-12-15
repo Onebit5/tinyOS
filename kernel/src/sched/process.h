@@ -36,9 +36,31 @@
  * already in memory and read-only, so a descriptor is a bookmark */
 struct fd {
     bool            open;
-    const uint8_t  *data;
+
+    /* a file in the ramdisk is already in memory, so the descriptor is
+     * a bookmark. a file on the disk is not, so all it can remember is
+     * where the file starts -- the bytes get fetched on demand */
+    bool            on_disk;
+    const uint8_t  *data;       /* in memory */
+
+    /* on disk: where the file starts, and where the record describing
+     * it lives, so a write can correct the size afterwards */
+    uint32_t        cluster;
+    uint64_t        entry_sector;
+    uint32_t        entry_offset;
+
     uint64_t        size;
     uint64_t        pos;
+};
+
+/* everything a disk-backed descriptor knows about its file */
+struct fd_disk {
+    uint32_t cluster;
+    uint64_t size;
+    uint64_t pos;
+    uint64_t remaining;
+    uint64_t entry_sector;
+    uint32_t entry_offset;
 };
 
 struct process {
@@ -106,6 +128,17 @@ bool process_take_interrupt(int pid);
 /* take a descriptor onto a stretch of ramdisk. returns the fd, or -1
  * if this process is already holding as many as it may */
 int  process_fd_open(int pid, const void *data, uint64_t size);
+
+/* the same, for a file whose bytes are still on the disk */
+int  process_fd_open_disk(int pid, uint32_t cluster, uint64_t size,
+                          uint64_t entry_sector, uint32_t entry_offset);
+
+/* where a disk-backed descriptor has got to. false for a memory one */
+bool process_fd_disk(int pid, int fd, struct fd_disk *out);
+
+/* a write may have grown the file, or given an empty one its first
+ * cluster. the descriptor has to learn about both */
+void process_fd_grew(int pid, int fd, uint32_t cluster, uint64_t size);
 
 /* where the descriptor has got to, and how much is left. false if the
  * fd was never opened */
