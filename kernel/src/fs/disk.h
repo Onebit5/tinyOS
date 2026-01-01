@@ -8,15 +8,14 @@
 /* the disk, mounted.
  *
  * one place that owns the sata controller and the filesystem on it, so
- * that nothing above has to know which is which. paths here are the
- * ones a user types -- "/disk/notes.txt" -- and the prefix is stripped
- * on the way through.
+ * that nothing above has to know which is which. paths are absolute and
+ * rooted at the disk itself; deciding that a name belongs here at all
+ * is the vfs's job, not this file's.
  *
  * everything degrades quietly. a machine with no disk, or a disk with
  * no filesystem we recognise, answers false to all of this and boots
  * exactly as it did before there was any of it. */
 
-#define DISK_PREFIX     "/disk"
 #define DISK_NAME_MAX   128
 
 struct disk_entry {
@@ -38,9 +37,6 @@ struct disk_entry {
 bool disk_mount(void);
 
 bool disk_ready(void);
-
-/* is this one of ours? "/disk", "/disk/", "/disk/anything" */
-bool disk_owns_path(const char *path);
 
 /* look a file up. `path` includes the prefix */
 bool disk_lookup(const char *path, struct disk_entry *out);

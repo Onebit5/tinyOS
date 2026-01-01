@@ -29,28 +29,13 @@ bool disk_mount(void) {
 
 /* ---- paths --------------------------------------------------------- */
 
-static size_t prefix_len(void) {
-    return strlen(DISK_PREFIX);
-}
-
-bool disk_owns_path(const char *path) {
-    size_t n = prefix_len();
-    for (size_t i = 0; i < n; i++) {
-        if (path[i] != DISK_PREFIX[i]) {
-            return false;
-        }
-    }
-    /* "/disk" and "/disk/..." are ours; "/diskette" is not */
-    return path[n] == '\0' || path[n] == '/';
-}
-
-/* strip the mount point, leaving what the filesystem understands */
+/* the disk is the root now, so a path arrives already rooted at it and
+ * all that is left is the leading slash fat32 has no use for */
 static const char *below(const char *path) {
-    const char *rest = path + prefix_len();
-    while (*rest == '/') {
-        rest++;
+    while (*path == '/') {
+        path++;
     }
-    return rest;
+    return path;
 }
 
 static void fill(struct disk_entry *out, const struct fat32_file *f) {

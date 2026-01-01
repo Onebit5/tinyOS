@@ -50,16 +50,35 @@ bool disk_ready(void) { return true; }
 /* a small tree, so completion has directories to descend into and
  * names that share prefixes to be careful about */
 static const struct { const char *dir, *name; bool is_dir; } disk_tree[] = {
-    { "/disk", "welcome.txt",     false },
-    { "/disk", "notes",           true  },
-    { "/disk", "hello.txt",       false },
-    { "/disk", "big.bin",         false },
-    { "/disk/notes", "deep.txt",  false },
-    { "/disk/notes", "deeper.txt", false },
+    { "/", "welcome.txt",     false },
+    { "/", "notes",           true  },
+    { "/", "hello.txt",       false },
+    { "/", "big.bin",         false },
+    { "/notes", "deep.txt",   false },
+    { "/notes", "deeper.txt", false },
 };
-bool disk_owns_path(const char *path) {
-    return strncmp(path, "/disk", 5) == 0
-        && (path[5] == '\0' || path[5] == '/');
+bool disk_lookup(const char *path, struct disk_entry *out) {
+    for (size_t i = 0; i < sizeof disk_tree / sizeof disk_tree[0]; i++) {
+        char full[160];
+        snprintf(full, sizeof full, "%s%s%s", disk_tree[i].dir,
+                 disk_tree[i].dir[1] == '\0' ? "" : "/", disk_tree[i].name);
+        if (strcmp(full, path) != 0) continue;
+        memset(out, 0, sizeof *out);
+        strcpy(out->name, disk_tree[i].name);
+        out->is_dir = disk_tree[i].is_dir;
+        return true;
+    }
+    return false;
+}
+int64_t disk_read(uint32_t c, uint64_t s, uint64_t o, void *b, uint64_t l) {
+    (void)c; (void)s; (void)o; (void)b; (void)l; return -1;
+}
+bool disk_create(const char *path, struct disk_entry *out) {
+    (void)path; (void)out; return false;
+}
+int64_t disk_write_at(struct disk_entry *e, uint64_t o, const void *b,
+                      uint64_t l) {
+    (void)e; (void)o; (void)b; (void)l; return -1;
 }
 bool disk_readdir(const char *path, size_t index, struct disk_entry *out) {
     size_t seen = 0;
@@ -418,72 +437,95 @@ int main(void) {
          * the cases that did not work at all before: the candidates
          * only ever came from the ramdisk, so a path matched nothing */
 
-        strcpy(line, "ls /d"); len = 5; pos = 5;
+        /* "/b" is ambiguous -- big.bin is also there -- so it must fill
+         * in no further and list the two instead of picking one */
+        strcpy(line, "ls /b"); len = 5; pos = 5;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "ls /disk/") == 0,
-              "a partial mount point completes to /disk/");
+        CHECK(strcmp(line, "ls /b") == 0,
+              "an ambiguous prefix completes no further");
+        CHECK(out_len > 0, "and lists what it could have been");
 
-        strcpy(line, "ls /disk"); len = 8; pos = 8;
+        strcpy(line, "ls /bo"); len = 6; pos = 6;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "ls /disk/") == 0,
+        CHECK(strcmp(line, "ls /boot/") == 0,
+              "one more character reaches the mount point");
+
+        strcpy(line, "ls /boot"); len = 8; pos = 8;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "ls /boot/") == 0,
               "and so does the mount point with no slash yet");
 
-        strcpy(line, "cat /disk/w"); len = 11; pos = 11;
+        strcpy(line, "cat /w"); len = 6; pos = 6;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "cat /disk/welcome.txt") == 0,
+        CHECK(strcmp(line, "cat /welcome.txt") == 0,
               "a file on the disk completes to its whole path");
 
         /* a directory has to come back with a slash, so that tabbing
          * again carries on into it rather than stopping at a name that
          * cannot be opened */
-        strcpy(line, "cat /disk/n"); len = 11; pos = 11;
+        strcpy(line, "cat /n"); len = 6; pos = 6;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "cat /disk/notes/") == 0,
+        CHECK(strcmp(line, "cat /notes/") == 0,
               "a directory completes with a trailing slash");
 
         /* and then straight on into it */
-        strcpy(line, "cat /disk/notes/deep"); len = 20; pos = 20;
+        strcpy(line, "cat /notes/deep"); len = 15; pos = 15;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "cat /disk/notes/deep") == 0,
+        CHECK(strcmp(line, "cat /notes/deep") == 0,
               "two files sharing a prefix fill in no further");
         CHECK(out_len > 0, "and the pair gets listed instead");
 
-        strcpy(line, "cat /disk/notes/deeper"); len = 22; pos = 22;
+        strcpy(line, "cat /notes/deeper"); len = 17; pos = 17;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "cat /disk/notes/deeper.txt") == 0,
+        CHECK(strcmp(line, "cat /notes/deeper.txt") == 0,
               "and one more character is enough to settle it");
 
         /* the two commands that had no completion at all before */
-        strcpy(line, "write /disk/h"); len = 13; pos = 13;
+        strcpy(line, "write /h"); len = 8; pos = 8;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "write /disk/hello.txt") == 0,
+        CHECK(strcmp(line, "write /hello.txt") == 0,
               "write completes disk paths too");
 
-        strcpy(line, "ls /disk/n"); len = 10; pos = 10;
+        strcpy(line, "ls /n"); len = 5; pos = 5;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "ls /disk/notes/") == 0,
+        CHECK(strcmp(line, "ls /notes/") == 0,
               "and so does ls");
 
         /* a bare tab after the mount point lists what is there */
-        strcpy(line, "ls /disk/"); len = 9; pos = 9;
+        strcpy(line, "ls /"); len = 4; pos = 4;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(out_len > 0, "a bare tab inside /disk lists it");
+        CHECK(out_len > 0, "a bare tab at the root lists it");
 
         /* a path that is not ours must not be answered with the disk */
-        strcpy(line, "cat /etc/pass"); len = 13; pos = 13;
+        strcpy(line, "cat /nowhere/pass"); len = 17; pos = 17;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "cat /etc/pass") == 0,
-              "a path that is not the disk completes to nothing");
+        CHECK(strcmp(line, "cat /nowhere/pass") == 0,
+              "a path into a directory that is not there completes to nothing");
+
+        /* a relative path completes the same as an absolute one, which
+         * is what `ls boot/<tab>` needs */
+        strcpy(line, "ls notes/d"); len = 10; pos = 10;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "ls notes/deep") == 0,
+              "a relative path completes against the tree, as far as two agree");
+
+        strcpy(line, "cat notes/deeper"); len = 16; pos = 16;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat notes/deeper.txt") == 0,
+              "and settles when one more character is given");
 
         /* run completes a nested path, which is where bin/hello lives */
         strcpy(line, "run bin/h"); len = 9; pos = 9;

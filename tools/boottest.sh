@@ -52,10 +52,13 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'lspci\r';   sleep 2
     printf 'slabs\r';   sleep 2
     printf 'disk\r';    sleep 2
-    printf 'ls /disk\r'; sleep 2
-    printf 'cat /disk/welcome.txt\r'; sleep 2
-    printf 'write /disk/proof.txt the bond endures\r'; sleep 3
-    printf 'cat /disk/proof.txt\r'; sleep 2
+    printf 'mount\r';   sleep 2
+    printf 'ls\r';      sleep 2
+    printf 'ls /boot\r'; sleep 2
+    printf 'cat welcome.txt\r'; sleep 2
+    printf 'cat /boot/welcome.txt\r'; sleep 2
+    printf 'write /proof.txt the bond endures\r'; sleep 3
+    printf 'cat /proof.txt\r'; sleep 2
     printf 'run bin/whoami\r'; sleep 2
     printf 'logout\r';  sleep 1
     printf 'guest\r';   sleep 1
@@ -139,9 +142,12 @@ check 'blocks merge'     'blocks merge'
 check 'free block shape' 'free blocks, by size'
 check 'slab caches'      'kmalloc-'
 check 'thread cache'     'addrspace'
-check 'disk mounted'     'fat32 \"TINYOS\" mounted'
-check 'disk listed'      'welcome.txt'
-check 'disk file read'   'Thou art I... And I am thou.'
+check 'disk at the root' 'fat32 \"TINYOS\" mounted at /'
+check 'mount table'      'a module the bootloader handed us'
+check 'root listed'      'welcome.txt'
+check 'boot is a mount'  'boot/'
+check 'disk shadows'     'This file is on the disk'
+check 'ramdisk still there' 'Thou art I'
 check 'wrote to disk'    'bytes are now on the disk'
 check 'read back'        'the bond endures'
 check 'root reads it'    'THE VELVET ROOM'

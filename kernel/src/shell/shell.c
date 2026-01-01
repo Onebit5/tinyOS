@@ -14,6 +14,7 @@
 #include "cpu/cpuinfo.h"
 #include "fs/ramdisk.h"
 #include "fs/disk.h"
+#include "fs/vfs.h"
 #include "drivers/ahci.h"
 #include "sched/usermode.h"
 #include "sched/auth.h"
@@ -187,8 +188,8 @@ static void cmd_disk(int argc, char **argv) {
     kprintf("drive      %s\n", disk_model());
     kprintf("capacity   %lu MiB (%lu sectors)\n",
             disk_bytes() / (1024 * 1024), disk_bytes() / AHCI_SECTOR);
-    kprintf("filesystem fat32, labelled \"%s\", at %s\n",
-            disk_label(), DISK_PREFIX);
+    kprintf("filesystem fat32, labelled \"%s\", mounted at /\n",
+            disk_label());
     kprintf("clusters   %lu bytes each\n", (uint64_t)disk_cluster_bytes());
 
     uint64_t used = 0, total = 0;
@@ -197,8 +198,27 @@ static void cmd_disk(int argc, char **argv) {
                 used / 1024, total / (1024 * 1024));
     }
 
-    kprintf("\ntry: ls /disk, cat /disk/welcome.txt,\n");
-    kprintf("     write /disk/notes.txt something worth keeping\n");
+    kprintf("\ntry: ls, cat welcome.txt, write /notes.txt "
+            "something worth keeping\n");
+}
+
+static void cmd_mount(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    kprintf("%-8s %-7s %-5s %s\n", "at", "kind", "write", "on");
+
+    struct vfs_mount m;
+    for (size_t i = 0; vfs_mount_at(i, &m); i++) {
+        kprintf("%-8s %-7s %-5s %s%s\n", m.at, m.what,
+                m.writable ? "yes" : "no", m.where,
+                m.present ? "" : "   (absent)");
+    }
+
+    kprintf("\na name with no leading slash is looked for on the disk "
+            "first and\n");
+    kprintf("%s second, so a disk may supply its own copy of anything "
+            "and a\n", VFS_BOOT);
+    kprintf("machine without one still finds what it booted with.\n");
 }
 
 static void cmd_slabs(int argc, char **argv) {
@@ -773,6 +793,7 @@ static const struct command commands[] = {
     { "lspci",  "what is plugged into this machine",    cmd_lspci, false },
     { "slabs",  "the object caches, and what they hold", cmd_slabs, false },
     { "disk",   "the drive, and the filesystem on it",  cmd_disk, false },
+    { "mount",  "which filesystem is where",            cmd_mount, false },
     { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },
@@ -1144,22 +1165,10 @@ static void add_candidate(struct candidates *c, const char *dir,
     c->count++;
 }
 
-/* a word that begins with a slash is heading for the disk */
-static void gather_disk(struct candidates *c, const char *word, size_t wlen) {
-    size_t mount = strlen(DISK_PREFIX);
-
-    /* still typing the mount point itself: "/d", or "/disk" with no
-     * slash yet. either way the useful answer is "/disk/" */
-    if (wlen <= mount) {
-        if (common_prefix(DISK_PREFIX, word) >= wlen) {
-            add_candidate(c, DISK_PREFIX, NULL, true);
-        }
-        return;
-    }
-    if (!disk_ready()) {
-        return;
-    }
-
+/* an absolute word names a place in the one namespace, so it completes
+ * against whatever is mounted there -- the disk at /, the ramdisk at
+ * /boot -- without this having to know which is which */
+static void gather_path(struct candidates *c, const char *word, size_t wlen) {
     /* split at the last slash: what comes before names the directory to
      * look in, what comes after is the part being matched */
     size_t cut = 0;
@@ -1175,21 +1184,18 @@ static void gather_disk(struct candidates *c, const char *word, size_t wlen) {
     }
 
     char dir[CAND_MAX];
-    size_t dlen = (cut == 0) ? 1 : cut;
+    size_t dlen = (cut == 0) ? 1 : cut;      /* "/" when the slash is first */
     if (dlen >= sizeof dir) {
         return;
     }
     memcpy(dir, word, dlen);
     dir[dlen] = '\0';
-    if (!disk_owns_path(dir)) {
-        return;
-    }
 
     const char *partial = word + cut + 1;
     size_t plen = wlen - cut - 1;
 
-    struct disk_entry e;
-    for (size_t i = 0; disk_readdir(dir, i, &e); i++) {
+    struct vfs_file e;
+    for (size_t i = 0; vfs_readdir(dir, i, &e); i++) {
         size_t n = strlen(e.name);
         if (n < plen || common_prefix(e.name, partial) < plen) {
             continue;
@@ -1230,13 +1236,36 @@ static void gather(struct candidates *c, const char *line, size_t start,
         return;
     }
 
-    /* a path is the disk's business. the ramdisk has no leading slash
-     * on anything, so the two can never be confused */
-    if (prefix[0] == '/') {
-        gather_disk(c, prefix, plen);
-        return;
+    /* any word with a slash in it names a place in the tree, whether or
+     * not it starts at the root -- `boot/mo` is as much a path as
+     * `/boot/mo` is */
+    bool is_path = false;
+    for (size_t i = 0; i < plen; i++) {
+        if (prefix[i] == '/') {
+            is_path = true;
+            break;
+        }
     }
 
+    if (is_path) {
+        gather_path(c, prefix, plen);
+    } else {
+        /* a bare name is looked for the way vfs_open looks for one: the
+         * disk's root first, then the ramdisk. offered bare, since bare
+         * is what was typed */
+        struct vfs_file v;
+        for (size_t i = 0;
+             vfs_readdir("/", i, &v) && c->count < MAX_CANDIDATES; i++) {
+            size_t n = strlen(v.name);
+            if (n >= plen && common_prefix(v.name, prefix) >= plen) {
+                add_candidate(c, v.name, NULL, v.is_dir);
+            }
+        }
+    }
+
+    /* and the ramdisk's own names, which are whole paths carrying no
+     * leading slash -- `bin/h` completes to `bin/hello` out of this and
+     * out of nothing else */
     struct ramdisk_file f;
     for (size_t i = 0; ramdisk_stat(i, &f) && c->count < MAX_CANDIDATES; i++) {
         const char *name = f.name;

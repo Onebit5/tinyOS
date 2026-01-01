@@ -1,5 +1,5 @@
 #include "sched/auth.h"
-#include "fs/ramdisk.h"
+#include "fs/vfs.h"
 #include "lib/string.h"
 
 static struct account accounts[AUTH_MAX_ACCOUNTS];
@@ -113,12 +113,22 @@ size_t auth_count(void) {
 #ifndef TINYOS_HOSTED
 
 void auth_init(void) {
-    struct ramdisk_file f;
-    if (!ramdisk_open("passwd", &f)) {
+    /* a bare name, so a disk may supply its own passwd and a machine
+     * without one still finds the copy it booted with. worth being
+     * clear-eyed about: that means whoever can write the disk can
+     * decide who the master is. only the master can write it, so the
+     * circle closes -- but it is the sort of thing that stops being
+     * true the moment anyone else is allowed to */
+    const void *data = NULL;
+    uint64_t size = 0;
+    bool owned = false;
+
+    if (!vfs_slurp("passwd", &data, &size, &owned)) {
         auth_load(NULL, 0);
         return;
     }
-    auth_load(f.data, f.size);
+    auth_load(data, size);
+    vfs_release(data, owned);
 }
 
 #endif

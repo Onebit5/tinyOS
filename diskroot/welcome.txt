@@ -1,4 +1,8 @@
-Thou art I... And I am thou.
+This file is on the disk, at /welcome.txt.
 
-This file lives on a real disk, in a real filesystem.
-Write to it, reboot, and it will still be here.
+There is one on the ramdisk too, at /boot/welcome.txt, and it says
+something else. A bare name is looked for here first, so `cat
+welcome.txt` finds this one -- and on a machine with no disk it finds
+the other, and nothing breaks.
+
+Write to this disk, reboot, and what you wrote is still here.

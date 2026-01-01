@@ -68,4 +68,14 @@ fixed-size things we allocate constantly (threads, address spaces). a
 
 **0.1.10 a real filesystem, on a real disk.** ~~an ahci driver and fat32, read and write.~~ **done in 0.1.10.**
 
-**0.1.11 our own bootloader.**
+**0.1.11 one namespace.** ~~the disk becomes the root and the ramdisk
+moves to /boot, instead of the disk being bolted on at /disk. a bare
+name is looked for on the disk first and the ramdisk second, so a disk
+may supply its own copy of anything and a machine without one carries on
+exactly as before.~~ **done in 0.1.11.** the ramdisk stays: it is what
+makes the machine work when the disk does not, and it is the foundation
+for booting one medium to install onto another.
+
+**0.1.12 our own bootloader.** stage 1 and stage 2, reading the kernel
+off fat32 with the driver 0.1.10 already tested, filling in the same
+structures the kernel expects so the kernel itself need not change.

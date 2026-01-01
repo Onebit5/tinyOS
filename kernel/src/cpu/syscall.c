@@ -12,8 +12,7 @@
 #include "sched/process.h"
 #include "sched/usermode.h"
 #include "mm/addrspace.h"
-#include "fs/ramdisk.h"
-#include "fs/disk.h"
+#include "fs/vfs.h"
 #include "drivers/tty.h"
 #include "sched/auth.h"
 #include "lib/string.h"
@@ -145,17 +144,17 @@ static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
     /* the descriptor remembered where this file's directory record is,
      * which is what lets the new size be written back to the right place
      * without looking the path up all over again */
-    struct disk_entry e;
-    memset(&e, 0, sizeof e);
-    e.cluster = d.cluster;
-    e.size = d.size;
-    e.is_dir = false;
-    e.entry_sector = d.entry_sector;
-    e.entry_offset = d.entry_offset;
+    struct vfs_file f;
+    memset(&f, 0, sizeof f);
+    f.kind = VFS_DISK;
+    f.cluster = d.cluster;
+    f.size = d.size;
+    f.entry_sector = d.entry_sector;
+    f.entry_offset = d.entry_offset;
 
-    int64_t n = disk_write_at(&e, d.pos, (const void *)ptr, len);
+    int64_t n = vfs_write(&f, d.pos, (const void *)ptr, len);
     if (n > 0) {
-        process_fd_grew(caller_pid(), (int)fd, e.cluster, e.size);
+        process_fd_grew(caller_pid(), (int)fd, f.cluster, f.size);
         process_fd_advance(caller_pid(), (int)fd, (uint64_t)n);
     }
     return n;
@@ -205,7 +204,13 @@ static int64_t sys_read(uint64_t fd, uint64_t ptr, uint64_t len) {
         if (len > d.remaining) {
             len = d.remaining;
         }
-        int64_t n = disk_read(d.cluster, d.size, d.pos, (void *)ptr, len);
+        struct vfs_file f;
+        memset(&f, 0, sizeof f);
+        f.kind = VFS_DISK;
+        f.cluster = d.cluster;
+        f.size = d.size;
+
+        int64_t n = vfs_read(&f, d.pos, (void *)ptr, len);
         if (n > 0) {
             process_fd_advance(caller_pid(), (int)fd, (uint64_t)n);
         }
@@ -232,30 +237,26 @@ static int64_t sys_open(uint64_t ptr, uint64_t len) {
     if (!copy_path(ptr, len, path, sizeof path)) {
         return -1;
     }
-    /* the disk is mounted under a prefix, so which filesystem a path
-     * means is decided by the path itself. there is no lookup table and
-     * no root filesystem -- two mounts, and a name says which */
-    if (disk_owns_path(path)) {
-        struct disk_entry e;
-        if (!disk_lookup(path, &e) || e.is_dir) {
-            return -1;
-        }
-        return process_fd_open_disk(caller_pid(), e.cluster, e.size,
-                                    e.entry_sector, e.entry_offset);
-    }
 
-    struct ramdisk_file f;
-    if (!ramdisk_open(path, &f)) {
+    /* which filesystem a name means is the vfs's problem now, not this
+     * one's. there used to be two branches here and a prefix test */
+    struct vfs_file f;
+    if (!vfs_open(path, &f) || f.is_dir) {
         return -1;
     }
 
-    /* the boundary, in one line. the mode came out of the tar header
-     * and the uid off the process, and neither is anything ring 3 can
-     * reach in and change */
-    if (!ramdisk_may_read(&f, process_uid(caller_pid()))) {
+    /* the boundary, in one line. the mode came off the file and the uid
+     * off the process, and neither is anything ring 3 can reach in and
+     * change */
+    if (!vfs_may_read(&f, process_uid(caller_pid()))) {
         kprintf("[kernel] pid %d (uid %d) may not read %s\n",
                 caller_pid(), process_uid(caller_pid()), path);
         return -1;
+    }
+
+    if (f.kind == VFS_DISK) {
+        return process_fd_open_disk(caller_pid(), f.cluster, f.size,
+                                    f.entry_sector, f.entry_offset);
     }
     return process_fd_open(caller_pid(), f.data, f.size);
 }
@@ -268,21 +269,18 @@ static int64_t sys_create(uint64_t ptr, uint64_t len) {
     if (!copy_path(ptr, len, path, sizeof path)) {
         return -1;
     }
-    if (!disk_owns_path(path)) {
-        return -1;
-    }
     if (process_uid(caller_pid()) != 0) {
-        kprintf("[kernel] pid %d (uid %d) may not write to the disk\n",
+        kprintf("[kernel] pid %d (uid %d) may not write here\n",
                 caller_pid(), process_uid(caller_pid()));
         return -1;
     }
 
-    struct disk_entry e;
-    if (!disk_create(path, &e)) {
+    struct vfs_file f;
+    if (!vfs_create(path, &f)) {
         return -1;
     }
-    return process_fd_open_disk(caller_pid(), e.cluster, e.size,
-                                e.entry_sector, e.entry_offset);
+    return process_fd_open_disk(caller_pid(), f.cluster, f.size,
+                                f.entry_sector, f.entry_offset);
 }
 
 /* the nth file in the ramdisk, by name. this is the whole of readdir:
@@ -295,55 +293,34 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr, uint64_t len,
         return -1;
     }
 
-    /* no path means the ramdisk, which has no directories to name. a
-     * path means the disk, where they are the whole point */
-    if (path_len > 0) {
-        char path[64];
-        if (!copy_path(path_ptr, path_len, path, sizeof path)) {
-            return -1;
-        }
-        if (!disk_owns_path(path)) {
-            return -1;
-        }
-
-        struct disk_entry e;
-        if (!disk_readdir(path, (size_t)index, &e)) {
-            return -1;
-        }
-
-        /* a directory comes back with a trailing slash, which is how
-         * everyone has said "this one can be descended into" since
-         * long before any of us. no protocol needed */
-        uint64_t dn = strlen(e.name);
-        if (e.is_dir) {
-            dn++;
-        }
-        if (dn >= len) {
-            dn = len - 1;
-        }
-        memcpy((void *)ptr, e.name, dn);
-        if (e.is_dir && dn > 0) {
-            ((char *)ptr)[dn - 1] = '/';
-        }
-        ((char *)ptr)[dn] = '\0';
-        return (int64_t)dn;
+    /* no path means the root, which is where anyone looking around
+     * would start. there is only one namespace now, so this needs no
+     * idea of which filesystem it is walking */
+    char path[64] = "/";
+    if (path_len > 0 && !copy_path(path_ptr, path_len, path, sizeof path)) {
+        return -1;
     }
 
-    struct ramdisk_file f;
-    if (!ramdisk_stat((size_t)index, &f)) {
+    struct vfs_file f;
+    if (!vfs_readdir(path, (size_t)index, &f)) {
         return -1;      /* past the end */
     }
 
-    const char *name = f.name;
-    if (name[0] == '.' && name[1] == '/') {
-        name += 2;      /* the same path a program could hand to open */
+    /* a directory comes back with a trailing slash, which is how
+     * everyone has said "this one can be descended into" since long
+     * before any of us. no protocol needed */
+    uint64_t n = strlen(f.name);
+    bool slash = f.is_dir && (n == 0 || f.name[n - 1] != '/');
+    if (slash) {
+        n++;
     }
-
-    uint64_t n = strlen(name);
     if (n >= len) {
         n = len - 1;
     }
-    memcpy((void *)ptr, name, n);
+    memcpy((void *)ptr, f.name, slash ? n - 1 : n);
+    if (slash && n > 0) {
+        ((char *)ptr)[n - 1] = '/';
+    }
     ((char *)ptr)[n] = '\0';
     return (int64_t)n;
 }

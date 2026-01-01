@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https:
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.10** (**a real filesystem, on a real disk.** an ahci driver that talks to a sata drive by dma, and fat32 on top of it -- read and write, so what you type survives the power going off)
+**version: 0.1.11** (**one namespace.** the disk becomes the root and the ramdisk moves to `/boot`, where it stays -- because it is what makes the machine work when the disk does not)
 
 ## what it does
 
@@ -34,6 +34,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] pci enumeration, and an `lspci` that says what this machine is
 - [x] a buddy page allocator, slab caches, and a heap that stopped searching
 - [x] a sata driver and fat32: files on a real disk, that survive a reboot
+- [x] one namespace over both, and a machine that boots with neither missing
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -200,6 +201,44 @@ every pointer a program hands over is checked against **that program's** page ta
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
 
+### one namespace, two filesystems
+
+the disk arrived in 0.1.10 bolted on at `/disk`, which had it backwards.
+the disk is the big writable persistent thing; the ramdisk is the small
+read-only one that is always there. so:
+
+```
+/          the disk, when there is one
+/boot      the ramdisk, always
+```
+
+a name with no leading slash is looked for on the disk first and the
+ramdisk second. that one rule is what makes the arrangement useful: a
+disk can supply its own `bin/ls` or its own `passwd` and it simply wins,
+while a machine with no disk at all falls through to the copies it
+booted with and behaves exactly as it did before there was any of this.
+`mount` prints the table; `cat welcome.txt` and `cat /boot/welcome.txt`
+give different files on purpose, which is the shortest demonstration of
+the search order there is.
+
+**the ramdisk is not going anywhere.** it is a module the bootloader
+hands over before any driver exists -- no pci, no ahci, no filesystem to
+mount. every program and the passwd file live on it, so a kernel whose
+only filesystem needed a sata controller would be a kernel that a
+missing cable turns into a brick. it is also the obvious foundation for
+booting off one medium to install onto another, which is where this
+eventually goes.
+
+that claim is worth more than a comment, so the vfs suite runs every
+check twice: once with a disk and once with the disk switched off. the
+second half asserts that programs still load, passwd is still found, and
+the root still honestly reports that it holds nothing but `/boot`.
+
+one deliberate exception to the search order: the boot banner reads
+`/boot/welcome.txt` by name rather than searching, so what the machine
+says about itself cannot be changed by whatever happens to be sitting on
+the data disk.
+
 ### a disk, and a filesystem on it
 
 everything before this forgot. the ramdisk is a tar file limine hands
@@ -245,11 +284,9 @@ writing works: to existing files, past their end (growing the chain a
 cluster at a time), and to files that did not exist. new files get short
 names only, and a name that will not fit is refused rather than mangled.
 
-tab completion follows the disk into its directories. the ramdisk is
-flat and has no leading slash on any name, so a word that starts with
-one is unambiguously the disk's, and gets completed a directory at a
-time -- with a trailing slash on directories, so tabbing again carries
-on into them rather than stopping at a name that cannot be opened.
+tab completion follows the namespace into its directories -- a trailing
+slash on directories, so tabbing again carries on into them rather than
+stopping at a name that cannot be opened.
 
 **the filesystem never touches hardware.** it is handed two functions
 that move sectors, the same shape as the pci scan being handed a way to
@@ -472,6 +509,7 @@ $ make test
   buddy      ok        splitting, merging, and every frame handed out once
   slab       ok        object caches, and pages that go back when empty
   fat32      ok        a real image: long names, subdirectories, writes
+  vfs        ok        resolution, shadowing, and all of it with no disk
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -548,7 +586,8 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
-- **0.1.10** — a disk, and a filesystem on it that remembers. an ahci driver reaches the sata controller pci enumeration found: commands are built in ram -- a header, a table holding the frame the drive receives, a scatter list of physical addresses -- and one bit says go, after which the controller moves every byte itself. polled rather than interrupt-driven, with every wait bounded. on top of that, fat32: cluster chains, subdirectories, and long filenames assembled from the records hidden in front of the short ones (checked for completeness, since a half-assembled name is worse than none). writes go to existing files, past their end, and to files that did not exist yet. `ls /disk`, `cat /disk/welcome.txt`, and `write /disk/notes.txt something` -- then reboot and it is still there. the filesystem takes its disk as two functions, so the suite runs the real parser against a real image; but the formatter and the parser share an author, so the check that counts is mounting the image on linux.
+- **0.1.11** — one namespace instead of two filesystems side by side. the disk is the root; the ramdisk moved to `/boot`. a bare name is looked for on the disk first and the ramdisk second, so a disk may supply its own copy of anything while a machine without one falls through to what it booted with. `mount` shows the table, and `cat welcome.txt` versus `cat /boot/welcome.txt` demonstrates the order in one line. the syscall layer lost its prefix tests and its two branches -- `open`, `read`, `write` and `readdir` all go through one resolver now, and programs and `passwd` come through it too, which is what lets either of them live on either filesystem. the ramdisk stays on purpose: it is a module handed over before any driver exists, so a kernel that needed a sata controller to find its own programs would be one a missing cable bricks. the vfs suite runs every check twice, once with the disk switched off, to keep that true.
+- **0.1.10** — a disk, and a filesystem on it that remembers. an ahci driver reaches the sata controller pci enumeration found: commands are built in ram -- a header, a table holding the frame the drive receives, a scatter list of physical addresses -- and one bit says go, after which the controller moves every byte itself. polled rather than interrupt-driven, with every wait bounded. on top of that, fat32: cluster chains, subdirectories, and long filenames assembled from the records hidden in front of the short ones (checked for completeness, since a half-assembled name is worse than none). writes go to existing files, past their end, and to files that did not exist yet. `ls`, `cat welcome.txt`, and `write /notes.txt something` -- then reboot and it is still there. the filesystem takes its disk as two functions, so the suite runs the real parser against a real image; but the formatter and the parser share an author, so the check that counts is mounting the image on linux.
 - **0.1.9** — the allocators, rebuilt. the pmm is a buddy allocator: free lists per block size, and blocks that put themselves back together when both halves come home, found by flipping one bit of a frame number. fixed-size structs (threads, address spaces) get slab caches, where each page carries a header naming its cache so a bare pointer can be traced back to where it came from -- and so a page whose objects have all returned goes back to the pmm rather than being held forever. `kmalloc` sits on top of those and no longer searches for anything: size classes below 1 KiB, whole pages above. `mem` gained the shape of free memory rather than just the amount of it, and `slabs` shows what each cache is holding. the cost, stated plainly, is that the buddy rounds up -- five pages costs eight -- which `mem` now counts honestly instead of hiding.
 - **0.1.8** — the pci bus, enumerated at boot and shown by `lspci`: vendor and device ids, the class in words, the base address registers saying where each device listens, and its interrupt line. the scan takes config space as a function rather than reaching for the ports, so the test builds its own machine -- a bridge with a device behind it, a multifunction part, empty slots between -- and checks the walk finds exactly what is there. the two things worth getting right are that a multifunction part only admits to its other functions in one bit of function zero, and that a bridge hides an entire bus that has to be walked through; the walk is depth-limited, because firmware that disagrees about bridges forming a tree should not be able to make the kernel recurse forever.
 - **0.1.7** — off the 8259 and onto the apics. acpi tables walked from the rsdp limine hands over, the io apic routing external interrupts, and the lapic's own timer in place of the pit -- calibrated against the pit first, because nobody documents what speed it runs at. the routing asks acpi where an irq really arrives rather than assuming the numbers everyone knows, since irq 0 is wired to line 2 on most real machines and a kernel that assumes gets no timer at all. both apics live above ram, so each needs a page mapped with caching off. the calibration polls pit channel 2 rather than counting its interrupts, because interrupts are off that early and the chip is about to be masked -- and the new timer is proved to deliver before the old one is given up. the io apic half is *not* automatic: a route that reads back correctly can still deliver nothing, and the symptom is a machine with no keyboard, so it lives behind an `ioapic` command you run from a shell that already works. and because the timer and the external interrupts now live on different chips, which one acknowledges an interrupt is two flags rather than one -- getting that wrong meant the 8259 never heard back, and stopped after a single keypress. lateral on its own and the readme says so; what it buys is a second cpu being possible. if the firmware describes no apics the 8259 keeps the job and nothing above notices. the parser is tested on malformed tables, because firmware bytes are the least trustworthy in the machine and the ones acted on earliest.

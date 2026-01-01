@@ -176,7 +176,8 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/addrspace bin/tests/process \
              bin/tests/syscall bin/tests/tty bin/tests/auth bin/tests/acpi bin/tests/pci \
              bin/tests/keyboard bin/tests/serial \
-             bin/tests/fat32 bin/tests/shell bin/tests/switch
+             bin/tests/fat32 bin/tests/vfs \
+             bin/tests/shell bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
 bin/tests/mm:       tests/test_mm.c       kernel/src/mm/pmm.c \
@@ -205,13 +206,16 @@ bin/tests/auth:     tests/test_auth.c     kernel/src/sched/auth.c \
 bin/tests/tty:      tests/test_tty.c      kernel/src/drivers/tty.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c
 bin/tests/syscall:  tests/test_syscall.c  kernel/src/cpu/syscall.c \
-                    kernel/src/sched/process.c kernel/src/lib/string.c
+                    kernel/src/sched/process.c kernel/src/lib/string.c \
+                    kernel/src/fs/vfs.c
 bin/tests/elf:      tests/test_elf.c      kernel/src/fs/elf.c \
                     kernel/src/lib/string.c
 bin/tests/ramdisk:  tests/test_ramdisk.c  kernel/src/fs/ramdisk.c \
                     kernel/src/lib/string.c
 bin/tests/fat32:    tests/test_fat32.c    kernel/src/fs/fat32.c \
                     kernel/src/lib/string.c
+bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
+                    kernel/src/fs/ramdisk.c kernel/src/lib/string.c
 bin/tests/gdt:      tests/test_gdt.c      kernel/src/cpu/gdt.c
 bin/tests/gdt:      SRCS = tests/test_gdt.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
@@ -220,11 +224,11 @@ bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
                     kernel/src/drivers/input.c
 bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c \
                     kernel/src/fs/ramdisk.c kernel/src/sched/auth.c \
-                    kernel/src/drivers/pci.c \
+                    kernel/src/drivers/pci.c kernel/src/fs/vfs.c \
                     kernel/src/shell/shell.c kernel/src/version.h
 bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c \
                            kernel/src/fs/ramdisk.c kernel/src/sched/auth.c \
-                           kernel/src/drivers/pci.c
+                           kernel/src/drivers/pci.c kernel/src/fs/vfs.c
 
 # SRCS overrides what gets compiled, for tests that #include a kernel
 # .c file directly -- that file still belongs in the prerequisites so

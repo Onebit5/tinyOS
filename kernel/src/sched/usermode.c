@@ -5,7 +5,7 @@
 #include "drivers/input.h"
 #include "drivers/tty.h"
 #include "fs/elf.h"
-#include "fs/ramdisk.h"
+#include "fs/vfs.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "mm/addrspace.h"
@@ -15,7 +15,7 @@
 #include "sched/process.h"
 #include "drivers/pit.h"
 
-const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
+const char *const USER_RUN_NO_SUCH_FILE = "no such file";
 
 /* what a user thread needs to know before it stops being a kernel one.
  * one per program, freed by the thread that reads it -- a static would
@@ -128,14 +128,20 @@ int user_spawn(const char *path, int argc, const char *const argv[],
                int parent, int uid, bool announce, const char **error) {
     reap_abandoned();
 
-    struct ramdisk_file f;
-    if (!ramdisk_open(path, &f)) {
+    /* a program off the ramdisk is already in memory and is used where
+     * it lies; one off the disk has to be read in first, and `owned`
+     * says which happened so it can be let go of afterwards */
+    const void *image = NULL;
+    uint64_t image_size = 0;
+    bool owned = false;
+    if (!vfs_slurp(path, &image, &image_size, &owned)) {
         *error = USER_RUN_NO_SUCH_FILE;
         return 0;
     }
 
     const char *why = NULL;
-    if (!elf_is_loadable(f.data, f.size, &why)) {
+    if (!elf_is_loadable(image, image_size, &why)) {
+        vfs_release(image, owned);
         *error = why;
         return 0;
     }
@@ -144,11 +150,17 @@ int user_spawn(const char *path, int argc, const char *const argv[],
      * and never meet, which is the whole point of this milestone */
     struct addrspace *space = addrspace_create(vmm_kernel_pml4());
     if (space == NULL) {
+        vfs_release(image, owned);
         *error = "no memory for an address space";
         return 0;
     }
 
-    struct elf_load_result loaded = elf_load(f.data, f.size, space->pml4);
+    struct elf_load_result loaded = elf_load(image, image_size, space->pml4);
+
+    /* elf_load has copied every segment into the new address space, so
+     * whatever we read the program out of is nobody's business now */
+    vfs_release(image, owned);
+
     if (!loaded.ok) {
         addrspace_destroy(space);
         *error = loaded.error;

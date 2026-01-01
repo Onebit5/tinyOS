@@ -99,6 +99,7 @@ bool ramdisk_open(const char *name, struct ramdisk_file *out) {
     }
     return false;
 }
+bool ramdisk_present(void) { return true; }
 bool ramdisk_stat(size_t i, struct ramdisk_file *out) {
     if (i >= 4) return false;
     *out = rd[i];
@@ -115,14 +116,13 @@ static const char disk_text[] = "on the disk\n";
 static int disk_lookups, disk_creates;
 static bool disk_is_ready = true;
 
-bool disk_owns_path(const char *path) {
-    return strncmp(path, "/disk", 5) == 0
-        && (path[5] == '\0' || path[5] == '/');
-}
 bool disk_ready(void) { return disk_is_ready; }
+const char *disk_model(void) { return "STUB"; }
+void *kmalloc(size_t n) { return malloc(n); }
+void kfree(void *p) { free(p); }
 bool disk_lookup(const char *path, struct disk_entry *out) {
     disk_lookups++;
-    if (!disk_is_ready || strcmp(path, "/disk/hello.txt") != 0) {
+    if (!disk_is_ready || strcmp(path, "/hello.txt") != 0) {
         return false;
     }
     memset(out, 0, sizeof *out);
@@ -133,7 +133,7 @@ bool disk_lookup(const char *path, struct disk_entry *out) {
     return true;
 }
 bool disk_readdir(const char *path, size_t index, struct disk_entry *out) {
-    if (!disk_is_ready || strcmp(path, "/disk") != 0 || index > 0) {
+    if (!disk_is_ready || strcmp(path, "/") != 0 || index > 0) {
         return false;
     }
     memset(out, 0, sizeof *out);
@@ -210,6 +210,13 @@ static int64_t call(uint64_t nr, uint64_t a0, uint64_t a1) {
 static int64_t call3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     out_reset();
     return syscall_dispatch(nr, a0, a1, a2, 0, 0);
+}
+
+/* readdir takes a path in the last two, so it needs all five */
+static int64_t call5(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
+                     uint64_t a3, uint64_t a4) {
+    out_reset();
+    return syscall_dispatch(nr, a0, a1, a2, a3, a4);
 }
 
 /* read and write take a descriptor first now, the way they do
@@ -431,28 +438,48 @@ int main(void) {
 
     /* ---- reading a directory ----
      * `ls` was the only command that needed something new to leave the
-     * kernel: `open` can only answer about a name you already know */
+     * kernel: `open` can only answer about a name you already know.
+     * with one namespace it names a directory, and no path means the
+     * root -- which is the disk, plus the mounts standing on it */
     user_extra = (uint64_t)sink;
     memset(sink, 0, sizeof sink);
-    CHECK(call3(SYS_READDIR, 0, (uint64_t)sink, sizeof sink) == 8,
-          "readdir gives the first name");
-    CHECK(strcmp(sink, "motd.txt") == 0,
-          "with the leading ./ stripped, so it is a path open would take");
+    CHECK(call3(SYS_READDIR, 0, (uint64_t)sink, sizeof sink) == 9,
+          "readdir with no path lists the root");
+    CHECK(strcmp(sink, "hello.txt") == 0, "starting with what is on the disk");
 
-    CHECK(call3(SYS_READDIR, 2, (uint64_t)sink, sizeof sink) == 7,
-          "and later ones by index");
-    CHECK(strcmp(sink, "bin/cat") == 0, "including nested paths");
+    /* past the disk's own entries, /boot is standing there, and it has
+     * to come back marked as somewhere you can descend into */
+    CHECK(call3(SYS_READDIR, 1, (uint64_t)sink, sizeof sink) == 5,
+          "and then the mount point");
+    CHECK(strcmp(sink, "boot/") == 0,
+          "with a trailing slash, since it is a directory");
 
     CHECK(call3(SYS_READDIR, 99, (uint64_t)sink, sizeof sink) == -1,
           "past the end says so rather than inventing a name");
     CHECK(call3(SYS_READDIR, 0, kernel_page, 64) == -1,
           "and a buffer the caller does not own is refused");
 
+    /* naming /boot reaches the ramdisk, whose names are paths that
+     * `open` would take, with tar's leading ./ stripped off */
+    strcpy(page, "/boot");
+    user_extra = (uint64_t)sink;
+    CHECK(call5(SYS_READDIR, 0, (uint64_t)sink, sizeof sink,
+                (uint64_t)page, 5) == 8,
+          "and /boot lists the ramdisk");
+    CHECK(strcmp(sink, "motd.txt") == 0, "with the leading ./ stripped");
+
+    /* index 1, not 2: tar's own directory record for ./bin/ is skipped,
+     * since a name with nothing behind it is no use to anyone */
+    CHECK(call5(SYS_READDIR, 1, (uint64_t)sink, sizeof sink,
+                (uint64_t)page, 5) == 7, "later ones by index");
+    CHECK(strcmp(sink, "bin/cat") == 0, "including nested paths");
+
     /* a name longer than the buffer is truncated, not written past */
     memset(sink, 0xaa, sizeof sink);
-    CHECK(call3(SYS_READDIR, 0, (uint64_t)sink, 4) == 3,
+    CHECK(call5(SYS_READDIR, 0, (uint64_t)sink, 4, (uint64_t)page, 5) == 3,
           "a short buffer takes what fits");
     CHECK(strcmp(sink, "mot") == 0, "terminated, with nothing beyond it");
+    strcpy(page, "motd.txt");
 
     /* ---- exit ---- */
     if (setjmp(jb) == 0) {

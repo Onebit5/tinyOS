@@ -22,6 +22,7 @@
 #include "mm/vmm.h"
 #include "fs/ramdisk.h"
 #include "fs/disk.h"
+#include "fs/vfs.h"
 #include "sched/auth.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
@@ -122,7 +123,9 @@ static void memory_selftest(void) {
 }
 
 /* what the user actually sees at boot: the name, the contract, and
- * whatever welcome.txt has to say. everything the drivers had to report
+ * whatever /boot/welcome.txt has to say -- named absolutely on purpose,
+ * so that what the machine says about itself at boot cannot be changed
+ * by whatever happens to be sitting on the data disk. everything the drivers had to report
  * went to serial and is still there under `dmesg` */
 static void greet(void) {
     console_clear();
@@ -239,13 +242,13 @@ void kmain(void) {
     if (disk_mount()) {
         uint64_t used = 0, total = 0;
         disk_usage(&used, &total);
-        kprintf("disk       : %s, %lu MiB, fat32 \"%s\" mounted at %s\n",
-                disk_model(), disk_bytes() / (1024 * 1024),
-                disk_label(), DISK_PREFIX);
-        kprintf("             %lu KiB used of %lu MiB\n",
-                used / 1024, total / (1024 * 1024));
+        kprintf("disk       : %s, %lu MiB, fat32 \"%s\" mounted at /\n",
+                disk_model(), disk_bytes() / (1024 * 1024), disk_label());
+        kprintf("             %lu KiB used of %lu MiB, ramdisk at %s\n",
+                used / 1024, total / (1024 * 1024), VFS_BOOT);
     } else {
-        kprintf("disk       : none found. the ramdisk is all there is\n");
+        kprintf("disk       : none found. %s is all there is, "
+                "which is enough\n", VFS_BOOT);
     }
 
     ramdisk_init();
