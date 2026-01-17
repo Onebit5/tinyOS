@@ -59,10 +59,10 @@ const struct pci_device *pci_at(size_t index);
  * vague to be useful ("mass storage") so the subclass is folded in */
 const char *pci_class_name(uint8_t class_code, uint8_t subclass);
 
-/* who made it, if we happen to know */
+/* who made it, if I happen to know */
 const char *pci_vendor_name(uint16_t vendor);
 
-/* and what they called it. NULL when we have never heard of it, which
+/* and what they called it. NULL when I have never heard of it, which
  * is most of the time and is not a problem -- the class still says
  * what it is for */
 const char *pci_device_name(uint16_t vendor, uint16_t device);

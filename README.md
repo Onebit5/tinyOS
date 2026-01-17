@@ -2,15 +2,15 @@
 
 ![ci](https://github.com/USERNAME/tinyOS/actions/workflows/ci.yml/badge.svg)
 
-a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https://github.com/limine-bootloader/limine).
+a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of its own.
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.11** (**one namespace.** the disk becomes the root and the ramdisk moves to `/boot`, where it stays -- because it is what makes the machine work when the disk does not)
+**version: 0.1.12** (**philemon.** my own bootloader, and the only one -- named for the one who grants the power and then steps back, which is the whole job description)
 
 ## what it does
 
-- [x] boot into 64-bit long mode via limine
+- [x] boot into 64-bit long mode
 - [x] serial (com1) logging, and serial input too -- the shell answers either way
 - [x] framebuffer console with its own font rendering
 - [x] gdt/idt, real exception dumps instead of silent triple faults
@@ -18,10 +18,10 @@ im building this to actually understand what happens between "power button" and 
 - [x] physical page allocator + kmalloc heap on top
 - [x] pit timer + preemptive round-robin scheduler with kernel threads
 - [x] an interactive shell with line editing, history and tab completion
-- [x] our own page tables: W^X, NX, guard pages under thread stacks
+- [x] my own page tables: W^X, NX, guard pages under thread stacks
 - [x] a tss with an IST, so a stack overflow reports instead of rebooting
 - [x] symbolized backtraces on panic
-- [x] a read-only ramdisk, unpacked from a tar limine hands us at boot
+- [x] a read-only ramdisk, unpacked from a tar the loader hands me at boot
 - [x] ring 3, `syscall`/`sysret`, and an elf loader -- it runs programs
 - [x] an address space per program, reclaimed when it dies
 - [x] a process table: pids, parents, and exit codes that outlive the thread
@@ -35,10 +35,11 @@ im building this to actually understand what happens between "power button" and 
 - [x] a buddy page allocator, slab caches, and a heap that stopped searching
 - [x] a sata driver and fat32: files on a real disk, that survive a reboot
 - [x] one namespace over both, and a machine that boots with neither missing
+- [x] philemon: my own bootloader, and now the only one on the disk
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
-filesystem on a real disk and a bootloader of our own.
+filesystem on a real disk and a bootloader of my own.
 
 still a non-goal: networking, and being useful in any practical sense.
 
@@ -54,7 +55,7 @@ then:
 
 ```
 make        # just the kernel elf
-make iso    # bootable iso (fetches limine binaries on first run)
+make iso    # bootable iso (fetches the loader binaries on first run)
 make run    # boot it in qemu
 make test   # run the host test suites (no qemu needed, takes a second)
 make boottest   # boot the iso and drive the shell over serial
@@ -79,7 +80,7 @@ kernel/src/shell/     the velvet room terminal
 kernel/linker.ld      higher half layout + the section symbols the vmm maps by
 tests/                host test suites, run with `make test`
 tools/                font2c.py (bdf -> C array), boottest.sh
-limine.conf           bootloader config
+the loader.conf           bootloader config
 GNUmakefile
 ```
 
@@ -139,7 +140,7 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 
 `summon pixie` and `summon jack-frost` spawn real kernel threads that count in the background while you keep typing -- that is the whole scheduler demo in one command. they speak eight times and then depart, which also gives the reaper something to clean up (watch `ps` before and after). they print over the top of your prompt while they run, which looks messy and is entirely honest: three threads are sharing one console and nobody is arbitrating.
 
-cancelling them with ctrl+c is cooperative, not forceful -- we have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
+cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
 
@@ -156,7 +157,7 @@ call trace:
 
 the kernel carries its own symbol table, generated from `nm` output at build time by `tools/gensyms.py` and baked into a `.ksyms` section -- the same trick `tools/font2c.py` plays with the console font. lookup is a binary search for the last symbol at or below the address.
 
-there is an obvious chicken and egg here: the table records addresses, and linking the table in changes addresses. the way out is placement. `.ksyms` sits *after* `.text` in the linker script, so folding it in shifts `.data` around but cannot move a single function. that makes a plain two-pass build correct rather than something we have to iterate to a fixed point. and because "cannot" is doing a lot of work in that sentence, the build runs `gensyms.py --check` afterwards, which re-reads the finished binary and fails loudly if any symbol the table describes has moved.
+there is an obvious chicken and egg here: the table records addresses, and linking the table in changes addresses. the way out is placement. `.ksyms` sits *after* `.text` in the linker script, so folding it in shifts `.data` around but cannot move a single function. that makes a plain two-pass build correct rather than something I have to iterate to a fixed point. and because "cannot" is doing a lot of work in that sentence, the build runs `gensyms.py --check` afterwards, which re-reads the finished binary and fails loudly if any symbol the table describes has moved.
 
 the walker itself assumes frame pointers, so the kernel builds with `-fno-omit-frame-pointer`. it is normally called from a panic, which means nothing in it may fault -- a page fault inside the backtrace printer would bury the real bug under a second one. so every frame pointer is checked against the page tables with `vmm_translate` before being dereferenced, and the walk stops the moment the chain stops making sense (a caller's frame must be at a higher address, stacks growing down as they do).
 
@@ -176,9 +177,9 @@ three things about this were easy to get wrong and interesting to get right:
 
 **ring 3 gets every register back but three.** the syscall instruction destroys rcx and r11, and rax carries the result -- everything else the user compiled against the assumption that it survives. so the entry stub has to preserve the caller-saved registers itself, because the C dispatcher is free to clobber them and the argument shuffle certainly does. miss that and kernel values leak into a program that will use them as pointers, which surfaces as a page fault in userspace at an address that means nothing to anyone. (rbx, rbp and r12-r15 need no saving there: `syscall_dispatch` is an ordinary C function and the abi makes those its problem.)
 
-**`syscall` does not switch stacks.** it puts the return address in rcx, the flags in r11, loads cs and rip from MSRs, and that is all. you arrive in ring 0 *standing on the user's stack*, which is as alarming as it sounds. the entry stub's first job is to get off it. it can do that with a global only because `SFMASK` clears IF, so we arrive with interrupts off and nothing can preempt us in the three instructions before the user's rsp is safely parked on a kernel stack.
+**`syscall` does not switch stacks.** it puts the return address in rcx, the flags in r11, loads cs and rip from MSRs, and that is all. you arrive in ring 0 *standing on the user's stack*, which is as alarming as it sounds. the entry stub's first job is to get off it. it can do that with a global only because `SFMASK` clears IF, so I arrive with interrupts off and nothing can preempt me in the three instructions before the user's rsp is safely parked on a kernel stack.
 
-**the gdt layout is not ours to choose.** `sysret` computes `CS = STAR[63:48] + 16` and `SS = STAR[63:48] + 8`, so user data has to sit eight bytes below user code or returning to ring 3 lands nowhere. there is a test asserting that relationship, because it is the sort of thing a tidy-up would quietly break.
+**the gdt layout is not mine to choose.** `sysret` computes `CS = STAR[63:48] + 16` and `SS = STAR[63:48] + 8`, so user data has to sit eight bytes below user code or returning to ring 3 lands nowhere. there is a test asserting that relationship, because it is the sort of thing a tidy-up would quietly break.
 
 **the user bit is ANDed down the whole chain.** a leaf marked `PTE_USER` under intermediate tables that are not is unreachable from ring 3, and it looks completely correct in any dump you care to print. the vmm now grants the bit at every level on the way to a user mapping, and widens tables that were built for a kernel mapping and later find themselves on the path to a user one. kernel leaves stay supervisor-only regardless. that one has a test that walks all four levels by hand.
 
@@ -200,6 +201,67 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### philemon
+
+there was a borrowed bootloader here until 0.1.12. writing one and then
+booting with somebody else's is not much of a bootloader, so limine is
+gone -- and so are the iso, the uefi path, and the boot protocol that
+came with it. `make run` boots mine now, because there is nothing else
+to boot.
+
+he is named for the one who grants the power and then steps back. he
+does not fight anything and he is not there for the rest of it. that is
+the whole job description of a bootloader, and it is more than most of
+them get.
+
+**he is one program.** the only reason there is a line across the middle
+of the file is that the bios reads exactly one sector -- 512 bytes,
+ending in `0x55 0xaa` -- drops it at `0x7c00` and jumps to it. that is
+the entire contract and it is not negotiable. so the first 512 bytes do
+nothing but pull in the rest of the same file, to the address
+immediately after themselves, and carry on. after that the line is
+invisible: it is one image at one address, and nothing below cares where
+the sector ended.
+
+everything the bios can be asked, he asks while it can still answer,
+because long mode stops the answering:
+
+- **a20.** the twenty-first address line is still disabled at power on so
+  a machine from 1981 could wrap around at one megabyte. it has been
+  forty years.
+- **unreal mode.** the bios cannot write above one megabyte and the
+  kernel does not fit below it. so: into protected mode for exactly long
+  enough to load one segment register with a descriptor whose limit is
+  the whole address space, and back out again -- returning to real mode
+  does not reload the hidden half of a segment register, so the wide
+  limit survives and 32-bit offsets keep working. it goes in `fs`, not
+  `es`, and that detail is the difference between this working and not:
+  coming back to real mode leaves a segment register alone, but *writing*
+  to one reloads it with real-mode rules, and every bios call is entitled
+  to write to `es`.
+- **page tables**, because long mode will not start without them. two
+  megabyte pages, three windows: everything identity mapped so the loader
+  keeps working, the same memory again in the higher half where the
+  kernel expects a direct map, and the kernel's own window at the top.
+
+**the 64-bit half is C**, and that is the point of the split. once long
+mode runs there is no reason to stay in assembly, and the work left --
+parsing an elf, honouring the distances a linker chose between segments,
+zeroing bss, carving everything already spent out of the memory map --
+is exacting work where being wrong by eight bytes is a black screen. all
+of it compiles for the host and is tested.
+
+**the handoff is one struct.** the kernel is entered the way any function
+is called: a pointer in `rdi`. there is no protocol to speak of and
+nothing to scan for. everything the kernel could only have learned before
+long mode -- the memory map, where it was loaded, the direct map offset,
+the ramdisk, the framebuffer, the acpi tables -- is in there.
+
+the assembly cannot be tested on a machine with no qemu, so it says what
+it is doing at every step, over the serial port, from the first
+instruction of the boot sector onwards. a bootloader that fails silently
+is one nobody can fix.
 
 ### one namespace, two filesystems
 
@@ -241,7 +303,7 @@ the data disk.
 
 ### a disk, and a filesystem on it
 
-everything before this forgot. the ramdisk is a tar file limine hands
+everything before this forgot. the ramdisk is a tar file the loader hands
 over at boot -- read-only, in memory, gone when the power goes. this is
 the other thing.
 
@@ -255,7 +317,7 @@ bit is set to say slot zero is ready, and the controller does the whole
 transfer itself and clears the bit when it is done. the cpu never
 touches the bytes.
 
-we poll rather than take an interrupt, and every wait is bounded --
+I poll rather than take an interrupt, and every wait is bounded --
 a controller that never answers must not be able to hang the boot, which
 is a lesson this project learned the hard way in 0.1.7.
 
@@ -276,7 +338,7 @@ records placed *before* the real one, thirteen utf-16 characters at a
 time, in three runs at odd offsets because those were the only bytes
 left unused. a checksum of the short name ties them together, so a tool
 that only understands 8.3 can delete a file without leaving its long
-half behind. we read those, and check every piece arrived before
+half behind. I read those, and check every piece arrived before
 trusting the result -- a name assembled from an incomplete set would be
 silently truncated, which is a worse answer than falling back.
 
@@ -464,7 +526,7 @@ that also retired the oldest caveat in this file. `kill` used to refuse anything
 
 ### one address space each
 
-every program has its own pml4. only the lower half differs -- the upper half, where the kernel and the direct map live, is shared *by reference*, so all of it stays reachable no matter whose tables are loaded. it has to be shared: the stack we are standing on when we switch cr3 is up there.
+every program has its own pml4. only the lower half differs -- the upper half, where the kernel and the direct map live, is shared *by reference*, so all of it stays reachable no matter whose tables are loaded. it has to be shared: the stack I am standing on when I switch cr3 is up there.
 
 sharing by copying the top-level entries means a change the kernel makes later (splitting a huge page for a guard page, say) is seen by every space at once. that only works because the kernel maps everything it will ever need before the first program exists and never adds a new top-level entry afterwards.
 
@@ -483,15 +545,15 @@ what is missing, kept here where it stays uncomfortable:
 
 ## the ramdisk
 
-there is a filesystem, in the sense that a filing cabinet is furniture. `ramdisk/` is tarred up at build time, limine loads it as a module, and the kernel walks the 512-byte ustar headers to find files. no directories, no writing, and no allocation at all -- `cat` hands you a pointer straight into the archive.
+there is a filesystem, in the sense that a filing cabinet is furniture. `ramdisk/` is tarred up at build time, the loader loads it as a module, and the kernel walks the 512-byte ustar headers to find files. no directories, no writing, and no allocation at all -- `cat` hands you a pointer straight into the archive.
 
-one ordering trap: the module bytes are safe, because limine types that memory "kernel and modules" and we never reclaim it. the *response structure* describing where they are is in bootloader-reclaimable memory, so `ramdisk_init()` has to copy the address out during early boot, before the shell hands that memory back.
+one ordering trap: the module bytes are safe, because the loader types that memory "kernel and modules" and I never reclaim it. the *response structure* describing where they are is in bootloader-reclaimable memory, so `ramdisk_init()` has to copy the address out during early boot, before the shell hands that memory back.
 
 `ls` skips the directory entries GNU tar leaves in the archive, and the parser stops rather than wandering when it meets a header without the ustar magic or a size field that would walk it off the end of the buffer. both of those have tests.
 
 ## testing
 
-most of this kernel can be tested without booting anything, because the parts that think are deliberately kept separate from the parts that touch hardware. `pmm_init_from_map()` takes a memory map rather than asking limine for one, `keyboard_feed()` takes a scancode rather than reading port 0x60, `serial_feed()` takes a byte, `run_line()` takes a string. so the test suites compile the *real* kernel sources as ordinary linux programs and poke at them:
+most of this kernel can be tested without booting anything, because the parts that think are deliberately kept separate from the parts that touch hardware. `pmm_init_from_map()` takes a memory map rather than asking the loader for one, `keyboard_feed()` takes a scancode rather than reading port 0x60, `serial_feed()` takes a byte, `run_line()` takes a string. so the test suites compile the *real* kernel sources as ordinary linux programs and poke at them:
 
 ```
 $ make test
@@ -510,6 +572,7 @@ $ make test
   slab       ok        object caches, and pages that go back when empty
   fat32      ok        a real image: long names, subdirectories, writes
   vfs        ok        resolution, shadowing, and all of it with no disk
+  philemon   ok        the loader's elf parsing and its memory map
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -526,7 +589,7 @@ the vmm suite is worth a word too: it hands `vmm.c` a malloc'd arena and calls o
 
 the switch one is the interesting one: it runs the actual `switch.asm`, fabricates a stack the same way `thread_create()` does, switches into it, resumes it, and checks all six callee-saved registers came home. that code is miserable to debug inside qemu and trivial to debug when a mistake is just a segfault.
 
-`make test` also runs `tools/checkfmt.py`, which exists because of a bug that cost an afternoon. gcc's `format(printf)` attribute checks our format strings against *real* printf, so it happily accepts any flag the C standard allows -- including ones our little formatter never implemented. a `%-7s` slipped through, got printed literally, and every argument after it was read into the wrong slot; the kernel ended up printing its own machine code as a string and then page faulting a long way from the mistake. the checker compares every `kprintf`/`panic` format string against what `lib/kprintf.c` can actually do, and fails the build otherwise.
+`make test` also runs `tools/checkfmt.py`, which exists because of a bug that cost an afternoon. gcc's `format(printf)` attribute checks my format strings against *real* printf, so it happily accepts any flag the C standard allows -- including ones my little formatter never implemented. a `%-7s` slipped through, got printed literally, and every argument after it was read into the wrong slot; the kernel ended up printing its own machine code as a string and then page faulting a long way from the mistake. the checker compares every `kprintf`/`panic` format string against what `lib/kprintf.c` can actually do, and fails the build otherwise.
 
 host builds define `TINYOS_HOSTED`, which turns `irq_save`/`irq_restore` into no-ops -- userspace gets shot for saying `cli`.
 
@@ -534,27 +597,27 @@ then there is `make boottest`, which builds the iso, boots it headless, and **ty
 
 ## notes on memory
 
-the kernel builds its own four-level page tables at boot and moves onto them. the direct map (limine's hhdm, rebuilt as ours) covers all physical memory with 2MiB pages so the pmm can hand out any frame and we can touch it immediately, and the kernel image is mapped a section at a time with only the rights each one needs:
+the kernel builds its own four-level page tables at boot and moves onto them. the direct map (the loader's hhdm, rebuilt as mine) covers all physical memory with 2MiB pages so the pmm can hand out any frame and I can touch it immediately, and the kernel image is mapped a section at a time with only the rights each one needs:
 
 ```
   hhdm    0xffff800000000000 ..  rw-   all of physical memory, 2MiB pages
-  limine  0xffffffff80000000 ..  r--   the request markers
+  the loader  0xffffffff80000000 ..  r--   the request markers
   text    0xffffffff80001000 ..  r-x   executable, not writable
   rodata  0xffffffff80008000 ..  r--   neither
   data    0xffffffff8000c000 ..  rw-   writable, never executable
 ```
 
-that split is only worth anything with two bits set that are easy to forget: `EFER.NXE`, without which the NX bit is a *reserved bit* and faults on every access rather than doing nothing (so whether we set it is a runtime decision, never a constant), and `CR0.WP`, without which ring 0 may scribble on read-only pages regardless of what the tables say.
+that split is only worth anything with two bits set that are easy to forget: `EFER.NXE`, without which the NX bit is a *reserved bit* and faults on every access rather than doing nothing (so whether I set it is a runtime decision, never a constant), and `CR0.WP`, without which ring 0 may scribble on read-only pages regardless of what the tables say.
 
-switching cr3 is the one operation in this kernel with no diagnostics when it goes wrong -- a bad entry is a triple fault, no message, no register dump, no debugger. so `vmm_init()` walks its own tables in software first and refuses to load cr3 unless the kernel, the direct map, the framebuffer, the page tables themselves and **the stack we are standing on** all resolve to the addresses they should, with the permissions they should. panicking with an explanation beats rebooting in silence.
+switching cr3 is the one operation in this kernel with no diagnostics when it goes wrong -- a bad entry is a triple fault, no message, no register dump, no debugger. so `vmm_init()` walks its own tables in software first and refuses to load cr3 unless the kernel, the direct map, the framebuffer, the page tables themselves and **the stack I am standing on** all resolve to the addresses they should, with the permissions they should. panicking with an explanation beats rebooting in silence.
 
-### giving limine its memory back
+### giving the loader its memory back
 
-the bootloader's page tables, its structures and its stack all sit in memory it marks reclaimable -- about a megabyte. taking it needs three things to be true first: we must be on our own page tables (done at boot), we must have copied anything we still care about out of limine's structures, and **nothing may still be standing on limine's stack**.
+the bootloader's page tables, its structures and its stack all sit in memory it marks reclaimable -- about a megabyte. taking it needs three things to be true first: I must be on my own page tables (done at boot), I must have copied anything I still care about out of the loader's structures, and **nothing may still be standing on the loader's stack**.
 
-that last one is why the shell is its own thread now. `kmain` runs on the stack limine handed it, so it creates the shell on a pmm-allocated stack and then genuinely exits -- the boot thread dies and the scheduler moves on, and only then is that memory free. the shell reclaims it as its first act. this also meant teaching the reaper that the boot thread is a global rather than a `kmalloc` allocation, so it unlinks it without trying to free it.
+that last one is why the shell is its own thread now. `kmain` runs on the stack the loader handed it, so it creates the shell on a pmm-allocated stack and then genuinely exits -- the boot thread dies and the scheduler moves on, and only then is that memory free. the shell reclaims it as its first act. this also meant teaching the reaper that the boot thread is a global rather than a `kmalloc` allocation, so it unlinks it without trying to free it.
 
-the sharp edge is that limine's *responses* live in that memory too, so every `*_request.response` becomes a dangling pointer the moment the reclaim returns. everything that needs them reads them during early boot, long before.
+the sharp edge is that the loader's *responses* live in that memory too, so every `*_request.response` becomes a dangling pointer the moment the reclaim returns. everything that needs them reads them during early boot, long before.
 
 one thing that is easy to get wrong: the reclaimable regions sit *above* the last usable one on a typical pc, so a bitmap sized only to cover usable ram has no bits for those frames and reclaiming them silently does nothing at all. the bitmap covers both.
 
@@ -572,7 +635,7 @@ every thread stack is allocated one page larger than it needs, and that bottom p
 
 punching a 4KiB hole into a 2MiB direct-map page means splitting that page into 512 small ones with identical flags first, which `vmm_unmap_page()` does on demand. the stack has to be handed back the same way round: the guard page gets re-mapped before the frames go back to the pmm, because whoever gets them next will expect to be able to reach them.
 
-the pmm and the heap are both written so their guts can be tested on a normal linux host: `pmm_init_from_map()` takes a memory map + hhdm offset instead of reaching for limine, so a test can fabricate one over a malloc'd arena. same trick as `keyboard_feed()`. host builds define `TINYOS_HOSTED`, which turns `irq_save()`/`irq_restore()` into no-ops (userspace isnt allowed to `cli`, and has nothing to lock out anyway).
+the pmm and the heap are both written so their guts can be tested on a normal linux host: `pmm_init_from_map()` takes a memory map + hhdm offset instead of reaching for the loader, so a test can fabricate one over a malloc'd arena. same trick as `keyboard_feed()`. host builds define `TINYOS_HOSTED`, which turns `irq_save()`/`irq_restore()` into no-ops (userspace isnt allowed to `cli`, and has nothing to lock out anyway).
 
 ## notes on threads
 
@@ -586,32 +649,33 @@ threads that need to wait for something other than the clock park on a `waitq`. 
 
 ## changelog
 
+- **0.1.12** — philemon, my own bootloader, and now the only one. limine is gone, along with the iso, the uefi path and the protocol that came with it: writing a bootloader and then booting with somebody else's is not much of a bootloader. one file, whose first 512 bytes are the only part the bios will read and which do nothing but pull in the rest of the same file; a20 and unreal mode so the kernel can be read in above a megabyte; page tables and long mode; and a 64-bit half in C that parses the elf and builds the memory map. the kernel is handed one struct in rdi and knows nothing about anybody's boot protocol including mine -- `limine.h` is deleted and there is not one request structure left in it. the C half is host-tested, and writing those tests found two real bugs: a carve loop walking unsorted regions that handed the ramdisk's memory away as free, and boot-table offsets read as though the struct had 16-byte fields. a third was found by reading: the video mode code loaded `fs` in real mode, which quietly undid unreal mode and left the page tables being written somewhere else entirely.
 - **0.1.11** — one namespace instead of two filesystems side by side. the disk is the root; the ramdisk moved to `/boot`. a bare name is looked for on the disk first and the ramdisk second, so a disk may supply its own copy of anything while a machine without one falls through to what it booted with. `mount` shows the table, and `cat welcome.txt` versus `cat /boot/welcome.txt` demonstrates the order in one line. the syscall layer lost its prefix tests and its two branches -- `open`, `read`, `write` and `readdir` all go through one resolver now, and programs and `passwd` come through it too, which is what lets either of them live on either filesystem. the ramdisk stays on purpose: it is a module handed over before any driver exists, so a kernel that needed a sata controller to find its own programs would be one a missing cable bricks. the vfs suite runs every check twice, once with the disk switched off, to keep that true.
 - **0.1.10** — a disk, and a filesystem on it that remembers. an ahci driver reaches the sata controller pci enumeration found: commands are built in ram -- a header, a table holding the frame the drive receives, a scatter list of physical addresses -- and one bit says go, after which the controller moves every byte itself. polled rather than interrupt-driven, with every wait bounded. on top of that, fat32: cluster chains, subdirectories, and long filenames assembled from the records hidden in front of the short ones (checked for completeness, since a half-assembled name is worse than none). writes go to existing files, past their end, and to files that did not exist yet. `ls`, `cat welcome.txt`, and `write /notes.txt something` -- then reboot and it is still there. the filesystem takes its disk as two functions, so the suite runs the real parser against a real image; but the formatter and the parser share an author, so the check that counts is mounting the image on linux.
 - **0.1.9** — the allocators, rebuilt. the pmm is a buddy allocator: free lists per block size, and blocks that put themselves back together when both halves come home, found by flipping one bit of a frame number. fixed-size structs (threads, address spaces) get slab caches, where each page carries a header naming its cache so a bare pointer can be traced back to where it came from -- and so a page whose objects have all returned goes back to the pmm rather than being held forever. `kmalloc` sits on top of those and no longer searches for anything: size classes below 1 KiB, whole pages above. `mem` gained the shape of free memory rather than just the amount of it, and `slabs` shows what each cache is holding. the cost, stated plainly, is that the buddy rounds up -- five pages costs eight -- which `mem` now counts honestly instead of hiding.
 - **0.1.8** — the pci bus, enumerated at boot and shown by `lspci`: vendor and device ids, the class in words, the base address registers saying where each device listens, and its interrupt line. the scan takes config space as a function rather than reaching for the ports, so the test builds its own machine -- a bridge with a device behind it, a multifunction part, empty slots between -- and checks the walk finds exactly what is there. the two things worth getting right are that a multifunction part only admits to its other functions in one bit of function zero, and that a bridge hides an entire bus that has to be walked through; the walk is depth-limited, because firmware that disagrees about bridges forming a tree should not be able to make the kernel recurse forever.
-- **0.1.7** — off the 8259 and onto the apics. acpi tables walked from the rsdp limine hands over, the io apic routing external interrupts, and the lapic's own timer in place of the pit -- calibrated against the pit first, because nobody documents what speed it runs at. the routing asks acpi where an irq really arrives rather than assuming the numbers everyone knows, since irq 0 is wired to line 2 on most real machines and a kernel that assumes gets no timer at all. both apics live above ram, so each needs a page mapped with caching off. the calibration polls pit channel 2 rather than counting its interrupts, because interrupts are off that early and the chip is about to be masked -- and the new timer is proved to deliver before the old one is given up. the io apic half is *not* automatic: a route that reads back correctly can still deliver nothing, and the symptom is a machine with no keyboard, so it lives behind an `ioapic` command you run from a shell that already works. and because the timer and the external interrupts now live on different chips, which one acknowledges an interrupt is two flags rather than one -- getting that wrong meant the 8259 never heard back, and stopped after a single keypress. lateral on its own and the readme says so; what it buys is a second cpu being possible. if the firmware describes no apics the 8259 keeps the job and nothing above notices. the parser is tested on malformed tables, because firmware bytes are the least trustworthy in the machine and the ones acted on earliest.
+- **0.1.7** — off the 8259 and onto the apics. acpi tables walked from the rsdp the loader hands over, the io apic routing external interrupts, and the lapic's own timer in place of the pit -- calibrated against the pit first, because nobody documents what speed it runs at. the routing asks acpi where an irq really arrives rather than assuming the numbers everyone knows, since irq 0 is wired to line 2 on most real machines and a kernel that assumes gets no timer at all. both apics live above ram, so each needs a page mapped with caching off. the calibration polls pit channel 2 rather than counting its interrupts, because interrupts are off that early and the chip is about to be masked -- and the new timer is proved to deliver before the old one is given up. the io apic half is *not* automatic: a route that reads back correctly can still deliver nothing, and the symptom is a machine with no keyboard, so it lives behind an `ioapic` command you run from a shell that already works. and because the timer and the external interrupts now live on different chips, which one acknowledges an interrupt is two flags rather than one -- getting that wrong meant the 8259 never heard back, and stopped after a single keypress. lateral on its own and the readme says so; what it buys is a second cpu being possible. if the firmware describes no apics the 8259 keeps the job and nothing above notices. the parser is tested on malformed tables, because firmware bytes are the least trustworthy in the machine and the ones acted on earliest.
 - **0.1.6** — the kernel measures itself. the timer tick charges itself to whoever was running, so `ps` grows a cpu column and the scheduler stops being theoretical -- a sampling measure rather than real accounting, and the README says so. the pmm remembers its peak, every syscall is counted as it is dispatched, and `top` redraws the lot twice a second until you press a key. also quieter: a program typed by name no longer narrates its pid and its departure, because you wanted the output rather than a commentary on it. `run` still does, since that is a demonstration, and a kill is always reported.
 - **0.1.5** — users. a login prompt reading accounts from `passwd` in the ramdisk, with the password not echoed; a uid on every process, inherited by children and unaskable-for by programs; and a check with real consequences -- `open` weighs the mode tar recorded against the caller's uid, so `velvet-room.txt` at 0600 is readable by `igor` and refused to `guest`. `whoami` exists twice on purpose: the builtin reads a variable the shell keeps, the program asks the kernel what uid it was given and cannot lie about the answer. the passwords are plaintext and the README says why that is the honest shape of this rather than a corner cut. the parser is tested mostly on malformed input, since a passwd file letting somebody in on a line it half understood is the worst thing it could do.
 - **0.1.4** — a toolbox outside the kernel. `cat`, `echo`, `uptime` and `ls` are programs in `ramdisk/bin` now, and typing one looks no different because the shell falls back to looking for a program of that name. what made it possible was arguments: the loader builds argv on the program's own stack -- strings, then pointers to them -- and hands argc and argv over in registers, with every store going through the direct map while every pointer written is the address the program will see. the exercise was meant to reveal which commands were secretly using kernel internals, and it did: `echo` needed only argv, `cat` and `uptime` needed nothing new, and `ls` needed `readdir`, because `open` can only answer about a name you already know. what stayed behind reads kernel state or acts on the machine, and could not have left.
 - **0.1.3** — the keyboard belongs to somebody. a foreground process owns the terminal while it runs, and the shell stops peeking at keys on its behalf -- which is what made a program reading the keyboard impossible until now. ctrl+c aimed at a program is delivered to it rather than acted on for it: it never becomes a character, the process finds it on its next syscall, and a read or a sleep comes back -1 so a sleeping program hears about it at once. pressing it twice stops asking. only the foreground process may read stdin, so a background one cannot take keys meant for somebody else. the tty also owns the line discipline -- echo, backspace, and ignoring arrows -- because a program never sees the keys go past and cannot echo them itself; without it you type into a void. `bin/ask` reads a line and greets you, which is a thing that could not have worked a version ago.
 - **0.1.2** — the syscall table doubles: `open`/`close` and a `read` that takes a descriptor, so a program can read a file instead of only being loaded from one; `getpid`; and `spawn`/`wait`, which let a program start another and hear how it went. descriptors live on the process, so they close when it does, and a bookmark into a read-only archive costs nothing to allocate or free. a process may only wait for its own children. `read`/`write` gained an fd argument, a breaking change to the user abi and the right shape. also fixes a regression 0.1.0 shipped: user pointers were validated against the kernel's page tables, which since per-process address spaces map none of a program's memory -- so every syscall taking a pointer silently returned -1 and programs printed nothing at all. refusals are logged now, a test asserts which page tables get consulted, and the boot test fails if any pointer is ever refused. two new programs: `bin/reader` opens a file and reads it in bites, `bin/parent` spawns `bin/fail` and passes on its 42.
 - **0.1.1** — processes. a program now has a pid, a parent and an exit code, kept in a table that outlives the thread that ran it -- which is the only way an exit code can survive, since the thread and its whole address space are gone the moment it dies. `run` reports how a program went; `ps` shows threads and processes as the different things they are. and the caveat that has been in this file since m6 is retired: threads carry a pointer back to the waitq they are parked on, so `kill` can take one off that queue before the reaper frees it, instead of refusing. `bin/fail` exists to exit 42 and prove the number gets home.
-- **0.1.0** — **programs are isolated.** each gets its own pml4, sharing only the kernel half, and by reference so the kernel stays reachable whichever tables are loaded -- it must, since the stack we switch on lives there. two copies of the same program now run at once at identical addresses without meeting. teardown walks the lower half and hands back the image, the stack and the page tables together, which retires the leak 0.0.17 shipped with. `run prog &` for background, `ps` showing which threads are ring 3 and how much memory each holds, and `bin/counter` as a second program that exists to be run twice. plus [ROADMAP.md](ROADMAP.md), which lays out the eleven steps of 0.1.x -- from exit codes and a wider syscall table up to a filesystem on a real disk and a bootloader of our own.
+- **0.1.0** — **programs are isolated.** each gets its own pml4, sharing only the kernel half, and by reference so the kernel stays reachable whichever tables are loaded -- it must, since the stack I switch on lives there. two copies of the same program now run at once at identical addresses without meeting. teardown walks the lower half and hands back the image, the stack and the page tables together, which retires the leak 0.0.17 shipped with. `run prog &` for background, `ps` showing which threads are ring 3 and how much memory each holds, and `bin/counter` as a second program that exists to be run twice. plus [ROADMAP.md](ROADMAP.md), which lays out the eleven steps of 0.1.x -- from exit codes and a wider syscall table up to a filesystem on a real disk and a bootloader of my own.
 - **0.0.17** — **it runs programs.** ring 3 via `iretq` into a fabricated frame, `syscall`/`sysret` with STAR/LSTAR/SFMASK, a static elf64 loader, per-thread kernel stacks tracked in the tss and for `syscall`, and `user/hello.c` -- a real program with no libc that prints and sleeps and exits, all through six syscalls. every pointer ring 3 hands the kernel is checked against the page tables before it is touched, mapped *and* user, so a program cannot make the kernel fault by lying -- and the refusals are tested harder than the successes, since they are the actual boundary. found a genuine bug on the way: intermediate page table entries never set `PTE_USER`, and since the cpu ANDs that bit down the whole chain, every user mapping would have been unreachable while looking perfectly correct in a dump. boot is quiet now -- the driver chatter goes to serial and `dmesg`, and the screen gets the banner and `welcome.txt`. tab completes filenames after any command that takes one (`cat`, `run`), fills in the longest shared prefix, and does nothing on an empty word *in the command position* -- listing every command is what `help` is for, but after `cat ` there is no such list to consult, so an empty word there is worth answering. `run` waits for its program like a foreground command should, with ctrl+c to stop it. also `cat` takes several files, unknown commands suggest the nearest match (and a bare filename points at the path it lives under), `ls` prints paths you can actually retype, and `ps` prints in id order.
-- **0.0.16** — files. `ramdisk/` becomes a ustar tar at build time, limine passes it as a module, and `ls`/`cat` read straight out of it with no copying. the parser is fed hand-built archives in the tests -- block-sized files, empty files, gnu tar's leading `./`, a header with no magic, a size field that lies -- and then the real archive the build produces, which is the one that catches what tar actually emits. also ctrl+l to clear without losing the line, and two commands that had to be persona-inspired: `arcana` for the version, rendered as the rank of a social link, and `persona`, a fastfetch that shows the machine's face along with what cpu it wears.
+- **0.0.16** — files. `ramdisk/` becomes a ustar tar at build time, the loader passes it as a module, and `ls`/`cat` read straight out of it with no copying. the parser is fed hand-built archives in the tests -- block-sized files, empty files, gnu tar's leading `./`, a header with no magic, a size field that lies -- and then the real archive the build produces, which is the one that catches what tar actually emits. also ctrl+l to clear without losing the line, and two commands that had to be persona-inspired: `arcana` for the version, rendered as the rank of a social link, and `persona`, a fastfetch that shows the machine's face along with what cpu it wears.
 - **0.0.15** — a real line editor. cursor movement and mid-line editing, ctrl+a/e/w/u/k, del, and tab completion. the enabling change was making the console's `\b` non-destructive like an actual terminal, which meant giving it a shadow buffer of the text on screen so the block cursor can sit on a character and put it back afterwards. new commands: `poweroff` (so you stop killing qemu), `date` off the cmos clock, `hexdump` that checks the page tables before reading, `kill`, `history` and `time`. the rtc's decoding is split from its io and tested -- bcd, the pm bit hiding in the top of the hour byte, and 12am being hour zero are each their own small trap.
-- **0.0.14** — symbolized backtraces. `tools/gensyms.py` turns the kernel's own `nm` output into a table baked into a `.ksyms` section, and panics, exception dumps and double faults all print a symbolized call chain. the section sits after `.text` so folding it in can never move a function, and the build verifies that rather than trusting it. found two things on the way: our `backtrace()` was colliding with glibc's in the host tests and being silently shadowed (now `kbacktrace`), and the test binaries had no prerequisite on the kernel sources they `#include`, so they were happily running against stale builds.
-- **0.0.13** — a tss at last, with an IST stack for the double fault vector. that turns stack overflow from a silent triple-fault reboot into a report naming the thread and its guard page, because the cpu can always find a good stack for that vector even when `rsp` is in the hole. and the pmm now reclaims limine's memory (~1 MiB): the shell moved onto its own pmm-backed thread so the boot thread can exit and stop standing on limine's stack, and the bitmap grew to cover the reclaimable regions, which sit above the last usable one and were previously off the end of the map entirely. new test suite for the tss descriptor encoding, which scatters a base address across two qwords and fails silently when you get it wrong.
+- **0.0.14** — symbolized backtraces. `tools/gensyms.py` turns the kernel's own `nm` output into a table baked into a `.ksyms` section, and panics, exception dumps and double faults all print a symbolized call chain. the section sits after `.text` so folding it in can never move a function, and the build verifies that rather than trusting it. found two things on the way: my `backtrace()` was colliding with glibc's in the host tests and being silently shadowed (now `kbacktrace`), and the test binaries had no prerequisite on the kernel sources they `#include`, so they were happily running against stale builds.
+- **0.0.13** — a tss at last, with an IST stack for the double fault vector. that turns stack overflow from a silent triple-fault reboot into a report naming the thread and its guard page, because the cpu can always find a good stack for that vector even when `rsp` is in the hole. and the pmm now reclaims the loader's memory (~1 MiB): the shell moved onto its own pmm-backed thread so the boot thread can exit and stop standing on the loader's stack, and the bitmap grew to cover the reclaimable regions, which sit above the last usable one and were previously off the end of the map entirely. new test suite for the tss descriptor encoding, which scatters a base address across two qwords and fails silently when you get it wrong.
 - **0.0.12** — kprintf learned the `-` (left justify) flag, which it had been claiming to support by virtue of gcc's format checking without ever implementing. the vmm's boot log used `%-7s`, so the specifier printed literally, every following argument landed in the wrong slot, and the kernel read `__data_end` as a string and page faulted. added `tools/checkfmt.py` to `make test` so no format string can outrun the formatter again.
-- **0.0.11** — our own page tables. four levels built at boot, direct map in 2MiB pages, kernel mapped per-section with W^X, NX enabled properly via EFER (and treated as a runtime capability, since a hardcoded NX bit faults on a cpu that lacks it), CR0.WP set so read-only means read-only even in ring 0. `vmm_init` verifies the whole thing by walking its own tables in software -- including the current stack -- before daring to load cr3. guard pages under every thread stack, which needed 2MiB page splitting to punch a hole in the direct map. exception dumps now name the thread that died and say when the address is a guard page. new shell commands: `vmm` to look up any address, `smash` to run off the end of the stack on purpose. 40-odd host assertions for the page table code, because a mistake there is a triple fault with nothing to read.
+- **0.0.11** — my own page tables. four levels built at boot, direct map in 2MiB pages, kernel mapped per-section with W^X, NX enabled properly via EFER (and treated as a runtime capability, since a hardcoded NX bit faults on a cpu that lacks it), CR0.WP set so read-only means read-only even in ring 0. `vmm_init` verifies the whole thing by walking its own tables in software -- including the current stack -- before daring to load cr3. guard pages under every thread stack, which needed 2MiB page splitting to punch a hole in the direct map. exception dumps now name the thread that died and say when the address is a guard page. new shell commands: `vmm` to look up any address, `smash` to run off the end of the stack on purpose. 40-odd host assertions for the page table code, because a mistake there is a triple fault with nothing to read.
 - **0.0.10** — milestone 7. serial input on irq4, with a translation layer for the terminal dialect (cr means enter, del means backspace, `ESC[A` means up) so the shell is drivable over the wire. keyboard and serial now feed one shared input queue in `drivers/input.c` instead of the keyboard owning the buffer privately. six host test suites moved into `tests/` behind `make test`, plus `tools/boottest.sh` which boots the iso and types at it. github actions runs the lot on every push. panics can now be escaped over serial too, not just from the keyboard.
 - **0.0.9** — the shell grew the things you immediately miss when you sit down at it. the keyboard driver now decodes ctrl as a modifier (ctrl+letter arrives as a control code, so ctrl+c is 3) and stops throwing away the e0-prefixed arrow keys, which meant widening the ring buffer to 16 bits so arrows cant be mistaken for characters. on top of that: 16 lines of command history on up/down, ctrl+c to abandon a line and recall running personas, and a panic you can escape -- it polls the 8042 by hand and resets on any keypress instead of halting forever and making you kill qemu. keyboard and shell tests grew to 20 and 32 cases.
 - **0.0.8** — milestone 6. an interactive shell with line editing and nine commands, running as a real thread (the boot thread renames itself `shell` and takes the job). a waitq in the scheduler plus a blocking `keyboard_getchar_blocking()`, so the prompt costs nothing while it waits instead of spinning on hlt. `summon` spawns persona threads on demand, which replaces the m5 demo threads that used to print forever and made the console unusable. the `FAULT_DEMO` build flag is gone -- the `crash` command does the same job better, and from thread context rather than early boot. shell parsing and dispatch are host-tested (20 cases, incl. argv clamping and empty lines).
 - **0.0.7** — milestone 5. the pit ticks at 100hz on irq0 with a global tick counter and uptime. threads: kernel stacks from the pmm, a fabricated initial stack so a brand new thread can be "resumed" into existence, and a 16-instruction context switch in asm. preemptive round-robin scheduling on a 50ms quantum, blocking `sleep_ms()`, `thread_exit()` with a reaper that frees dead threads' stacks (from a different thread's stack, which is the only safe way). an idle thread that hlts so theres always somebody to hand the cpu to. the allocators and kprintf take interrupts down while they work, since a half-updated free list is nobodys friend. demo: pixie and jack-frost count at different rates, the herald says its piece and dies to give the reaper something to do, and typing still works throughout. the context switch is host-tested, including whether all six callee-saved registers actually survive a round trip.
-- **0.0.6** — milestone 4. physical memory manager: parses limine's memory map (and prints it at boot), bitmap over every 4k frame, contiguous multi-page allocation with a rotating search hint, stats. kernel heap on top: first-fit free list, 16-byte aligned payloads, magic-guarded headers that catch double frees and wild pointers, address-ordered coalescing, grows by whole pages from the pmm. boot runs a self-test over both (8 frames + 5 heap blocks, pattern verified, freed out of order, books must balance) and panics if anything is off. tested on the host too, 25 assertions incl. draining ram dry and checking no frame is ever handed out twice.
+- **0.0.6** — milestone 4. physical memory manager: parses the loader's memory map (and prints it at boot), bitmap over every 4k frame, contiguous multi-page allocation with a rotating search hint, stats. kernel heap on top: first-fit free list, 16-byte aligned payloads, magic-guarded headers that catch double frees and wild pointers, address-ordered coalescing, grows by whole pages from the pmm. boot runs a self-test over both (8 frames + 5 heap blocks, pattern verified, freed out of order, books must balance) and panics if anything is off. tested on the host too, 25 assertions incl. draining ram dry and checking no frame is ever handed out twice.
 - **0.0.5** — milestone 3. 8259 pic remapped to vectors 32-47 with spurious irq filtering, an irq_register() layer so drivers can claim lines, and a ps/2 keyboard driver: scancode set 1 -> ascii, shift + capslock state (they cancel, as the gods intended), e0 prefixes swallowed, all landing in a ring buffer. the scancode state machine is split from the irq handler and tested on the host (11 scenarios). boot now ends at a prompt that echoes thy keystrokes, live.
-- **0.0.4** — milestone 2. our own gdt (tss slot reserved), idt with 256 macro-generated isr stubs, and an exception handler that prints the vector name, decoded page fault info (cr2 + error bits) and a full register dump before panicking. at the time this shipped with a `FAULT_DEMO=1` build flag to trigger it; as of 0.0.8 thats the shell's `crash` command instead. the kernel also now boots, panics and (eventually) reboots with the appropriate persona social link ceremony. thou art I, and I am thou.
+- **0.0.4** — milestone 2. my own gdt (tss slot reserved), idt with 256 macro-generated isr stubs, and an exception handler that prints the vector name, decoded page fault info (cr2 + error bits) and a full register dump before panicking. at the time this shipped with a `FAULT_DEMO=1` build flag to trigger it; as of 0.0.8 thats the shell's `crash` command instead. the kernel also now boots, panics and (eventually) reboots with the appropriate persona social link ceremony. thou art I, and I am thou.
 - **0.0.3** — milestone 1 done. kprintf (with actual tested number formatting), framebuffer console with the spleen 8x16 font, glyph blitting, scrolling, block cursor, and panic(). boot banner shows up on screen and serial at the same time. the temporary decimal-printer hack from 0.0.2 is gone, unmourned.
-- **0.0.2** — com1 uart driver (polled, 115200 8n1, with loopback self test). framebuffer request to limine, boot info logged over serial, test pattern on screen. run `make run` and watch the serial chatter in your terminal.
-- **0.0.1** — project scaffold. limine v9.x boots a stub kernel that halts politely. build system, linker script, license, this readme.
+- **0.0.2** — com1 uart driver (polled, 115200 8n1, with loopback self test). framebuffer request to the loader, boot info logged over serial, test pattern on screen. run `make run` and watch the serial chatter in your terminal.
+- **0.0.1** — project scaffold. the loader v9.x boots a stub kernel that halts politely. build system, linker script, license, this readme.

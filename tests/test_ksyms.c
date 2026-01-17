@@ -57,11 +57,11 @@ int main(void) {
     check_at(0x117f, "beta",  0x7f, "the last byte before the next symbol");
     check_at(0x1181, "gamma", 1,    "just past a boundary");
 
-    /* below everything we know about */
+    /* below everything I know about */
     check_at(0x0fff, NULL, 0, "one byte below the first function");
     check_at(0,      NULL, 0, "a null pointer");
 
-    /* above the last function. we have no sizes, only start addresses,
+    /* above the last function. I have no sizes, only start addresses,
      * so this reports as deep inside delta -- the absurd offset is the
      * only hint. worth pinning down so the behaviour is deliberate */
     check_at(0x9000, "delta", 0x7000, "far past the end reads as a huge offset");

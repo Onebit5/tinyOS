@@ -3,7 +3,7 @@
 ; there is no instruction for "start running in user mode" -- you fake a
 ; return from an interrupt that never happened. push the five things
 ; iretq expects to pop, with user selectors and the user's flags, and
-; let it deliver us somewhere we can never simply walk back from.
+; let it deliver me somewhere I can never simply walk back from.
 
 bits 64
 section .text
@@ -33,7 +33,7 @@ enter_usermode:
     mov rdi, r8             ; argc
     mov rsi, r9             ; argv
 
-    ; nothing else is inherited. whatever we happened to be holding is
+    ; nothing else is inherited. whatever I happened to be holding is
     ; the kernel's business, not the program's
     xor rax, rax
     xor rbx, rbx

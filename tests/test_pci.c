@@ -1,8 +1,8 @@
-/* enumerating the bus, against a machine of our own invention.
+/* enumerating the bus, against a machine of my own invention.
  *
  * pci_scan_with takes config space as a function, so a test can build a
  * machine with a bridge on it, a multifunction part, and empty slots in
- * between -- and check we find exactly what is there. the awkward cases
+ * between -- and check I find exactly what is there. the awkward cases
  * are the ones that matter: a device that only admits to its other
  * functions in one bit, and a bridge whose bus must be walked too. */
 #include <stdio.h>
@@ -147,16 +147,16 @@ int main(void) {
     CHECK(strcmp(pci_class_name(0x06, 0x04), "pci-to-pci bridge") == 0, "bridge");
     CHECK(strcmp(pci_class_name(0x02, 0x00), "network controller") == 0, "network");
     CHECK(pci_class_name(0xff, 0xff) != NULL,
-          "and a class we have never seen still gets words rather than a crash");
+          "and a class I have never seen still gets words rather than a crash");
     CHECK(pci_class_name(0x01, 0xfe) != NULL, "as does an unknown subclass");
 
-    CHECK(strcmp(pci_vendor_name(0x8086), "intel") == 0, "a vendor we know");
-    CHECK(pci_vendor_name(0x9999) == NULL, "and one we do not, honestly");
+    CHECK(strcmp(pci_vendor_name(0x8086), "intel") == 0, "a vendor I know");
+    CHECK(pci_vendor_name(0x9999) == NULL, "and one I do not, honestly");
 
     CHECK(strcmp(pci_device_name(0x8086, 0x2922), "ICH9 SATA (AHCI)") == 0,
-          "a device we know by name");
+          "a device I know by name");
     CHECK(pci_device_name(0x8086, 0xdead) == NULL,
-          "and one we do not -- the class still says what it is for");
+          "and one I do not -- the class still says what it is for");
     CHECK(pci_device_name(0x9999, 0x2922) == NULL,
           "a device id is only meaningful alongside its vendor");
 

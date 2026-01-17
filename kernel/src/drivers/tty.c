@@ -69,7 +69,7 @@ int64_t tty_read_line(int pid, char *buf, uint64_t len) {
     for (;;) {
         int c = input_getchar_blocking();
 
-        /* the thing that woke us may have been an interrupt rather than
+        /* the thing that woke me may have been an interrupt rather than
          * a key. leave the cursor on a fresh line, since whatever was
          * half-typed is being abandoned */
         if (process_take_interrupt(pid)) {

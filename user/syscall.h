@@ -110,7 +110,7 @@ static inline long spawn(const char *path) {
 }
 
 /* blocks until that pid ends. returns the pid, or -1 if it was never
- * ours to wait for */
+ * mine to wait for */
 static inline long wait(long pid, int *code) {
     return syscall2(SYS_WAIT, pid, (long)code);
 }

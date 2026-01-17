@@ -24,7 +24,7 @@
 #define LVT_MASKED          (1u << 16)
 #define LVT_PERIODIC        (1u << 17)
 
-/* where we mapped it. the apic lives above every scrap of ram, so the
+/* where I mapped it. the apic lives above every scrap of ram, so the
  * direct map does not reach it and it needs a mapping of its own */
 static volatile uint8_t *lapic;
 
@@ -46,7 +46,7 @@ bool lapic_init(uint64_t phys_address) {
     }
 
     /* the direct map stops at the top of usable memory and this is
-     * nowhere near it, so map the page ourselves. write-through would
+     * nowhere near it, so map the page myself. write-through would
      * be wrong here and so would caching: these are registers, and the
      * cpu must not remember what one of them said */
     uint64_t virt = pmm_hhdm_offset() + phys_address;

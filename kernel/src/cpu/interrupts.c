@@ -111,7 +111,7 @@ void interrupt_dispatch(struct interrupt_frame *f) {
         uint8_t irq = f->vector - PIC_IRQ_BASE;
 
         /* the 8259's ghosts are only the 8259's problem, and it is
-         * still the one delivering these unless we moved them */
+         * still the one delivering these unless I moved them */
         if (!external_on_ioapic && pic_is_spurious(irq)) {
             return;
         }
@@ -121,7 +121,7 @@ void interrupt_dispatch(struct interrupt_frame *f) {
          * thread has no half-finished irq frame to return through, so
          * it would never send the eoi and the controller would go quiet
          * forever. interrupts are off in here (interrupt gate), so
-         * nothing can nest before we iretq */
+         * nothing can nest before I iretq */
         /* acknowledge whichever chip actually raised it. getting this
          * backwards means the 8259 never hears that its interrupt was
          * handled, and quietly stops delivering any more */
@@ -144,14 +144,14 @@ void interrupt_dispatch(struct interrupt_frame *f) {
         return;
     }
 
-    /* cpu exception. print everything we know, then panic */
+    /* cpu exception. print everything I know, then panic */
     console_set_colors(0xe64553, 0x101018);
 
     struct thread *me = sched_current();
 
     /* a double fault means the cpu couldnt even deliver the first
      * exception -- almost always because rsp was already somewhere
-     * unusable. we are only alive to say so because the idt sends this
+     * unusable. I am only alive to say so because the idt sends this
      * vector to its own IST stack. cr2 still holds whatever address
      * the original fault was about, which is the useful part */
     if (f->vector == 8) {
@@ -202,7 +202,7 @@ void interrupt_dispatch(struct interrupt_frame *f) {
 
     dump_frame(f);
 
-    /* the interesting stack is the one that faulted, not ours. rip
+    /* the interesting stack is the one that faulted, not mine. rip
      * goes in separately: the faulting instruction never made it onto
      * the frame chain */
     kbacktrace(f->rbp, f->rip);
@@ -248,7 +248,7 @@ bool interrupts_use_apic(void) {
      *
      * the wait polls the pit rather than counting its interrupts,
      * which matters twice over: interrupts are still off this early in
-     * boot, and we are about to mask the very chip that would deliver
+     * boot, and I am about to mask the very chip that would deliver
      * them. a wait that needed either would spin here forever */
     uint64_t hz = lapic_calibrate(pit_poll_wait, 50);
     if (hz < 1000 || hz > 100000000000ull) {
@@ -273,8 +273,8 @@ bool interrupts_use_apic(void) {
      * that either worked or did not, and there is no way to tell from
      * here. so let interrupts in briefly, wait by a means that needs no
      * interrupt at all, and see whether the new timer actually
-     * delivered anything. if it did not we can still put the old one
-     * back; ten lines later we could not, and the symptom would be a
+     * delivered anything. if it did not I can still put the old one
+     * back; ten lines later I could not, and the symptom would be a
      * machine that boots to a prompt and then never sleeps again */
     uint64_t before = pit_ticks();
     asm volatile ("sti");

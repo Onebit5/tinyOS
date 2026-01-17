@@ -9,7 +9,7 @@
 #          gensyms.py --check bin/tinyos obj/ksyms.c
 #
 # the --check mode exists because of the chicken and egg: the table
-# records addresses, and linking the table in changes addresses. we
+# records addresses, and linking the table in changes addresses. I
 # dodge that by placing .ksyms after .text in the linker script, so
 # folding it in shifts .data but never moves a function. --check proves
 # that actually held rather than assuming it.

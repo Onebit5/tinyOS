@@ -9,7 +9,7 @@
  * exactly the trap that has caught this project twice before -- both
  * sides agreeing on the same misunderstanding. the answer is in
  * TESTING.md: mount the image on linux. a driver nobody here wrote
- * reading our files is the check this file cannot perform. */
+ * reading my files is the check this file cannot perform. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -184,7 +184,7 @@ int main(int argc, char **argv) {
     CHECK(!fat32_lookup(&fs, "hello.txt/deeper", &f),
           "a file cannot be descended into");
 
-    /* readdir over the root must find everything we put there, and no
+    /* readdir over the root must find everything I put there, and no
      * dot entries, which nothing above this has any use for */
     int seen_hello = 0, seen_big = 0, seen_notes = 0, seen_long = 0, dots = 0;
     size_t count = 0;
@@ -198,7 +198,7 @@ int main(int argc, char **argv) {
         count++;
     }
     CHECK(seen_hello && seen_big && seen_long && seen_notes,
-          "readdir lists every file we put on the disk");
+          "readdir lists every file I put on the disk");
     CHECK(dots == 0, "with no dot entries");
     size_t root_at_first = count;
 
@@ -257,9 +257,9 @@ int main(int argc, char **argv) {
     CHECK(wrote == (int64_t)strlen(message), "and can be written to");
 
     CHECK(fat32_lookup(&fs, "notes.txt", &f), "and is then found by name");
-    CHECK(f.size == strlen(message), "at the size we wrote");
+    CHECK(f.size == strlen(message), "at the size I wrote");
     text = slurp(&fs, &f, &len);
-    CHECK(text && strcmp(text, message) == 0, "with what we put in it");
+    CHECK(text && strcmp(text, message) == 0, "with what I put in it");
     free(text);
 
     /* in a subdirectory too */
@@ -268,7 +268,7 @@ int main(int argc, char **argv) {
     CHECK(fat32_write(&fs, &fresh, 0, "deep\n", 5) == 5, "and written");
     CHECK(fat32_lookup(&fs, "notes/made.txt", &f), "and found again");
 
-    /* names we cannot store honestly are refused rather than mangled */
+    /* names I cannot store honestly are refused rather than mangled */
     CHECK(!fat32_create(&fs, "a-name-far-too-long-for-8.3", &fresh),
           "a name that will not fit 8.3 is refused");
     CHECK(!fat32_create(&fs, "nowhere/at/all.txt", &fresh),

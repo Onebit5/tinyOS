@@ -1,7 +1,7 @@
 /* host-side test for the shell's line splitting and command dispatch.
  * includes shell.c directly so the static helpers are reachable, and
  * stubs out every piece of kernel it leans on. kprintf is captured so
- * we can assert on exactly what the shell would have printed. */
+ * I can assert on exactly what the shell would have printed. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -172,7 +172,7 @@ void *kmalloc(size_t n) { return malloc(n); }
 void kfree(void *p) { free(p); }
 void sleep_ms(uint64_t ms) { (void)ms; }
 
-/* cmd_summon reads t->id off whatever we hand back, so hand back
+/* cmd_summon reads t->id off whatever I hand back, so hand back
  * something real rather than a poked-in pointer value */
 #include "sched/thread.h"
 static struct thread spawned = { .id = 42 };
@@ -506,7 +506,7 @@ int main(void) {
         complete(line, &len, &pos);
         CHECK(out_len > 0, "a bare tab at the root lists it");
 
-        /* a path that is not ours must not be answered with the disk */
+        /* a path that is not mine must not be answered with the disk */
         strcpy(line, "cat /nowhere/pass"); len = 17; pos = 17;
         out_reset();
         complete(line, &len, &pos);
@@ -685,7 +685,7 @@ int main(void) {
           "and reports why the loader refused");
 
     /* the mistake a person actually makes: the bare name of a file that
-     * lives in a directory. we do not search paths, so say what they
+     * lives in a directory. I do not search paths, so say what they
      * meant rather than just refusing */
     run_error = USER_RUN_NO_SUCH_FILE;
     run("run hello");
@@ -731,7 +731,7 @@ int main(void) {
     run("definitelynotathing");
     CHECK(ran_path == NULL, "and one that is not there is not run");
 
-    /* ---- who we are ---- */
+    /* ---- who I am ---- */
     run("arcana");
     CHECK(strstr(out, "COMPUTER ARCANA") && strstr(out, VERSION),
           "arcana names the arcana and the version");

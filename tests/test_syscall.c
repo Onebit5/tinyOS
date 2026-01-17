@@ -73,7 +73,7 @@ void sleep_ms(uint64_t ms) { kprintf("<SLEEP %lu>", ms); }
 static int next_key = 'x';
 int input_getchar_blocking(void) { return next_key; }
 
-/* syscall_init installs this in an msr; we never call it here */
+/* syscall_init installs this in an msr; I never call it here */
 void syscall_entry(void) { }
 
 #include "sched/process.h"
@@ -390,7 +390,7 @@ int main(void) {
     wait_code = 42;
     int codeout = 0;
     user_extra = (uint64_t)&codeout;
-    CHECK(call(SYS_WAIT, mine, (uint64_t)&codeout) == mine, "ours works");
+    CHECK(call(SYS_WAIT, mine, (uint64_t)&codeout) == mine, "mine works");
     CHECK(codeout == 42, "and fills in how it went");
     CHECK(call(SYS_WAIT, 4242, 0) == -1, "waiting for nothing is refused");
 

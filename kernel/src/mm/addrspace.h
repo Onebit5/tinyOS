@@ -12,7 +12,7 @@
  * between them is only the lower half -- the upper half, where the
  * kernel and the direct map live, is shared by reference so the kernel
  * is reachable no matter whose tables are loaded. it has to be: the
- * stack we are standing on when we switch is up there. */
+ * stack I am standing on when I switch is up there. */
 
 struct addrspace {
     uint64_t pml4;      /* physical address of the top level table */
@@ -26,7 +26,7 @@ struct addrspace *addrspace_create(uint64_t kernel_pml4);
 
 /* free everything in the lower half -- the program's pages, its stack,
  * and the tables that described them. the upper half is shared and is
- * emphatically not ours to free.
+ * emphatically not mine to free.
  *
  * only safe once nothing is running on it. the reaper does this, from
  * another thread, after the switch away has already happened */

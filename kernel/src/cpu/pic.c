@@ -12,7 +12,7 @@
 
 void pic_init(void) {
     /* the bios leaves irqs mapped over vectors 8-15, right on top of the
-     * cpu exceptions, which is a 40 year old design accident we now fix
+     * cpu exceptions, which is a 40 year old design accident I now fix
      * at every single boot. shift everything to 32+ */
     outb(PIC1_CMD, ICW1_INIT);
     io_wait();

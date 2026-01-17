@@ -29,8 +29,8 @@ void panic(const char *fmt, ...) {
     kprintf("Press any key to return to the Velvet Room...\n");
 
     /* interrupts are off and never coming back, so the keyboard driver
-     * is no help here -- we talk to the 8042 ourselves. poll the status
-     * port for a byte, and reset on the first press we see (bit 7 set
+     * is no help here -- I talk to the 8042 myself. poll the status
+     * port for a byte, and reset on the first press I see (bit 7 set
      * means a key came *up*, which is probably just the user releasing
      * whatever they were holding when it all went wrong) */
     for (;;) {

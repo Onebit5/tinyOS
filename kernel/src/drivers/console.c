@@ -14,10 +14,10 @@ static uint32_t fg = 0xc8c8d0;  /* soft grey on almost-black */
 static uint32_t bg = 0x101018;
 static bool ready = false;
 
-/* what character is in each cell. we need this the moment the cursor is
+/* what character is in each cell. I need this the moment the cursor is
  * allowed to sit on top of a character instead of always trailing the
- * text: to move the cursor off a cell we have to put back whatever was
- * underneath it, and the framebuffer cannot tell us that. statically
+ * text: to move the cursor off a cell I have to put back whatever was
+ * underneath it, and the framebuffer cannot tell me that. statically
  * sized because console_init runs long before the pmm exists */
 #define MAX_COLS 256
 #define MAX_ROWS 128
@@ -87,13 +87,13 @@ static void newline(void) {
     }
 }
 
-void console_init(struct limine_framebuffer *fb) {
+void console_init(const struct ph_framebuffer *fb) {
     if (fb->bpp != 32) {
         /* qemu always gives 32bpp so im not writing three blitters.
          * stay not-ready and let serial carry the weight */
         return;
     }
-    px = fb->address;
+    px = (volatile uint32_t *)fb->address;
     stride = fb->pitch / 4;
     pix_w = fb->width;
     pix_h = fb->height;

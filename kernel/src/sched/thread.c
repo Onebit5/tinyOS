@@ -33,15 +33,15 @@ void thread_set_name(struct thread *t, const char *name) {
     t->name[n] = '\0';
 }
 
-/* where every new thread opens its eyes. we arrive here by `ret` out of
+/* where every new thread opens its eyes. I arrive here by `ret` out of
  * switch_context, not by iretq, which has one important consequence
  * spelled out below */
 static void thread_bootstrap(void) {
-    /* we inherited IF=0 from whoever switched to us, because switching
+    /* I inherited IF=0 from whoever switched to me, because switching
      * happens with interrupts off. a preempted thread would get its
      * flags back from the iretq it eventually returns through, and a
-     * yielding one from irq_restore -- but we have no such history to
-     * return through. so we let interrupts back in ourselves.
+     * yielding one from irq_restore -- but I have no such history to
+     * return through. so I let interrupts back in myself.
      * forget this line and the first thread you spawn quietly kills
      * preemption for the whole system */
     asm volatile ("sti");
@@ -63,7 +63,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
         return NULL;
     }
 
-    /* one extra page at the bottom, which we then unmap. a thread that
+    /* one extra page at the bottom, which I then unmap. a thread that
      * runs off the end of its stack lands on that hole and takes a
      * clean page fault naming the address, instead of quietly chewing
      * through whatever the pmm handed out next -- which, on a kernel
@@ -104,7 +104,7 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
 
     /* fabricate a stack that looks exactly like a thread which is
      * sitting inside switch_context waiting to be resumed. the pops
-     * over there will eat our six zeroes, and its `ret` will land on
+     * over there will eat my six zeroes, and its `ret` will land on
      * thread_bootstrap. stack top is page aligned, so the return
      * address slot ends up 16-aligned and bootstrap gets the stack
      * alignment the abi promises it */
@@ -149,8 +149,8 @@ void thread_exit(int code) {
     irq_restore(flags);
 
     /* the scheduler will never pick a dead thread, so this yield is a
-     * one way door. the next thread to run reaps our stack out from
-     * under us, which is only safe because we are never coming back */
+     * one way door. the next thread to run reaps my stack out from
+     * under me, which is only safe because I am never coming back */
     for (;;) {
         sched_yield();
     }
@@ -167,7 +167,7 @@ void thread_free_stack(struct thread *t) {
         t->space = NULL;
     }
     if (t->stack_phys == 0) {
-        return;     /* the boot thread's stack came from limine, not us */
+        return;     /* the boot thread's stack came from limine, not me */
     }
 
     uint64_t guard = (uint64_t)pmm_phys_to_virt(t->stack_phys);

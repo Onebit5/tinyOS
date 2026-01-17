@@ -71,7 +71,7 @@ int main(void) {
     feed("\x1b[C\x1b[D");
     expect_keys((int[]){KEY_RIGHT, KEY_LEFT}, 2, "ESC[C and ESC[D are right and left");
 
-    /* a CSI sequence we dont handle must vanish, not spray garbage */
+    /* a CSI sequence I dont handle must vanish, not spray garbage */
     feed("\x1b[H");
     expect_keys(NULL, 0, "an unknown escape sequence is dropped");
 

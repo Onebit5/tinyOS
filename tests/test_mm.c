@@ -1,4 +1,4 @@
-/* host-side test for pmm + kmalloc. fabricates a limine memory map whose
+/* host-side test for pmm + kmalloc. fabricates a memory map whose
  * "physical" addresses are offsets into a big aligned host buffer, with
  * hhdm = buffer base, so phys_to_virt lands back inside the buffer */
 #include <stdio.h>
@@ -35,13 +35,13 @@ int main(void) {
     uint64_t hhdm = (uint64_t)arena;
 
     /* usable 4k..1MiB, a reserved hole, usable 2MiB..8MiB */
-    struct limine_memmap_entry e0 = { .base = 0x1000, .length = MiB - 0x1000,
-                                      .type = LIMINE_MEMMAP_USABLE };
-    struct limine_memmap_entry e1 = { .base = MiB, .length = MiB,
-                                      .type = LIMINE_MEMMAP_RESERVED };
-    struct limine_memmap_entry e2 = { .base = 2 * MiB, .length = 6 * MiB,
-                                      .type = LIMINE_MEMMAP_USABLE };
-    struct limine_memmap_entry *map[3] = { &e0, &e1, &e2 };
+    struct ph_memmap_entry e0 = { .base = 0x1000, .length = MiB - 0x1000,
+                                      .type = PH_MEM_USABLE };
+    struct ph_memmap_entry e1 = { .base = MiB, .length = MiB,
+                                      .type = PH_MEM_RESERVED };
+    struct ph_memmap_entry e2 = { .base = 2 * MiB, .length = 6 * MiB,
+                                      .type = PH_MEM_USABLE };
+    struct ph_memmap_entry map[3] = { e0, e1, e2 };
 
     pmm_init_from_map(map, 3, hhdm);
 
@@ -144,28 +144,28 @@ int main(void) {
     CHECK(after != NULL, "heap still works after an oom");
     kfree(after);
 
-    /* ---- reclaiming limine's memory ----
+    /* ---- reclaiming the loader's memory ----
      * a fresh map with a bootloader-reclaimable region ABOVE the last
      * usable one, which is where it really sits on a pc -- if the
      * allocator is only sized to cover usable ram, those frames fall
      * off the end and reclaiming them silently does nothing */
-    struct limine_memmap_entry r0 = { .base = 0x1000, .length = MiB - 0x1000,
-                                      .type = LIMINE_MEMMAP_USABLE };
-    struct limine_memmap_entry r1 = { .base = 2 * MiB, .length = 4 * MiB,
-                                      .type = LIMINE_MEMMAP_USABLE };
-    struct limine_memmap_entry r2 = { .base = 6 * MiB, .length = MiB,
-                                      .type = LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE };
-    struct limine_memmap_entry *rmap[3] = { &r0, &r1, &r2 };
+    struct ph_memmap_entry r0 = { .base = 0x1000, .length = MiB - 0x1000,
+                                      .type = PH_MEM_USABLE };
+    struct ph_memmap_entry r1 = { .base = 2 * MiB, .length = 4 * MiB,
+                                      .type = PH_MEM_USABLE };
+    struct ph_memmap_entry r2 = { .base = 6 * MiB, .length = MiB,
+                                      .type = PH_MEM_LOADER };
+    struct ph_memmap_entry rmap[3] = { r0, r1, r2 };
 
     pmm_init_from_map(rmap, 3, hhdm);
 
     uint64_t total_before = pmm_total_bytes();
     uint64_t free_before  = pmm_free_bytes();
     CHECK(total_before == (MiB - 0x1000) + 4 * MiB,
-          "reclaimable memory is not counted as ram until we take it");
+          "reclaimable memory is not counted as ram until I take it");
     /* it must be beyond the usable regions but still covered */
     CHECK(pmm_translate_is_tracked(6 * MiB),
-          "the allocator reaches limine's memory");
+          "the allocator reaches the loader's memory");
 
     uint64_t gained = pmm_reclaim_bootloader();
     CHECK(gained == MiB, "the whole reclaimable region came back");
@@ -174,13 +174,54 @@ int main(void) {
 
     /* the recovered frames have to actually be usable */
     uint64_t rf = pmm_alloc_pages(256);      /* 1 MiB worth */
-    CHECK(rf != 0, "we can allocate out of the reclaimed region");
+    CHECK(rf != 0, "I can allocate out of the reclaimed region");
     memset(pmm_phys_to_virt(rf), 0x5a, 256 * PAGE_SIZE);
     pmm_free_pages(rf, 256);
 
     /* calling twice must not double-count */
     CHECK(pmm_reclaim_bootloader() == 0, "a second reclaim finds nothing");
     CHECK(pmm_total_bytes() == total_before + MiB, "and changes no numbers");
+
+    /* ---- how far the direct map has to reach ----
+     *
+     * the firmware's own tables are not in memory it calls usable. on a
+     * real machine they sit immediately above the last usable region in
+     * something typed reserved, and a direct map that stops at the last
+     * usable byte cannot read them -- which is a page fault in acpi_parse
+     * and nowhere else, on a kernel that was working a moment before.
+     *
+     * but the map must not simply take the highest address it can see:
+     * there are reserved holes up near the terabyte mark, and mapping as
+     * far as those would cost more page tables than the machine has
+     * memory. so it grows over what is adjacent and stops at the gap */
+    struct ph_memmap_entry t0 = { .base = 0x1000, .length = MiB - 0x1000,
+                                  .type = PH_MEM_USABLE };
+    struct ph_memmap_entry t1 = { .base = 2 * MiB, .length = 4 * MiB,
+                                  .type = PH_MEM_USABLE };
+    struct ph_memmap_entry t2 = { .base = 6 * MiB, .length = 128 * 1024,
+                                  .type = PH_MEM_RESERVED };
+    struct ph_memmap_entry t3 = { .base = 0xfd00000000ull, .length = 3ull * MiB,
+                                  .type = PH_MEM_RESERVED };
+    struct ph_memmap_entry tmap[4] = { t0, t1, t2, t3 };
+
+    pmm_init_from_map(tmap, 4, hhdm);
+
+    CHECK(pmm_highest_address() == 6 * MiB + 128 * 1024,
+          "the map reaches over reserved memory sitting on top of ram");
+    CHECK(pmm_highest_address() < 0x1000000ull,
+          "and stops well short of the reserved holes near the terabyte mark");
+    CHECK(pmm_total_bytes() == (MiB - 0x1000) + 4 * MiB,
+          "reaching over it does not make it usable");
+
+    /* a gap of more than a megabyte is a different part of the address
+     * space, not padding */
+    struct ph_memmap_entry g2 = { .base = 6 * MiB + 8 * MiB,
+                                  .length = 128 * 1024,
+                                  .type = PH_MEM_RESERVED };
+    struct ph_memmap_entry gmap[3] = { t0, t1, g2 };
+    pmm_init_from_map(gmap, 3, hhdm);
+    CHECK(pmm_highest_address() == 6 * MiB,
+          "a reserved region well clear of ram is left out of the map");
 
     if (failures == 0) printf("all good\n");
     return failures;

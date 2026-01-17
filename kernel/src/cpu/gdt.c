@@ -2,9 +2,9 @@
 #include <stdint.h>
 
 /* segmentation is basically dead in long mode but the cpu still demands
- * a gdt, so here is the flattest one possible. limine gave us a perfectly
- * fine one but its living in bootloader memory we'll reclaim eventually,
- * plus we need our own once the tss shows up.
+ * a gdt, so here is the flattest one possible. limine gave me a perfectly
+ * fine one but its living in bootloader memory I will reclaim eventually,
+ * plus I need my own once the tss shows up.
  *
  * not const: loading a tss later flips the busy bit in its descriptor,
  * so the table has to be writable */
@@ -13,7 +13,7 @@ static uint64_t gdt[] = {
     0,                      /* null descriptor, mandatory tribute */
     0x00af9a000000ffff,     /* 0x08 kernel code: present, exec, long mode */
     0x00af92000000ffff,     /* 0x10 kernel data: present, rw */
-    /* the order of these two is not ours to choose. sysret computes
+    /* the order of these two is not mine to choose. sysret computes
      * CS = STAR[63:48] + 16 and SS = STAR[63:48] + 8, so data must sit
      * eight bytes below code or returning to ring 3 lands nowhere */
     0x00aff2000000ffff,     /* 0x18 user data: present, rw, dpl 3 */

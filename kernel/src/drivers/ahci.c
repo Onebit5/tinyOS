@@ -92,7 +92,7 @@ struct fis_h2d {
  * machine, but it must not be able to make this one look broken too */
 #define SPIN_LIMIT 20000000
 
-/* ---- our state ----------------------------------------------------- */
+/* ---- my state ----------------------------------------------------- */
 
 static struct hba_mem  *hba;
 static struct hba_port *port;
@@ -262,7 +262,7 @@ static bool identify(void) {
     ata_string(&words[10], 10, serial);
 
     /* word 83 bit 10 says it understands 48-bit addressing, which is
-     * what tells us whether words 100..103 mean anything */
+     * what tells me whether words 100..103 mean anything */
     if (words[83] & (1u << 10)) {
         sector_count = (uint64_t)words[100]
                      | ((uint64_t)words[101] << 16)
@@ -292,10 +292,18 @@ static const struct pci_device *find_controller(void) {
     return NULL;
 }
 
-static int first_usable_port(void) {
-    uint32_t implemented = hba->pi;
+/* every port with a real disk on it. there is more than one drive in
+ * this machine -- the one it booted from and the one it keeps files on
+ * -- and which is which is not something the controller can be asked.
+ * so list them all and let whoever wants a filesystem try each */
+static uint8_t usable[AHCI_MAX_DISKS];
+static size_t usable_count;
 
-    for (int i = 0; i < 32; i++) {
+static void find_ports(void) {
+    uint32_t implemented = hba->pi;
+    usable_count = 0;
+
+    for (int i = 0; i < 32 && usable_count < AHCI_MAX_DISKS; i++) {
         if (!(implemented & (1u << i))) {
             continue;
         }
@@ -311,9 +319,50 @@ static int first_usable_port(void) {
         if (p->sig != SIG_SATA) {
             continue;   /* an atapi drive or a port multiplier, not a disk */
         }
-        return i;
+        usable[usable_count++] = (uint8_t)i;
     }
-    return -1;
+}
+
+size_t ahci_disk_count(void) {
+    return usable_count;
+}
+
+/* point the one set of command structures at a different port. only one
+ * disk is ever in use at a time, so there is no reason to keep a set for
+ * each -- and every read below goes through whichever was chosen last */
+bool ahci_use_disk(size_t which) {
+    if (which >= usable_count) {
+        return false;
+    }
+    present = false;
+    port = &hba->ports[usable[which]];
+
+    memset(cmd_list, 0, PAGE_SIZE);
+    memset(cmd_tab, 0, PAGE_SIZE);
+    memset(pmm_phys_to_virt(fis_phys), 0, PAGE_SIZE);
+
+    if (!stop_port()) {
+        return false;
+    }
+
+    port->clb  = (uint32_t)cmd_list_phys;
+    port->clbu = (uint32_t)(cmd_list_phys >> 32);
+    port->fb   = (uint32_t)fis_phys;
+    port->fbu  = (uint32_t)(fis_phys >> 32);
+    port->serr = (uint32_t)-1;      /* write ones to clear */
+    port->is   = (uint32_t)-1;
+    port->ie   = 0;                 /* I poll; no interrupts wanted */
+
+    if (!start_port()) {
+        return false;
+    }
+
+    present = true;
+    if (!identify()) {
+        present = false;
+        return false;
+    }
+    return true;
 }
 
 bool ahci_init(void) {
@@ -339,11 +388,10 @@ bool ahci_init(void) {
     hba->ghc |= GHC_AE;             /* talk ahci, not legacy ide */
     addr64 = (hba->cap & (1u << 31)) != 0;
 
-    int index = first_usable_port();
-    if (index < 0) {
+    find_ports();
+    if (usable_count == 0) {
         return false;               /* a controller, but nothing plugged in */
     }
-    port = &hba->ports[index];
 
     /* three pages: the command list, the frames the drive sends back,
      * and one command table. all of them have to be physically
@@ -363,7 +411,7 @@ bool ahci_init(void) {
      * and carry on without a disk */
     if (!addr64 && (cmd_list_phys >> 32 || fis_phys >> 32
                     || cmd_tab_phys >> 32 || bounce_phys >> 32)) {
-        kprintf("ahci       : controller is 32-bit only and our buffers are not\n");
+        kprintf("ahci       : controller is 32-bit only and my buffers are not\n");
         return false;
     }
 
@@ -371,30 +419,8 @@ bool ahci_init(void) {
     cmd_tab  = pmm_phys_to_virt(cmd_tab_phys);
     bounce   = pmm_phys_to_virt(bounce_phys);
 
-    memset(cmd_list, 0, PAGE_SIZE);
-    memset(cmd_tab, 0, PAGE_SIZE);
-    memset(pmm_phys_to_virt(fis_phys), 0, PAGE_SIZE);
-
-    if (!stop_port()) {
-        return false;
-    }
-
-    port->clb  = (uint32_t)cmd_list_phys;
-    port->clbu = (uint32_t)(cmd_list_phys >> 32);
-    port->fb   = (uint32_t)fis_phys;
-    port->fbu  = (uint32_t)(fis_phys >> 32);
-    port->serr = (uint32_t)-1;      /* write ones to clear */
-    port->is   = (uint32_t)-1;
-    port->ie   = 0;                 /* we poll; no interrupts wanted */
-
-    if (!start_port()) {
-        return false;
-    }
-
-    present = true;
-    if (!identify()) {
-        present = false;
-        return false;
-    }
+    /* the ports are found but none is chosen. whoever wants a
+     * filesystem picks, because the controller cannot say which drive
+     * has one on it and guessing wrong is how you end up with no disk */
     return true;
 }

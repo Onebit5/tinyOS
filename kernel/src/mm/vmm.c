@@ -1,4 +1,5 @@
 #include "mm/vmm.h"
+#include "boot.h"
 #include "mm/pmm.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
@@ -36,7 +37,7 @@ uint64_t vmm_new_address_space(void) {
 static uint64_t *step(uint64_t *table, size_t idx, bool create, uint64_t leaf_flags) {
     /* the cpu ANDs the write and user bits down the whole chain and ORs
      * the nx bits, so an intermediate entry can only ever take away.
-     * we keep them permissive and let the leaf decide -- except for the
+     * I keep them permissive and let the leaf decide -- except for the
      * user bit, which has to be granted at every level or ring 3 cannot
      * reach a page however the leaf is marked. that one is the classic
      * way to spend an afternoon watching a #PF you cannot explain */
@@ -117,7 +118,7 @@ bool vmm_map_range(uint64_t pml4, uint64_t virt, uint64_t phys,
     return true;
 }
 
-/* the software walk. this is what lets us check our work before
+/* the software walk. this is what lets me check my work before
  * trusting it to cr3, and what backs the shell's `vmm` command */
 static uint64_t *walk_to_leaf(uint64_t pml4, uint64_t virt, uint64_t *out_entry,
                               bool *out_huge) {
@@ -129,7 +130,7 @@ static uint64_t *walk_to_leaf(uint64_t pml4, uint64_t virt, uint64_t *out_entry,
 
     idx = PDPT_IDX(virt);
     if (!(t[idx] & PTE_PRESENT)) return NULL;
-    if (t[idx] & PTE_HUGE) {    /* 1GiB page, we never make these but be safe */
+    if (t[idx] & PTE_HUGE) {    /* 1GiB page, I never make these but be safe */
         *out_entry = t[idx];
         *out_huge = true;
         return &t[idx];
@@ -227,15 +228,11 @@ bool vmm_unmap_page(uint64_t pml4, uint64_t virt) {
 #ifndef TINYOS_HOSTED
 
 #include "cpu/msr.h"
-#include "limine.h"
+#include "boot.h"
 
 void kmain(void);   /* just for its address, to check .text is mapped */
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_kernel_address_request kernel_addr_request = {
-    .id = LIMINE_KERNEL_ADDRESS_REQUEST,
-    .revision = 0,
-};
+
 
 /* laid down by linker.ld, one per section boundary */
 extern char __text_start[], __text_end[];
@@ -274,9 +271,9 @@ static uint64_t read_rsp(void) {
     return rsp;
 }
 
-/* check our work before betting the machine on it. a wrong mapping
+/* check my work before betting the machine on it. a wrong mapping
  * here is a triple fault with no message and no debugger, so anything
- * we can catch in software first is worth catching */
+ * I can catch in software first is worth catching */
 static void require_maps_to(uint64_t pml4, uint64_t virt, uint64_t want,
                             const char *what) {
     uint64_t got = vmm_translate(pml4, virt);
@@ -288,7 +285,7 @@ static void require_maps_to(uint64_t pml4, uint64_t virt, uint64_t want,
 
 static void require_mapped(uint64_t pml4, uint64_t virt, const char *what) {
     if (vmm_translate(pml4, virt) == VMM_NO_MAPPING) {
-        panic("vmm: %s at %p is not mapped -- the switch would kill us",
+        panic("vmm: %s at %p is not mapped -- the switch would kill me",
               what, (void *)virt);
     }
 }
@@ -312,12 +309,8 @@ static void map_section(uint64_t pml4, char *start, char *end,
 }
 
 void vmm_init(void) {
-    if (kernel_addr_request.response == NULL) {
-        panic("limine wouldnt say where it put us");
-    }
-
-    uint64_t phys_base = kernel_addr_request.response->physical_base;
-    uint64_t virt_base = kernel_addr_request.response->virtual_base;
+    uint64_t phys_base = boot_handoff()->kernel_phys;
+    uint64_t virt_base = boot_handoff()->kernel_virt;
     uint64_t hhdm = pmm_hhdm_offset();
     uint64_t top = pmm_highest_address();
 
@@ -337,10 +330,32 @@ void vmm_init(void) {
     kprintf("  hhdm    %p .. %p  rw-  (%lu MiB, 2MiB pages)\n",
             (void *)hhdm, (void *)(hhdm + top), top / (1024 * 1024));
 
+    /* the framebuffer is not in the memory map at all -- it is a window
+     * a pci device answers to, and the firmware does not describe it as
+     * memory. so it has to be mapped by name, or the first thing the
+     * shell prints faults on a screen that was working a moment ago
+     * under the loader's tables */
+    const struct ph_framebuffer *fb = &boot_handoff()->fb;
+    if (fb->width != 0 && fb->address >= hhdm) {
+        uint64_t fb_phys = fb->address - hhdm;
+        uint64_t fb_size = fb->pitch * fb->height;
+        fb_size = (fb_size + 0x1fffff) & ~0x1fffffull;
+
+        if (fb_phys + fb_size > top) {
+            if (!vmm_map_range(kernel_pml4, fb->address, fb_phys, fb_size,
+                               PTE_WRITE | PTE_NO_CACHE | nx)) {
+                panic("vmm: no memory to map the framebuffer");
+            }
+            kprintf("  screen  %p .. %p  rw-  (%lu KiB, uncached)\n",
+                    (void *)fb->address, (void *)(fb->address + fb_size),
+                    fb_size / 1024);
+        }
+    }
+
     /* and the kernel itself, one section at a time, each with only the
      * rights it actually needs. this is the whole point of the exercise */
     map_section(kernel_pml4, __kernel_start, __text_start, phys_base, virt_base,
-                nx, "limine");           /* the request markers: read only */
+                nx, "header");           /* whatever precedes .text: read only */
     map_section(kernel_pml4, __text_start, __text_end, phys_base, virt_base,
                 0, "text");              /* executable, NOT writable */
     map_section(kernel_pml4, __rodata_start, __rodata_end, phys_base, virt_base,
@@ -348,7 +363,7 @@ void vmm_init(void) {
     map_section(kernel_pml4, __data_start, __data_end, phys_base, virt_base,
                 PTE_WRITE | nx, "data"); /* writable, never executable */
 
-    /* ---- now prove it works, while we can still complain ---- */
+    /* ---- now prove it works, while I can still complain ---- */
     require_maps_to(kernel_pml4, (uint64_t)kmain,
                     phys_base + ((uint64_t)kmain - virt_base), "kmain");
     require_maps_to(kernel_pml4, (uint64_t)__data_start,
@@ -356,14 +371,14 @@ void vmm_init(void) {
     require_maps_to(kernel_pml4, hhdm, 0, "the base of the direct map");
     require_maps_to(kernel_pml4, hhdm + 0x1234000, 0x1234000, "a direct map page");
 
-    /* the stack we are standing on, and some room below it for the
-     * calls we are about to make. if this isnt mapped, loading cr3
+    /* the stack I am standing on, and some room below it for the
+     * calls I am about to make. if this isnt mapped, loading cr3
      * would be the last thing this cpu ever did */
     uint64_t rsp = read_rsp();
     require_mapped(kernel_pml4, rsp, "the current stack");
     require_mapped(kernel_pml4, rsp - 0x4000, "room below the stack");
 
-    /* and the page tables themselves, which we reach through the hhdm */
+    /* and the page tables themselves, which I reach through the hhdm */
     require_mapped(kernel_pml4, (uint64_t)pmm_phys_to_virt(kernel_pml4),
                    "the pml4 itself");
 
@@ -375,7 +390,7 @@ void vmm_init(void) {
         panic("vmm: .text came out writable, W^X is not holding");
     }
     if (nx && (text_flags & PTE_NX)) {
-        panic("vmm: .text came out non-executable, we would fault instantly");
+        panic("vmm: .text came out non-executable, I would fault instantly");
     }
     uint64_t data_flags = vmm_flags(kernel_pml4, (uint64_t)__data_start);
     if (!(data_flags & PTE_WRITE)) {
@@ -388,10 +403,10 @@ void vmm_init(void) {
     enable_write_protect();
 
     /* the moment of truth. every instruction after this one is fetched
-     * through tables we built ourselves */
+     * through tables I built myself */
     asm volatile ("mov %0, %%cr3" : : "r"(kernel_pml4) : "memory");
 
-    kprintf("  -> cr3 is ours. %s, W^X on .text\n",
+    kprintf("  -> cr3 is mine. %s, W^X on .text\n",
             nx ? "NX enabled" : "no NX available");
 }
 

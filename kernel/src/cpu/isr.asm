@@ -45,7 +45,7 @@ isr_common:
     push r15
 
     cld                     ; sysv wants DF clear before calling C
-    mov rdi, rsp            ; first arg = pointer to the frame we just built
+    mov rdi, rsp            ; first arg = pointer to the frame I just built
     call interrupt_dispatch
 
     pop r15
@@ -75,5 +75,5 @@ isr_stub_table:
 %assign v v+1
 %endrep
 
-; tell the linker we dont want an executable stack, thanks
+; tell the linker I dont want an executable stack, thanks
 section .note.GNU-stack noalloc noexec nowrite progbits

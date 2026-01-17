@@ -58,7 +58,7 @@ int main(void) {
     CHECK(((lo >> 45) & 3) == 0,   "DPL is 0, ring 0 only");
     CHECK(((lo >> 47) & 1) == 1,   "present");
 
-    /* the user descriptors, whose layout sysret dictates rather than us */
+    /* the user descriptors, whose layout sysret dictates rather than me */
     CHECK(((gdt[GDT_USER_CODE / 8] >> 45) & 3) == 3, "user code is dpl 3");
     CHECK(((gdt[GDT_USER_DATA / 8] >> 45) & 3) == 3, "user data is dpl 3");
     CHECK((gdt[GDT_USER_CODE / 8] >> 53) & 1, "user code is a long mode segment");

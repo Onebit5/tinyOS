@@ -4,12 +4,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "limine.h"
+#include "philemon.h"
 
 /* framebuffer text console. 8x16 font, scrolling, block cursor.
  * handles \n \r \b \t, everything else gets blitted as a glyph */
 
-void console_init(struct limine_framebuffer *fb);
+void console_init(const struct ph_framebuffer *fb);
 bool console_ready(void);
 void console_putchar(char c);
 void console_write(const char *s);

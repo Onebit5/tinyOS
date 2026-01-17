@@ -26,7 +26,7 @@ int main(void) {
     CHECK(!p->exited, "and it has not finished");
 
     process_set_thread(pid, 7);
-    CHECK(process_find(pid)->thread_id == 7, "we can note which thread runs it");
+    CHECK(process_find(pid)->thread_id == 7, "I can note which thread runs it");
 
     /* collecting one that is still running must not succeed */
     int code = 999;

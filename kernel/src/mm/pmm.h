@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "limine.h"
+#include "philemon.h"
 
 /* physical memory manager. a buddy allocator underneath (see buddy.h):
  * free lists per block size, and blocks that put themselves back
@@ -21,7 +21,7 @@ void pmm_init(void);
 
 /* the actual brains, split from the limine plumbing so host tests can
  * feed it a hand-made memory map */
-void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
+void pmm_init_from_map(const struct ph_memmap_entry *entries, size_t count,
                        uint64_t hhdm);
 
 /* allocate/free contiguous runs of frames. returns the physical address
@@ -37,7 +37,7 @@ void     pmm_free(uint64_t phys);
 /* phys -> usable pointer, through the hhdm */
 void *pmm_phys_to_virt(uint64_t phys);
 
-/* where limine mirrored physical memory for us */
+/* where limine mirrored physical memory for me */
 uint64_t pmm_hhdm_offset(void);
 
 /* top of everything worth having in the direct map: the highest address
@@ -47,7 +47,7 @@ uint64_t pmm_hhdm_offset(void);
 uint64_t pmm_highest_address(void);
 
 /* hand back the memory limine was using for itself: its page tables,
- * its stack, its structures. only safe once nothing of ours is still
+ * its stack, its structures. only safe once nothing of mine is still
  * standing on any of it -- in particular the boot thread has to be
  * gone, since its stack is in there.
  *

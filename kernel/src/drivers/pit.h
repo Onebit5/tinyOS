@@ -20,7 +20,7 @@ void pit_busy_wait(uint64_t ms);
 
 /* the same wait, with no interrupt involved at all: channel 2 counts
  * down and says so through a bit on the keyboard controller's port,
- * which we can simply read. this is how you measure one clock against
+ * which I can simply read. this is how you measure one clock against
  * another before either of them is delivering anything.
  *
  * capped at 50ms, because channel 2 counts 16 bits at 1.193 MHz and

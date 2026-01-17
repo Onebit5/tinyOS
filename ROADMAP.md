@@ -50,7 +50,7 @@ grows a cpu% column and the scheduler stops being theoretical. a `top`
 that redraws. peak memory. how many syscalls of each kind.~~ **done in
 0.1.6.**
 
-**0.1.7 modern interrupt hardware.** ~~acpi tables (limine hands over the
+**0.1.7 modern interrupt hardware.** ~~acpi tables (the loader hands over the
 rsdp), then the lapic and ioapic in place of the 8259, and the lapic
 timer in place of the pit. lateral on its own -- the same behaviour on
 better hardware -- but it is the prerequisite for more than one cpu.~~
@@ -63,7 +63,7 @@ small, satisfying, and the doorway to every real device driver.~~
 
 **0.1.9 allocators worth the name.** ~~the pmm is a linear bitmap scan; a
 buddy allocator would make it logarithmic. a slab allocator for the
-fixed-size things we allocate constantly (threads, address spaces). a
+fixed-size things I allocate constantly (threads, address spaces). a
 `kmalloc` that is not first-fit.~~ **done in 0.1.9.**
 
 **0.1.10 a real filesystem, on a real disk.** ~~an ahci driver and fat32, read and write.~~ **done in 0.1.10.**
@@ -76,6 +76,9 @@ exactly as before.~~ **done in 0.1.11.** the ramdisk stays: it is what
 makes the machine work when the disk does not, and it is the foundation
 for booting one medium to install onto another.
 
-**0.1.12 our own bootloader.** stage 1 and stage 2, reading the kernel
-off fat32 with the driver 0.1.10 already tested, filling in the same
-structures the kernel expects so the kernel itself need not change.
+**0.1.12 my own bootloader.** ~~stage 1 and stage 2, filling in the same
+structures the kernel expects so the kernel itself need not change.~~
+**done in 0.1.12**, and kept alongside the loader rather than in place of
+it: `make run` is unchanged, `make run-mine` boots the one I wrote.
+the assembly half cannot be tested on a machine with no qemu, so it
+narrates every step over the serial port instead.

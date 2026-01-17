@@ -10,7 +10,7 @@
 
 struct elf_load_result {
     uint64_t entry;         /* where to start executing */
-    uint64_t brk;           /* first address past everything we mapped */
+    uint64_t brk;           /* first address past everything I mapped */
     bool     ok;
     const char *error;      /* why not, when ok is false */
 };

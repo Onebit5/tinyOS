@@ -22,7 +22,7 @@ extern const char ksym_names[];
 extern const unsigned long ksym_count;
 
 /* which function contains addr, and how far in. returns NULL if the
- * address is outside every function we know about */
+ * address is outside every function I know about */
 const char *ksym_lookup(uint64_t addr, uint64_t *offset);
 
 /* the same search against a table you supply -- this is the part with

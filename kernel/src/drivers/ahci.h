@@ -8,7 +8,7 @@
 /* the sata controller, which is how a real disk is reached.
  *
  * 0.1.8 found the devices on the pci bus and said what they were. this
- * is the first time we do anything with one. an ahci controller is
+ * is the first time I do anything with one. an ahci controller is
  * found by its class -- mass storage, sata, ahci -- and its last base
  * address register points at a block of memory-mapped registers rather
  * than at ports.
@@ -23,18 +23,30 @@
  * clearing the bit when it is done. the cpu is not involved in moving
  * any of the bytes.
  *
- * we use one slot and poll for it, because a disk read that blocks the
+ * I use one slot and poll for it, because a disk read that blocks the
  * kernel for a millisecond is not worth an interrupt handler yet. every
  * wait is bounded: a controller that never answers must not be able to
  * hang the boot. */
 
 #define AHCI_SECTOR 512
 
-/* find a controller on the pci bus and bring up the first disk on it.
- * returns false, quietly and safely, when there is no controller, no
- * drive, or anything at all goes wrong -- a machine with no disk boots
- * exactly as it did before */
+#define AHCI_MAX_DISKS 8
+
+/* find a controller on the pci bus and list the drives on it. returns
+ * false, quietly and safely, when there is no controller, no drive, or
+ * anything at all goes wrong -- a machine with no disk boots exactly as
+ * it did before.
+ *
+ * no drive is chosen here. there is more than one in this machine -- the
+ * one it booted from and the one it keeps files on -- and which is which
+ * is not something the controller knows */
 bool ahci_init(void);
+
+size_t ahci_disk_count(void);
+
+/* choose the drive every read and write below will go to. false if that
+ * one will not come up */
+bool ahci_use_disk(size_t which);
 
 bool ahci_present(void);
 

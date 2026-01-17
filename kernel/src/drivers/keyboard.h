@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* ps/2 keyboard, scancode set 1, us layout. interrupt driven. decoded
+/* ps/2 keyboard, scancode set 1, me layout. interrupt driven. decoded
  * keys go into the shared input queue -- see drivers/input.h, thats
  * where you read them back out */
 

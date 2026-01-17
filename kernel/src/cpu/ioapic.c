@@ -84,7 +84,7 @@ bool ioapic_init(uint32_t phys_address, uint32_t gsi_base) {
 bool ioapic_route(uint32_t gsi, uint8_t vector, uint32_t lapic_id,
                   uint16_t flags) {
     if (base == NULL || gsi < first_gsi || gsi >= first_gsi + line_count) {
-        kprintf("ioapic     : line %u is not one of ours (%u..%u)\n",
+        kprintf("ioapic     : line %u is not one of mine (%u..%u)\n",
                 gsi, first_gsi, first_gsi + line_count - 1);
         return false;
     }
@@ -109,8 +109,8 @@ bool ioapic_route(uint32_t gsi, uint8_t vector, uint32_t lapic_id,
      * here otherwise, and the consequence -- an interrupt that never
      * arrives -- is indistinguishable from hardware that is simply
      * quiet until somebody presses a key and nothing happens */
-    /* bits 12 and 14 are set by the chip, not by us, so compare only
-     * what we actually wrote: the vector and the mask bit */
+    /* bits 12 and 14 are set by the chip, not by me, so compare only
+     * what I actually wrote: the vector and the mask bit */
     uint32_t back = reg_read(reg);
     if ((back & 0xff) != (low & 0xff) || (back & REDIR_MASKED) != 0) {
         kprintf("ioapic     : line %u wrote %08x and read back %08x\n",

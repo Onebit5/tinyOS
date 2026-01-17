@@ -2,9 +2,9 @@
 # check every kprintf/panic format string against what kprintf can
 # actually do.
 #
-# this exists because gcc's format(printf) attribute checks our format
+# this exists because gcc's format(printf) attribute checks my format
 # strings against *real* printf, so it happily accepts anything the C
-# standard allows -- including flags our little formatter never
+# standard allows -- including flags my little formatter never
 # implemented. when that happens the specifier gets printed literally,
 # every following argument is read into the wrong slot, and you end up
 # staring at a page fault a long way from the actual mistake. ask me

@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-/* the usual suspects. no libc here so we roll our own.
+/* the usual suspects. no libc here so I roll my own.
  * note: gcc can emit calls to memcpy/memset behind your back even in
  * freestanding mode (struct copies etc), so these have to exist */
 

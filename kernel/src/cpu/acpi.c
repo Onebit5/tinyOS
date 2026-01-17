@@ -1,4 +1,5 @@
 #include "cpu/acpi.h"
+#include "boot.h"
 #include "lib/string.h"
 
 /* the root pointer. revision 0 means acpi 1.0 and a 32-bit rsdt;
@@ -74,7 +75,7 @@ static void parse_madt(const struct madt *m, struct acpi_info *out) {
     while (p + sizeof(struct madt_entry) <= end) {
         const struct madt_entry *e = (const struct madt_entry *)p;
 
-        /* a zero length would leave us here forever, and a firmware bug
+        /* a zero length would leave me here forever, and a firmware bug
          * is not a reason to hang before the console even exists */
         if (e->length < sizeof(struct madt_entry) || p + e->length > end) {
             break;
@@ -115,7 +116,7 @@ static void parse_madt(const struct madt *m, struct acpi_info *out) {
             break;
 
         default:
-            break;      /* nmi sources and the rest are not our business */
+            break;      /* nmi sources and the rest are not my business */
         }
 
         p += e->length;
@@ -203,15 +204,10 @@ const struct acpi_ioapic *acpi_ioapic_for_gsi(const struct acpi_info *info,
 
 #ifndef TINYOS_HOSTED
 
-#include "limine.h"
 #include "mm/pmm.h"
 #include "lib/kprintf.h"
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_rsdp_request rsdp_request = {
-    .id = LIMINE_RSDP_REQUEST,
-    .revision = 0,
-};
+
 
 /* acpi tables live in memory the memmap calls "acpi reclaimable", which
  * the direct map covers -- so reading one is just an offset away */
@@ -223,13 +219,13 @@ struct acpi_info acpi_init(void) {
     struct acpi_info info;
     memset(&info, 0, sizeof info);
 
-    if (rsdp_request.response == NULL) {
-        kprintf("acpi       : limine offered no rsdp\n");
+    if (boot_handoff()->rsdp == 0) {
+        kprintf("acpi       : the firmware has no acpi tables\n");
         return info;
     }
 
-    uint64_t rsdp = (uint64_t)rsdp_request.response->address;
-    /* limine may hand this back already in the higher half */
+    uint64_t rsdp = (uint64_t)boot_handoff()->rsdp;
+    /* it may arrive already in the direct map */
     if (rsdp >= pmm_hhdm_offset()) {
         rsdp -= pmm_hhdm_offset();
     }

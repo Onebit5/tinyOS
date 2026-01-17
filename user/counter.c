@@ -10,7 +10,7 @@
 void _start(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    /* a page of our own, at an address the other copy also thinks it
+    /* a page of my own, at an address the other copy also thinks it
      * owns. the number in here proves nobody else is writing to it */
     static long private_count;
 

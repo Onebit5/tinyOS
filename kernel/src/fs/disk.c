@@ -20,11 +20,22 @@ bool disk_mount(void) {
     if (!ahci_init()) {
         return false;
     }
-    if (!fat32_mount(&fs, ahci_read, ahci_write, NULL)) {
-        return false;
+
+    /* try each drive until one has a filesystem I recognise. the drive
+     * this machine booted from is a disk like any other, and the one
+     * with the files on it is not necessarily first -- so rather than
+     * guess, ask each in turn. a drive with no boot sector of the right
+     * shape simply fails to mount and the next one gets a go */
+    for (size_t i = 0; i < ahci_disk_count(); i++) {
+        if (!ahci_use_disk(i)) {
+            continue;
+        }
+        if (fat32_mount(&fs, ahci_read, ahci_write, NULL)) {
+            ready = true;
+            return true;
+        }
     }
-    ready = true;
-    return true;
+    return false;
 }
 
 /* ---- paths --------------------------------------------------------- */
@@ -52,7 +63,7 @@ static void fill(struct disk_entry *out, const struct fat32_file *f) {
     out->entry_offset = f->entry_offset;
 }
 
-/* ---- the calls above us make --------------------------------------- */
+/* ---- the calls above me make --------------------------------------- */
 
 bool disk_lookup(const char *path, struct disk_entry *out) {
     if (!ready) {

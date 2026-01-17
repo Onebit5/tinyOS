@@ -120,7 +120,7 @@ int main(void) {
     CHECK(buddy_free_frames() == 4093, "so does one that runs to the end");
     CHECK(count_by_hand() == 4093, "lists still agree");
 
-    /* nothing may merge past the end of what we manage: the frame just
+    /* nothing may merge past the end of what I manage: the frame just
      * off the top does not exist, and treating it as free would hand
      * out memory that is not there */
     reset(meta);

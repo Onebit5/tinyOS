@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-/* the door between ring 3 and here. numbers are ours, deliberately
+/* the door between ring 3 and here. numbers are mine, deliberately
  * small in number -- there is no libc out there to satisfy, only the
  * handful of things a program in this kernel could want */
 

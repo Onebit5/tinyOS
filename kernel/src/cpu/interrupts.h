@@ -20,7 +20,7 @@ struct interrupt_frame {
 void interrupt_dispatch(struct interrupt_frame *frame);
 
 /* bring up the apics if the firmware describes any, and move every
- * interrupt over to them. returns false if we are staying on the 8259,
+ * interrupt over to them. returns false if I am staying on the 8259,
  * which is not a failure -- it is the same behaviour by an older road */
 bool interrupts_use_apic(void);
 
@@ -37,7 +37,7 @@ bool interrupts_on_apic(void);
  * dispatch takes care of spurious irqs and the eoi, handlers just do their thing */
 void irq_register(uint8_t irq, void (*handler)(struct interrupt_frame *));
 
-/* our entire locking story, and on one core it genuinely is enough:
+/* my entire locking story, and on one core it genuinely is enough:
  * turn interrupts off, do the delicate thing, put them back exactly how
  * they were. save/restore rather than blind sti so these can nest */
 

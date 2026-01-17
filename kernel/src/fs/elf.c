@@ -66,7 +66,7 @@ bool elf_is_loadable(const void *image, uint64_t size, const char **why) {
         return false;
     }
     if (h->type != ET_EXEC) {
-        *why = "not a static executable (we cannot relocate)";
+        *why = "not a static executable (I cannot relocate)";
         return false;
     }
     if (h->phnum == 0) {
@@ -113,7 +113,7 @@ struct elf_load_result elf_load(const void *image, uint64_t size,
             r.error = "a segment reaches past the end of the file";
             return r;
         }
-        /* the higher half is ours. a program claiming to live there is
+        /* the higher half is mine. a program claiming to live there is
          * either broken or trying something */
         if (ph[i].vaddr >= 0xffff800000000000ull) {
             r.error = "a segment wants to live in kernel space";

@@ -127,7 +127,7 @@ uint64_t buddy_alloc(unsigned order) {
     }
 
     /* the smallest block big enough. if there is none, split a larger
-     * one, and keep splitting until we have the size asked for */
+     * one, and keep splitting until I have the size asked for */
     unsigned from = order;
     while (from <= BUDDY_MAX_ORDER && head[from] == BUDDY_NO_BLOCK) {
         from++;
@@ -158,7 +158,7 @@ void buddy_free(uint64_t frame, unsigned order) {
     }
     free_count += 1ull << order;
 
-    /* merge upwards for as long as our partner is also free. the buddy
+    /* merge upwards for as long as my partner is also free. the buddy
      * of a block is found by flipping the bit its size corresponds to,
      * which is the whole reason this works without a record of what was
      * split from what */
@@ -166,7 +166,7 @@ void buddy_free(uint64_t frame, unsigned order) {
         uint64_t buddy = frame ^ (1ull << order);
 
         if (buddy + (1ull << order) > total_frames) {
-            break;      /* our partner is off the end of memory */
+            break;      /* my partner is off the end of memory */
         }
         if (!is_free(buddy, order)) {
             break;      /* it is in use, so there is nothing to merge with */

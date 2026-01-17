@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 /* the task state segment. long mode threw out hardware task switching
- * and kept the tss anyway, for two things we actually want:
+ * and kept the tss anyway, for two things I actually want:
  *
  *  - the IST, a set of known-good stacks the cpu switches to when
  *    certain exceptions fire, whether or not the current stack is

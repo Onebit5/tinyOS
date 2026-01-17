@@ -101,7 +101,7 @@ int main(void) {
     tty_set_foreground(4242);
     (void)tty_intercept(KEY_CTRL_C);
     (void)tty_intercept(KEY_CTRL_C);
-    CHECK(true, "a foreground pid that has gone does not take us with it");
+    CHECK(true, "a foreground pid that has gone does not take me with it");
     tty_set_foreground(TTY_SHELL);
 
     /* ---- the line discipline ----

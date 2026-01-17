@@ -35,9 +35,9 @@ static void user_thread_start(void *arg) {
     uint64_t argv = u->argv;
     kfree(u);
 
-    /* the scheduler loaded our address space and pointed the tss rsp0
-     * and the syscall stack at our kernel stack when it switched us in,
-     * so a trap from ring 3 lands somewhere we own. everything below
+    /* the scheduler loaded my address space and pointed the tss rsp0
+     * and the syscall stack at my kernel stack when it switched me in,
+     * so a trap from ring 3 lands somewhere I own. everything below
      * this line is one way */
     enter_usermode(entry, stack_top, GDT_USER_CODE3, GDT_USER_DATA3,
                    argc, argv);
@@ -48,8 +48,8 @@ static void user_thread_start(void *arg) {
  * here the next `run` sweeps up, which keeps the table from filling
  * with the remains of programs nobody asked about */
 static void reap_abandoned(void) {
-    /* collecting one renumbers the walk under us, so finish and start
-     * over rather than trying to carry on from where we were */
+    /* collecting one renumbers the walk under me, so finish and start
+     * over rather than trying to carry on from where I was */
     bool collected_one = true;
     while (collected_one) {
         collected_one = false;
@@ -71,7 +71,7 @@ static void reap_abandoned(void) {
  * first the strings, then an array of pointers to them, then the stack
  * pointer it will start on.
  *
- * we are writing into a stack that belongs to an address space nobody
+ * I am writing into a stack that belongs to an address space nobody
  * has loaded yet, so every store goes through the direct map while
  * every *pointer* has to be the address the program will see. the two
  * run in lockstep, which is what user_addr() keeps straight. */
@@ -158,7 +158,7 @@ int user_spawn(const char *path, int argc, const char *const argv[],
     struct elf_load_result loaded = elf_load(image, image_size, space->pml4);
 
     /* elf_load has copied every segment into the new address space, so
-     * whatever we read the program out of is nobody's business now */
+     * whatever I read the program out of is nobody's business now */
     vfs_release(image, owned);
 
     if (!loaded.ok) {
@@ -274,7 +274,7 @@ bool user_run(const char *path, int argc, const char *const argv[],
     const struct process *p = process_find(pid);
     int id = (p != NULL) ? p->thread_id : 0;
 
-    /* the terminal is the program's now. we stop watching the keyboard
+    /* the terminal is the program's now. I stop watching the keyboard
      * entirely -- ctrl+c goes to it rather than being acted on for it,
      * and every other key is its to read. this is the difference
      * between a shell that waits and one that stands in the way */
@@ -287,7 +287,7 @@ bool user_run(const char *path, int argc, const char *const argv[],
      * waiting by id rather than by pointer is deliberate: the reaper
      * may free the thread the moment it dies, and an id cannot dangle.
      * a real join would sleep on a waitq owned by the thread, which
-     * needs lifetime rules we do not have -- this polls every 20ms,
+     * needs lifetime rules I do not have -- this polls every 20ms,
      * which no human will notice. */
     while (sched_thread_alive(id)) {
         sleep_ms(20);

@@ -1,4 +1,5 @@
 #include "fs/ramdisk.h"
+#include "boot.h"
 #include "lib/string.h"
 
 #define TAR_BLOCK 512
@@ -58,7 +59,7 @@ static bool is_ustar(const struct tar_header *h) {
         && h->magic[3] == 'a' && h->magic[4] == 'r';
 }
 
-/* the header at a given byte offset, or NULL if we have run off the end
+/* the header at a given byte offset, or NULL if I have run off the end
  * or hit the zero blocks that mark the finish */
 static const struct tar_header *header_at(uint64_t offset) {
     if (archive == NULL || offset + TAR_BLOCK > archive_size) {
@@ -69,7 +70,7 @@ static const struct tar_header *header_at(uint64_t offset) {
         return NULL;        /* end of archive */
     }
     if (!is_ustar(h)) {
-        return NULL;        /* not something we understand, stop rather
+        return NULL;        /* not something I understand, stop rather
                              * than wander off into the bytes */
     }
     return h;
@@ -93,7 +94,7 @@ void ramdisk_mount(const void *base, uint64_t size) {
             break;
         }
         /* typeflag '0' and '\0' both mean a normal file. directories
-         * ('5') exist in the archive but we have nothing to do with
+         * ('5') exist in the archive but I have nothing to do with
          * them, so they are counted and then ignored on lookup */
         file_count++;
         off = next_offset(off, h);
@@ -152,27 +153,21 @@ size_t   ramdisk_count(void)   { return file_count; }
 
 #ifndef TINYOS_HOSTED
 
-#include "limine.h"
 #include "lib/kprintf.h"
 
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_module_request module_request = {
-    .id = LIMINE_MODULE_REQUEST,
-    .revision = 0,
-};
+
 
 void ramdisk_init(void) {
-    if (module_request.response == NULL
-        || module_request.response->module_count == 0) {
+    const struct ph_handoff *h = boot_handoff();
+    if (h->ramdisk == 0 || h->ramdisk_size == 0) {
         kprintf("ramdisk    : none supplied, the shelves are bare\n");
         return;
     }
 
-    /* the module's *bytes* are safe -- limine puts them in memory typed
-     * "kernel and modules", which we never reclaim. this response
-     * struct is not, so copy what we need and never look again */
-    struct limine_file *m = module_request.response->modules[0];
-    ramdisk_mount(m->address, m->size);
+    /* the bytes themselves are safe: philemon puts them in memory typed
+     * "kernel + ramdisk", which is never reclaimed. the address arrives
+     * already in the direct map, ready to read */
+    ramdisk_mount((const void *)h->ramdisk, h->ramdisk_size);
 
     kprintf("ramdisk    : %lu KiB, %zu files\n",
             ramdisk_bytes() / 1024, ramdisk_count());

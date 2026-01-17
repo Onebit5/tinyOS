@@ -9,8 +9,8 @@
  * pml4 -> pdpt -> pd -> pt, and which everyone else calls "the reason
  * my kernel triple faults".
  *
- * up to now we were riding on the page tables limine built for us.
- * these are ours */
+ * up to now I was riding on the page tables limine built for me.
+ * these are mine */
 
 /* page table entry flags. the address lives in bits 12..51, the rest
  * is bookkeeping */
@@ -32,8 +32,8 @@
  * ambiguous, physical zero is a real (if useless) address */
 #define VMM_NO_MAPPING UINT64_MAX
 
-/* build our own address space, check it would actually work, and move
- * onto it. after this returns, cr3 is ours */
+/* build my own address space, check it would actually work, and move
+ * onto it. after this returns, cr3 is mine */
 void vmm_init(void);
 
 /* ---- address space surgery -----------------------------------------

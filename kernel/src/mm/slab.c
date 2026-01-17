@@ -146,7 +146,7 @@ void slab_free(void *object) {
 
     struct slab *s = page_of(object);
     if (s->magic != SLAB_MAGIC) {
-        panic("slab_free: %p came from no cache of ours", object);
+        panic("slab_free: %p came from no cache of mine", object);
     }
 
     struct slab_cache *cache = s->cache;

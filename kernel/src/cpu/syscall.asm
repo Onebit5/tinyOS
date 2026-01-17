@@ -3,13 +3,13 @@
 ; `syscall` is fast because it does almost nothing: it puts the return
 ; address in rcx, the flags in r11, loads cs/ss from STAR and rip from
 ; LSTAR, and that is the whole of it. in particular it does NOT change
-; rsp -- we arrive on the *user's* stack, in ring 0, which is as
+; rsp -- I arrive on the *user's* stack, in ring 0, which is as
 ; alarming as it sounds. the first job is to get off it.
 ;
 ; the swap uses two globals. that is only safe because SFMASK clears IF,
-; so we arrive with interrupts off and nothing can preempt us in the
+; so I arrive with interrupts off and nothing can preempt me in the
 ; three instructions before the user's rsp is safely on a kernel stack.
-; the moment it is, we can let interrupts back in.
+; the moment it is, I can let interrupts back in.
 ;
 ; syscall_kernel_rsp is kept pointing at the running thread's kernel
 ; stack by the scheduler, the same way the tss rsp0 is.
@@ -25,10 +25,10 @@ global syscall_scratch_rsp
 
 syscall_entry:
     mov [rel syscall_scratch_rsp], rsp      ; park the user stack briefly
-    mov rsp, [rel syscall_kernel_rsp]       ; and stand on our own
+    mov rsp, [rel syscall_kernel_rsp]       ; and stand on my own
 
     push qword [rel syscall_scratch_rsp]    ; now it is per-thread, on
-                                            ; our stack, and the global
+                                            ; my stack, and the global
                                             ; is free for the next caller
     push rcx                                ; user rip, courtesy of syscall
     push r11                                ; user rflags, likewise
@@ -40,10 +40,10 @@ syscall_entry:
     ; state leaking into a program that will happily use it as a
     ; pointer.
     ;
-    ; the caller-saved ones are ours to keep, because the C below may
+    ; the caller-saved ones are mine to keep, because the C below may
     ; clobber them and the shuffle certainly does. rbx, rbp and r12-r15
     ; need no saving here: syscall_dispatch is an ordinary C function
-    ; and the abi makes preserving those its problem, not ours.
+    ; and the abi makes preserving those its problem, not mine.
     push rdi
     push rsi
     push rdx
@@ -51,11 +51,11 @@ syscall_entry:
     push r8
     push r9
 
-    sti                                     ; safe now, we are on our own stack
+    sti                                     ; safe now, I am on my own stack
 
     ; two calling conventions meet here and they are NOT the same one.
     ;
-    ;   ring 3 hands us:  nr=rax  a0=rdi a1=rsi a2=rdx a3=r10 a4=r8
+    ;   ring 3 hands me:  nr=rax  a0=rdi a1=rsi a2=rdx a3=r10 a4=r8
     ;   sysv C wants:     arg1=rdi arg2=rsi arg3=rdx arg4=rcx arg5=r8 arg6=r9
     ;
     ; and syscall_dispatch's first argument is the number, so everything

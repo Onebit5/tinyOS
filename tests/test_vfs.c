@@ -33,7 +33,7 @@ static int failures = 0;
     if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
 } while (0)
 
-/* ---- a disk we can switch off ---- */
+/* ---- a disk I can switch off ---- */
 
 static bool have_disk = true;
 

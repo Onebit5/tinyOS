@@ -15,9 +15,9 @@
 #include "mm/addrspace.h"
 #include "sched/process.h"
 
-/* how many ticks a thread gets before we take the cpu back. 5 ticks at
- * 100hz = 50ms, short enough to look instant, long enough that we're
- * not spending all our time switching */
+/* how many ticks a thread gets before I take the cpu back. 5 ticks at
+ * 100hz = 50ms, short enough to look instant, long enough that I am
+ * not spending all my time switching */
 #define QUANTUM_TICKS 5
 
 /* implemented in switch.asm */
@@ -55,9 +55,9 @@ void sched_add(struct thread *t) {
     irq_restore(flags);
 }
 
-/* free anything that has finished. we walk from current outward and
- * never touch current itself, so we are structurally incapable of
- * freeing the stack we are standing on */
+/* free anything that has finished. I walk from current outward and
+ * never touch current itself, so I am structurally incapable of
+ * freeing the stack I am standing on */
 static void reap_dead(void) {
     struct thread *prev = current;
     struct thread *t = current->next;
@@ -125,7 +125,7 @@ static void schedule(void) {
     current = next;
 
     /* whose memory is real from here on. the kernel half is identical
-     * in every space, so the stack we are standing on survives the
+     * in every space, so the stack I am standing on survives the
      * change -- that is the whole reason the upper half is shared */
     addrspace_switch(next->space);
 
@@ -141,8 +141,8 @@ static void schedule(void) {
     }
 
     switch_context(&prev->rsp, &next->rsp);
-    /* when we get back here, an unknown amount of time has passed and
-     * we are `prev` again. everything above is somebody elses story */
+    /* when I get back here, an unknown amount of time has passed and
+     * I am `prev` again. everything above is somebody elses story */
 }
 
 void sched_yield(void) {
@@ -153,14 +153,14 @@ void sched_yield(void) {
 
 void waitq_block(struct waitq *q) {
     /* interrupts are already off -- see the contract in sched.h.
-     * we go on the queue and off the run queue in the same breath */
+     * I go on the queue and off the run queue in the same breath */
     current->wait_next = q->head;
     current->waiting_on = q;
     q->head = current;
     current->state = THREAD_BLOCKED;
     schedule();
     current->waiting_on = NULL;
-    /* somebody woke us and the scheduler picked us back up */
+    /* somebody woke me and the scheduler picked me back up */
 }
 
 void waitq_wake_all(struct waitq *q) {
@@ -382,7 +382,7 @@ void sched_init(void) {
     boot_thread.name[3] = 't';
     boot_thread.name[4] = '\0';
     boot_thread.state = THREAD_RUNNING;
-    boot_thread.stack_phys = 0;     /* limine's, not ours to free */
+    boot_thread.stack_phys = 0;     /* limine's, not mine to free */
     boot_thread.stack_pages = 0;
     boot_thread.next = &boot_thread;    /* a ring of one, for now */
     boot_thread.wait_next = NULL;

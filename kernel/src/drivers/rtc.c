@@ -46,7 +46,7 @@ void rtc_decode(struct rtc_time *t, uint8_t status_b) {
     }
 
     /* two digits is all the chip stores, and the century register is
-     * not reliable. we assume nobody boots this in 2099 */
+     * not reliable. I assume nobody boots this in 2099 */
     t->year = (uint16_t)(t->year + 2000);
 }
 
@@ -54,7 +54,7 @@ void rtc_decode(struct rtc_time *t, uint8_t status_b) {
 
 static uint8_t cmos_read(uint8_t reg) {
     /* the top bit of the address port also gates NMIs. keep it clear so
-     * we dont silently leave them masked */
+     * I dont silently leave them masked */
     outb(CMOS_ADDR, reg & 0x7f);
     return inb(CMOS_DATA);
 }
@@ -80,7 +80,7 @@ void rtc_read(struct rtc_time *out) {
     /* the chip updates itself once a second and the registers are
      * inconsistent while it does. wait for that to pass, then read
      * twice and only believe it when two reads agree -- an update can
-     * still start in the middle of ours */
+     * still start in the middle of mine */
     do {
         while (update_in_progress()) { }
         read_raw(&a);

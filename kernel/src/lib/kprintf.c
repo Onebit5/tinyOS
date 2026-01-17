@@ -192,7 +192,7 @@ void kvprintf(const char *fmt, va_list ap) {
 void kprintf(const char *fmt, ...) {
     /* one line at a time, please. without this two threads printing at
      * once produce a lovely mess of interleaved half-words on screen.
-     * yes this means a slow framebuffer scroll can cost us a timer
+     * yes this means a slow framebuffer scroll can cost me a timer
      * tick -- uptime drifts a hair, the alternative is unreadable */
     uint64_t flags = irq_save();
 

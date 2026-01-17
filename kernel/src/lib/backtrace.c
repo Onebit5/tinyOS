@@ -5,7 +5,7 @@
 
 #define MAX_FRAMES 24
 
-/* what gcc leaves on the stack for every function, given we build with
+/* what gcc leaves on the stack for every function, given I build with
  * -fno-omit-frame-pointer: the caller's rbp, then the return address */
 struct frame {
     struct frame *caller_rbp;
@@ -17,7 +17,7 @@ static void print_where(uint64_t addr) {
      * low half belongs to whatever program was running, and saying so
      * is more use than shrugging */
     if (addr < 0xffff800000000000ull) {
-        kprintf("  %p  <in userspace, which we have no symbols for>\n",
+        kprintf("  %p  <in userspace, which I have no symbols for>\n",
                 (void *)addr);
         return;
     }
@@ -31,10 +31,10 @@ static void print_where(uint64_t addr) {
     }
 }
 
-/* we are almost certainly being called from a panic, so absolutely
+/* I am almost certainly being called from a panic, so absolutely
  * nothing here may fault -- a page fault inside the backtrace printer
  * would bury the actual bug under a second one. every address gets
- * checked against the page tables before we dereference it */
+ * checked against the page tables before I dereference it */
 static bool readable(const void *p) {
     uint64_t pml4 = vmm_kernel_pml4();
     if (pml4 == 0) {
@@ -68,7 +68,7 @@ void kbacktrace(uint64_t rbp, uint64_t rip) {
             break;
         }
         if (f->return_addr == 0) {
-            break;      /* the zero we fabricate at the base of every thread */
+            break;      /* the zero I fabricate at the base of every thread */
         }
 
         print_where(f->return_addr);

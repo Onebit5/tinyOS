@@ -9,7 +9,7 @@
 #define PIT_CMD  0x43
 
 /* channel 2's gate and its output, on the keyboard controller of all
- * places. bit 0 gates the count, bit 1 is the speaker (which we leave
+ * places. bit 0 gates the count, bit 1 is the speaker (which I leave
  * firmly off), and bit 5 reads back whether the count has finished */
 #define PORT_61       0x61
 #define P61_GATE      0x01
@@ -18,7 +18,7 @@
 #define PIT_IRQ  0
 
 /* the crystal runs at 1.193182 MHz because of a 1981 decision to reuse
- * the ntsc colorburst divider. we have all been living with it since */
+ * the ntsc colorburst divider. I have all been living with it since */
 #define PIT_BASE_HZ 1193182
 
 static volatile uint64_t ticks;

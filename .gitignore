@@ -6,6 +6,7 @@ iso_root/
 
 # the disk image is generated, and is meant to be written to
 disk.img
+tinyos-boot.img
 *.img
 ramdisk/bin/
 

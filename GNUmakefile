@@ -1,25 +1,23 @@
-# tinyOS build. needs gcc, nasm, make. iso/run additionally need xorriso + qemu.
+# tinyOS build. needs gcc, nasm, make. `make run` additionally needs qemu.
 #
 # targets:
 #   make        -> kernel elf in bin/
-#   make iso    -> bootable hybrid bios/uefi iso
 #   make run    -> boot it in qemu
 #   make clean
 
 KERNEL := tinyos
-ISO    := tinyos.iso
 
 CC   := gcc
 LD   := ld
 NASM := nasm
 
-# freestanding kernel flags. the -mno-* soup is because we cant use fpu/sse
+# freestanding kernel flags. the -mno-* soup is because I cant use fpu/sse
 # in the kernel (no context saving yet), and no red zone because interrupts
 # would trash it
 CFLAGS := -g -Wall -Wextra -std=gnu11 \
 	-ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-PIC \
 	-m64 -march=x86-64 -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone \
-	-mcmodel=kernel -Ikernel/src -MMD -MP -fno-omit-frame-pointer
+	-mcmodel=kernel -Ikernel/src -Iboot -MMD -MP -fno-omit-frame-pointer
 
 LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld
 
@@ -30,14 +28,14 @@ ASRC := $(shell find kernel/src -name '*.asm')
 OBJ  := $(patsubst kernel/src/%.c,obj/%.c.o,$(CSRC)) \
         $(patsubst kernel/src/%.asm,obj/%.asm.o,$(ASRC))
 
-.PHONY: all iso run run-uefi clean distclean
+.PHONY: all run bootimg clean distclean
 
-all: bin/$(KERNEL)
+all: $(BOOTIMG)
 
 # two passes, because the symbol table describes addresses and linking
 # it in changes them. .ksyms sits after .text in the linker script, so
 # folding it in shifts .data but cannot move a single function -- and
-# gensyms --check proves that held instead of us just hoping.
+# gensyms --check proves that held instead of me just hoping.
 bin/$(KERNEL): $(OBJ) kernel/linker.ld tools/gensyms.py
 	@mkdir -p $(@D) obj
 	@python3 tools/gensyms.py --stub > obj/ksyms.c
@@ -61,13 +59,6 @@ obj/%.asm.o: kernel/src/%.asm
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 -include $(OBJ:.o=.d)
-
-# limine binary release, pinned to the v9.x branch. shallow clone bc we only
-# want the prebuilt blobs + the host install tool
-limine/limine:
-	test -d limine || git clone --branch=v9.x-binary --depth=1 \
-		https://github.com/limine-bootloader/limine.git limine
-	$(MAKE) -C limine
 
 # ---- userspace ------------------------------------------------------
 #
@@ -110,6 +101,54 @@ $(RAMDISK): $(USER_PROGS) $(RAMDISK_FILES)
 	tar --format=ustar --sort=name --owner=0 --group=0 --numeric-owner \
 		--mtime=@0 -cf $@ -C ramdisk .
 
+# ---- philemon, the bootloader ---------------------------------------
+#
+# there was a borrowed one here until 0.1.12. writing a bootloader and
+# then booting with somebody else's is not much of a bootloader, so it
+# is gone -- along with the iso, the uefi path and the protocol that
+# came with it. the kernel is handed one struct now, in rdi, and knows
+# nothing about anybody's boot protocol including mine.
+
+BOOTIMG   := tinyos.img
+BOOTCC    := gcc
+BOOTCFLAGS := -std=gnu11 -ffreestanding -fno-pic -fno-stack-protector \
+              -mno-red-zone -mno-sse -mno-mmx -mno-80387 -mcmodel=small \
+              -Wall -Wextra -O2 -Iboot
+
+bin/boot/philemon.bin: boot/philemon.asm boot/philemon.inc
+	@mkdir -p $(@D)
+	$(NASM) -f bin $< -o $@
+
+bin/boot/philemon64.bin: boot/philemon.c boot/philemon.h boot/philemon.ld
+	@mkdir -p $(@D) obj
+	$(BOOTCC) $(BOOTCFLAGS) -c boot/philemon.c -o obj/philemon.o
+	$(LD) -T boot/philemon.ld -nostdlib -static --no-warn-rwx-segments \
+		obj/philemon.o -o obj/philemon.elf
+	objcopy -O binary obj/philemon.elf $@
+
+$(BOOTIMG): bin/boot/philemon.bin bin/boot/philemon64.bin \
+            bin/$(KERNEL) $(RAMDISK) tools/mkboot.py boot/philemon.inc \
+            boot/philemon.h
+	@python3 tools/mkboot.py $@ bin/boot/philemon.bin \
+		bin/boot/philemon64.bin bin/$(KERNEL) $(RAMDISK)
+
+.PHONY: bootimg
+bootimg: $(BOOTIMG)
+
+# two drives: the one philemon is on, and the one with the files. the
+# boot image goes first and is named as the boot device twice over --
+# `order=c` so the bios does not go looking for a floppy it has not got,
+# and a bootindex on each so the order is not left to chance.
+#
+# the kernel does not care which is which: it tries every drive until one
+# has a filesystem it recognises, and the boot image has none
+run: $(BOOTIMG) $(DISK)
+	qemu-system-x86_64 -M q35 -m 2G -serial stdio -boot order=c \
+		-drive id=boot,file=$(BOOTIMG),format=raw,if=none \
+		-device ide-hd,drive=boot,bus=ide.0,bootindex=0 \
+		-drive id=data,file=$(DISK),format=raw,if=none \
+		-device ide-hd,drive=data,bus=ide.1,bootindex=1
+
 # the disk, which is a real filesystem rather than an archive: built by
 # tools/mkfat.py out of whatever is in diskroot/, and attached to qemu
 # as a sata drive. it is deliberately NOT rebuilt by `make run` once it
@@ -126,49 +165,17 @@ disk:
 	@rm -f $(DISK)
 	@$(MAKE) --no-print-directory $(DISK)
 
-iso: bin/$(KERNEL) $(RAMDISK) limine/limine
-	rm -rf iso_root
-	mkdir -p iso_root/boot/limine iso_root/EFI/BOOT
-	cp bin/$(KERNEL) iso_root/boot/
-	cp $(RAMDISK) iso_root/boot/
-	cp limine.conf limine/limine-bios.sys limine/limine-bios-cd.bin \
-		limine/limine-uefi-cd.bin iso_root/boot/limine/
-	cp limine/BOOTX64.EFI iso_root/EFI/BOOT/
-	xorriso -as mkisofs -R -r -J \
-		-b boot/limine/limine-bios-cd.bin -no-emul-boot \
-		-boot-load-size 4 -boot-info-table \
-		--efi-boot boot/limine/limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(ISO)
-	./limine/limine bios-install $(ISO)
-	rm -rf iso_root
-
-# -boot d says the cd, not the hard disk. without it the bios finds a
-# 0x55aa at the end of the disk's boot sector, decides that means
-# bootable, and jumps into a filesystem
-run: iso $(DISK)
-	qemu-system-x86_64 -M q35 -m 2G -cdrom $(ISO) -boot d -serial stdio \
-		-drive id=disk,file=$(DISK),format=raw,if=none \
-		-device ich9-ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0
-
-# needs edk2-ovmf installed (fedora path below)
-run-uefi: iso $(DISK)
-	qemu-system-x86_64 -M q35 -m 2G -cdrom $(ISO) -boot d -serial stdio \
-		-drive id=disk,file=$(DISK),format=raw,if=none \
-		-device ich9-ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
-		-drive if=pflash,unit=0,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd
-
 # ---- host tests -----------------------------------------------------
 #
 # the testable guts of the kernel are deliberately split from the parts
 # that touch hardware: pmm_init_from_map() takes a memory map instead of
-# asking limine, keyboard_feed() takes a scancode instead of reading a
+# asking the loader, keyboard_feed() takes a scancode instead of reading a
 # port, and so on. that lets all of this run as ordinary linux programs.
 # TINYOS_HOSTED turns irq_save/irq_restore into no-ops, since userspace
 # gets shot for saying cli.
 
 HOSTCC    := gcc
-HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
+HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src -Iboot
 
 TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/vmm bin/tests/gdt \
@@ -176,7 +183,7 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/addrspace bin/tests/process \
              bin/tests/syscall bin/tests/tty bin/tests/auth bin/tests/acpi bin/tests/pci \
              bin/tests/keyboard bin/tests/serial \
-             bin/tests/fat32 bin/tests/vfs \
+             bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
              bin/tests/shell bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
@@ -216,6 +223,7 @@ bin/tests/fat32:    tests/test_fat32.c    kernel/src/fs/fat32.c \
                     kernel/src/lib/string.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c
+bin/tests/philemon:  tests/test_philemon.c boot/philemon.c boot/philemon.h
 bin/tests/gdt:      tests/test_gdt.c      kernel/src/cpu/gdt.c
 bin/tests/gdt:      SRCS = tests/test_gdt.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
@@ -232,7 +240,7 @@ bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c \
 
 # SRCS overrides what gets compiled, for tests that #include a kernel
 # .c file directly -- that file still belongs in the prerequisites so
-# make rebuilds when it changes, but compiling it twice would give us
+# make rebuilds when it changes, but compiling it twice would give me
 # duplicate symbols
 $(filter-out bin/tests/switch,$(TEST_BINS)):
 	@mkdir -p $(@D)
@@ -273,8 +281,8 @@ test: checkfmt $(USER_PROGS) $(RAMDISK) $(TEST_BINS) fat32-image
 	done; \
 	if [ $$fail -eq 0 ]; then echo '  all suites passed'; else exit 1; fi
 
-# gcc checks our format strings against real printf, which accepts far
-# more than our kprintf implements. this catches the difference.
+# gcc checks my format strings against real printf, which accepts far
+# more than my kprintf implements. this catches the difference.
 .PHONY: checkfmt
 checkfmt:
 	@printf '  %-10s ' checkfmt
@@ -289,4 +297,3 @@ clean:
 	rm -rf bin obj iso_root $(ISO)
 
 distclean: clean
-	rm -rf limine

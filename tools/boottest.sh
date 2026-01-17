@@ -9,7 +9,7 @@
 
 set -eu
 
-ISO="${1:-tinyos.iso}"
+BOOTIMG="${1:-tinyos.img}"
 
 # a disk of its own, built fresh, because this test writes to it and a
 # run that only passes on the leavings of the last one proves nothing
@@ -28,7 +28,7 @@ fi
 echo "booting $ISO and driving the shell over serial..."
 
 # the sleeps matter: the kernel has to get all the way to a prompt
-# before it can hear us, and each command needs a beat to answer
+# before it can hear me, and each command needs a beat to answer
 {
     sleep 8
     printf 'igor\r';   sleep 1
@@ -80,9 +80,11 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'ps\r';     sleep 1
     printf 'dmesg\r';  sleep 2
 } | timeout 90 qemu-system-x86_64 \
-        -M q35 -m 2G -cdrom "$ISO" -boot d \
-        -drive id=disk,file="$DISK",format=raw,if=none \
-        -device ich9-ahci,id=ahci -device ide-hd,drive=disk,bus=ahci.0 \
+        -M q35 -m 2G -boot order=c \
+        -drive id=boot,file="$BOOTIMG",format=raw,if=none \
+        -device ide-hd,drive=boot,bus=ide.0,bootindex=0 \
+        -drive id=data,file="$DISK",format=raw,if=none \
+        -device ide-hd,drive=data,bus=ide.1,bootindex=1 \
         -display none -serial stdio -no-reboot \
         > "$LOG" 2>&1 || true
 
@@ -104,7 +106,7 @@ check 'acpi parsed'        'acpi       :'
 check 'interrupts routed'  'interrupts :'
 check 'memory map parsed'  'memory map, as declared by limine'
 check 'memory selftest'    'books balance'
-check 'own page tables'    'cr3 is ours'
+check 'own page tables'    'cr3 is mine'
 check 'W^X applied'        'W^X on .text'
 check 'tss loaded'         'tss loaded'
 check 'boot thread left'   '[boot] hath returned'
@@ -114,7 +116,7 @@ check 'login prompt'       'name the guest'
 check 'login works'        'welcome, igor'
 check 'reached the prompt' 'igor@velvet#'
 
-# did it answer us
+# did it answer me
 check 'help works'    'call forth a persona thread'
 check 'mem works'     'physical frames'
 check 'uptime works'  'awake for'
@@ -143,7 +145,7 @@ check 'free block shape' 'free blocks, by size'
 check 'slab caches'      'kmalloc-'
 check 'thread cache'     'addrspace'
 check 'disk at the root' 'fat32 \"TINYOS\" mounted at /'
-check 'mount table'      'a module the bootloader handed us'
+check 'mount table'      'a module the bootloader handed me'
 check 'root listed'      'welcome.txt'
 check 'boot is a mount'  'boot/'
 check 'disk shadows'     'This file is on the disk'
@@ -174,7 +176,7 @@ check 'wait works'       'exactly as foretold'
 check 'a program reads'  'what is thy name?'
 check 'input reaches it' 'well met, Igor'
 check 'ctrl+c delivered' 'leaving politely'
-check 'dmesg works'    'cr3 is ours'
+check 'dmesg works'    'cr3 is mine'
 
 # and did it stay alive rather than falling over
 if grep -qF 'refused a pointer' "$LOG"; then

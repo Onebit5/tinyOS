@@ -36,6 +36,6 @@ void _start(int argc, char **argv) {
     write(", exactly as foretold\n");
 
     /* that number crossed two address spaces and outlived the thread
-     * that produced it. pass it on as our own */
+     * that produced it. pass it on as my own */
     exit(code);
 }

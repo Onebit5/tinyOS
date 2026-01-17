@@ -2,7 +2,7 @@
 
 /* the table is sorted by address, so this is a binary search for the
  * last symbol at or below addr -- the function the address falls
- * inside. we have no symbol *sizes*, only start addresses, so an
+ * inside. I have no symbol *sizes*, only start addresses, so an
  * address past the end of the last function still reports as being
  * deep inside it. the offset gives that away when it looks absurd */
 const char *ksym_lookup_in(const struct ksym *table, size_t count,
@@ -14,7 +14,7 @@ const char *ksym_lookup_in(const struct ksym *table, size_t count,
 
     size_t lo = 0, hi = count - 1;
     while (lo < hi) {
-        size_t mid = lo + (hi - lo + 1) / 2;   /* bias up, we want the last <= */
+        size_t mid = lo + (hi - lo + 1) / 2;   /* bias up, I want the last <= */
         if (table[mid].addr <= addr) {
             lo = mid;
         } else {

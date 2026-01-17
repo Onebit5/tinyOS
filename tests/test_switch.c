@@ -27,7 +27,7 @@ uint64_t rbx_out, r12_out, r13_out, r14_out, r15_out, rbp_out;
 static void fake_thread(void) {
     reached = 1;
     switch_context(&thread_rsp, &main_rsp);   /* hand the cpu back */
-    reached = 2;                              /* we got resumed */
+    reached = 2;                              /* I got resumed */
     switch_context(&thread_rsp, &main_rsp);
     reached = 99;                             /* must never happen */
     for (;;) { }

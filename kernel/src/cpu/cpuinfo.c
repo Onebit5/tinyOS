@@ -19,7 +19,7 @@ void cpu_vendor(char *buf) {
 void cpu_brand(char *buf) {
     uint32_t eax, ebx, ecx, edx;
 
-    /* leaf 0x80000000 tells us how far the extended leaves go. the
+    /* leaf 0x80000000 tells me how far the extended leaves go. the
      * brand string lives in three of them and not every cpu has it */
     cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
     if (eax < 0x80000004) {

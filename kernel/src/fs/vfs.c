@@ -347,7 +347,7 @@ bool vfs_mount_at(size_t index, struct vfs_mount *out) {
     if (index == 1) {
         out->at = VFS_BOOT;
         out->what = "ustar";
-        out->where = "a module the bootloader handed us";
+        out->where = "a module the bootloader handed me";
         out->writable = false;
         out->present = ramdisk_present();
         return true;

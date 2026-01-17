@@ -74,7 +74,7 @@ static const struct persona personas[] = {
 #define PERSONA_LINES 8
 
 /* ctrl+c bumps this. every persona remembers what it was when it was
- * summoned, and takes the hint when the number moves. we have no
+ * summoned, and takes the hint when the number moves. I have no
  * signals and no way to yank a sleeping thread off the run queue, so
  * cancelling is cooperative: a persona notices next time it wakes up,
  * which can be up to one sleep period later */
@@ -180,7 +180,7 @@ static void cmd_disk(int argc, char **argv) {
 
     if (!disk_ready()) {
         kprintf("no disk. this machine has only the ramdisk, which is a tar\n");
-        kprintf("file limine handed us and which forgets everything on reboot.\n");
+        kprintf("file limine handed me and which forgets everything on reboot.\n");
         kprintf("give qemu a drive and there will be somewhere to write.\n");
         return;
     }
@@ -336,7 +336,7 @@ static void cmd_vmm(int argc, char **argv) {
  * left unmapped below every thread stack, which turns what would be
  * silent corruption of the next thread's stack into a clean fault.
  *
- * yes gcc, we know its infinite recursion. thats the entire feature */
+ * yes gcc, I know its infinite recursion. thats the entire feature */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winfinite-recursion"
 static uint64_t eat_stack(uint64_t depth) {
@@ -362,7 +362,7 @@ static void cmd_bt(int argc, char **argv) {
     kbacktrace(0, 0);
 }
 
-/* the archive is a flat list of paths and we do not search it, so
+/* the archive is a flat list of paths and I do not search it, so
  * `hello` will not find `bin/hello`. rather than add a path search --
  * which is magic that surprises you later -- say what they probably
  * meant, if exactly one file ends that way */
@@ -459,7 +459,7 @@ static void cmd_lspci(int argc, char **argv) {
         if (name != NULL) {
             kprintf("  -- %s", name);
         } else if (maker != NULL) {
-            kprintf("  -- %s, model unknown to us", maker);
+            kprintf("  -- %s, model unknown to me", maker);
         }
         kprintf("\n");
 
@@ -547,7 +547,7 @@ static void cmd_top(int argc, char **argv) {
         sleep_ms(500);
     }
 
-    (void)input_getchar();      /* the key that stopped us is not a command */
+    (void)input_getchar();      /* the key that stopped me is not a command */
     console_clear();
 }
 
@@ -570,7 +570,7 @@ static void cmd_dmesg(int argc, char **argv) {
     klog_dump();
 }
 
-/* ---- who and what we are -------------------------------------------- */
+/* ---- who and what I am -------------------------------------------- */
 
 static void cmd_arcana(int argc, char **argv) {
     (void)argc; (void)argv;
@@ -813,7 +813,7 @@ static const struct command commands[] = {
 /* ---- the line editor ----------------------------------------------- */
 
 /* chop a line into argv in place. spaces become terminators, runs of
- * them collapse, and we stop early rather than overflow argv */
+ * them collapse, and I stop early rather than overflow argv */
 static int split(char *line, char **argv, int max) {
     int argc = 0;
     char *p = line;
@@ -837,7 +837,7 @@ static int split(char *line, char **argv, int max) {
 }
 
 /* dispatch an already-split command. separate from run_line so `time`
- * can hand us its own argv without re-parsing anything */
+ * can hand me its own argv without re-parsing anything */
 static void run_argv(int argc, char **argv) {
     if (argc == 0) {
         return;
@@ -868,7 +868,7 @@ static void run_argv(int argc, char **argv) {
         }
     }
 
-    /* before giving up, see if they nearly typed something real. we
+    /* before giving up, see if they nearly typed something real. I
      * only compare leading characters -- enough to catch a fumbled
      * ending like `dmseg`, and honest about not being spell check */
     const struct command *near = NULL;
@@ -979,7 +979,7 @@ static void move_left(size_t n) {
 }
 
 /* reprint everything from pos onward, plus a space to cover a character
- * that just shifted off the end, then come back to where we were */
+ * that just shifted off the end, then come back to where I was */
 static void redraw_tail(const char *line, size_t len, size_t pos) {
     for (size_t i = pos; i < len; i++) {
         kprintf("%c", line[i]);
@@ -1098,7 +1098,7 @@ static bool first_word_is_program(const char *line) {
     return ramdisk_open(path, &f);
 }
 
-/* which command the line begins with, or NULL if it is not one we know.
+/* which command the line begins with, or NULL if it is not one I know.
  * the line must already be terminated -- complete() sees to that */
 static const struct command *command_for_line(const char *line) {
     size_t i = 0;
@@ -1313,7 +1313,7 @@ static void complete(char *line, size_t *len, size_t *pos) {
     }
 
     /* several: fill in as far as they all agree, and only if that adds
-     * nothing do we show the list */
+     * nothing do I show the list */
     size_t shared = strlen(c.items[0]);
     for (int i = 1; i < c.count; i++) {
         size_t n = common_prefix(c.items[0], c.items[i]);
@@ -1444,8 +1444,8 @@ void shell_run(void) {
             int c = input_getchar_blocking();
 
             if (c == '\n') {
-                /* print the tail we were sitting in front of, so the
-                 * finished line reads properly before we move on */
+                /* print the tail I was sitting in front of, so the
+                 * finished line reads properly before I move on */
                 for (size_t i = pos; i < len; i++) {
                     kprintf("%c", line[i]);
                 }
@@ -1571,7 +1571,7 @@ void shell_run(void) {
 
             /* ---- typing ---- */
             if (c < ' ' || c > '~') {
-                continue;       /* anything else non-printable is not ours */
+                continue;       /* anything else non-printable is not mine */
             }
             if (len + 1 < LINE_MAX) {
                 for (size_t i = len; i > pos; i--) {
@@ -1580,7 +1580,7 @@ void shell_run(void) {
                 line[pos] = (char)c;
                 len++;
                 /* print from here to the end, then step back to just
-                 * after the character we inserted */
+                 * after the character I inserted */
                 for (size_t i = pos; i < len; i++) {
                     kprintf("%c", line[i]);
                 }

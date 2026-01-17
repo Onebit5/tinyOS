@@ -35,9 +35,9 @@ struct thing { uint64_t a, b, c; char name[24]; };   /* 48 bytes */
 int main(void) {
     void *arena = aligned_alloc(4096, ARENA);
 
-    struct limine_memmap_entry e0 = { .base = 0x1000, .length = ARENA - 0x1000,
-                                      .type = LIMINE_MEMMAP_USABLE };
-    struct limine_memmap_entry *map[1] = { &e0 };
+    struct ph_memmap_entry e0 = { .base = 0x1000, .length = ARENA - 0x1000,
+                                      .type = PH_MEM_USABLE };
+    struct ph_memmap_entry map[1] = { e0 };
     pmm_init_from_map(map, 1, (uint64_t)arena);
 
     uint64_t ram_at_rest = pmm_free_bytes();

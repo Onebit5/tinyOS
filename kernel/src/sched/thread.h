@@ -24,7 +24,7 @@ struct thread {
      * lives ON that stack -- this one word is the whole handle */
     uint64_t rsp;
 
-    uint64_t stack_phys;        /* what the pmm gave us, for giving back */
+    uint64_t stack_phys;        /* what the pmm gave me, for giving back */
     size_t   stack_pages;
 
     enum thread_state state;

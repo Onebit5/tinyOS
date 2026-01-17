@@ -28,11 +28,11 @@
 #define FD_STDERR       2
 #define FD_FIRST_FILE   3
 
-/* what we record when a process was killed rather than choosing to go */
+/* what I record when a process was killed rather than choosing to go */
 #define PROCESS_KILLED  (-1)
 
 /* a file, as far as a process is concerned: somewhere in the ramdisk
- * and how far through it we are. nothing is copied -- the archive is
+ * and how far through it I am. nothing is copied -- the archive is
  * already in memory and read-only, so a descriptor is a bookmark */
 struct fd {
     bool            open;

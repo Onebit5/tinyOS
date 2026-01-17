@@ -35,7 +35,7 @@ typedef bool (*fat32_out)(void *ctx, uint64_t lba, uint32_t count,
 
 struct fat32 {
     fat32_io  read;
-    fat32_out write;            /* NULL for a disk we may only read */
+    fat32_out write;            /* NULL for a disk I may only read */
     void     *ctx;
 
     /* straight out of the boot sector */
@@ -53,7 +53,7 @@ struct fat32 {
     char     label[12];
     bool     mounted;
 
-    /* somewhere to put a sector while we look at it. one buffer, and
+    /* somewhere to put a sector while I look at it. one buffer, and
      * every path through here is short and holds no locks */
     uint8_t  scratch[FAT32_SECTOR];
 };
@@ -103,9 +103,9 @@ int64_t fat32_read(struct fat32 *fs, const struct fat32_file *f,
 int64_t fat32_write(struct fat32 *fs, struct fat32_file *f,
                     uint64_t offset, const void *buf, uint64_t len);
 
-/* make a file in an existing directory. the name must fit 8.3, since we
+/* make a file in an existing directory. the name must fit 8.3, since I
  * write short entries only -- reading long names is one thing, minting
- * them is another, and a name we cannot store is better refused than
+ * them is another, and a name I cannot store is better refused than
  * quietly mangled */
 bool fat32_create(struct fat32 *fs, const char *path, struct fat32_file *out);
 

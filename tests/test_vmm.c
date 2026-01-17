@@ -2,8 +2,8 @@
  *
  * vmm.c only needs two things from the outside world -- a page of
  * memory (pmm_alloc_pages) and a way to reach a physical address
- * (pmm_phys_to_virt) -- so here we hand it a malloc'd arena and call
- * offsets into it "physical addresses". then we build real four-level
+ * (pmm_phys_to_virt) -- so here I hand it a malloc'd arena and call
+ * offsets into it "physical addresses". then I build real four-level
  * page tables in it and walk them back.
  *
  * getting this wrong in the kernel means a triple fault with no
@@ -75,7 +75,7 @@ int main(void) {
     CHECK(vmm_translate(pml4, 0x401000) == VMM_NO_MAPPING,
           "the next page along is still empty");
     CHECK(vmm_flags(pml4, 0x400000) & PTE_WRITE, "flags survive the round trip");
-    CHECK(vmm_flags(pml4, 0x400000) & PTE_PRESENT, "present is set for us");
+    CHECK(vmm_flags(pml4, 0x400000) & PTE_PRESENT, "present is set for me");
     CHECK(!(vmm_flags(pml4, 0x400000) & PTE_HUGE), "and its not a huge page");
 
     /* ---- the higher half, where the kernel lives ---- */

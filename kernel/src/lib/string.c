@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 /* nothing clever in here, byte-at-a-time everything. if this ever shows
- * up in a profile we can play the rep movsb game later */
+ * up in a profile I can play the rep movsb game later */
 
 void *memcpy(void *dst, const void *src, size_t n) {
     uint8_t *d = dst;

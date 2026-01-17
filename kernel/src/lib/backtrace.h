@@ -11,7 +11,7 @@
  * an exception handler, where the faulting instruction is not on the
  * frame chain at all */
 /* named kbacktrace, not backtrace, because glibc has a backtrace() and
- * the host tests link against it -- ours was quietly being shadowed */
+ * the host tests link against it -- mine was quietly being shadowed */
 void kbacktrace(uint64_t rbp, uint64_t rip);
 
 #endif

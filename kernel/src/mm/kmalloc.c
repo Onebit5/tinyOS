@@ -71,7 +71,7 @@ void *kmalloc(size_t size) {
     size_t pages = (size + sizeof(struct large) + PAGE_SIZE - 1) / PAGE_SIZE;
     uint64_t phys = pmm_alloc_pages(pages);
     if (phys == 0) {
-        return NULL;        /* memory hath forsaken us */
+        return NULL;        /* memory hath forsaken me */
     }
 
     struct large *h = pmm_phys_to_virt(phys);

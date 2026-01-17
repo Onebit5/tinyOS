@@ -64,7 +64,7 @@ static void record(pci_reader read, uint8_t bus, uint8_t slot, uint8_t fn,
     d->irq_line    = (uint8_t)read(bus, slot, fn, PCI_IRQ);
 
     /* a bridge has two bars, everything else has six. reading the ones
-     * a bridge does not have would give us its bus numbers instead */
+     * a bridge does not have would give me its bus numbers instead */
     size_t bars = ((d->header_type & HEADER_TYPE_MASK) == HEADER_BRIDGE) ? 2 : 6;
     for (size_t i = 0; i < 6; i++) {
         d->bar[i] = (i < bars)
@@ -85,7 +85,7 @@ static void record(pci_reader read, uint8_t bus, uint8_t slot, uint8_t fn,
 
 static void scan_bus(pci_reader read, uint8_t bus, int depth) {
     /* bridges are supposed to form a tree. a machine whose firmware
-     * says otherwise should not be able to make us recurse forever */
+     * says otherwise should not be able to make me recurse forever */
     if (depth > 8) {
         return;
     }
@@ -176,7 +176,7 @@ const char *pci_class_name(uint8_t class_code, uint8_t subclass) {
         default:   return "serial bus controller";
         }
     case 0x0d: return "wireless controller";
-    default:   return "something we have no name for";
+    default:   return "something I have no name for";
     }
 }
 

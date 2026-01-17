@@ -1,23 +1,11 @@
 #include "mm/pmm.h"
+#include "boot.h"
 #include "mm/buddy.h"
 #include "lib/kprintf.h"
 #include "cpu/interrupts.h"
 #include <stdbool.h>
 #include "lib/panic.h"
 #include "lib/string.h"
-
-/* limine, tell us what ram looks like and where you mirrored it */
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_memmap_request memmap_request = {
-    .id = LIMINE_MEMMAP_REQUEST,
-    .revision = 0,
-};
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_hhdm_request hhdm_request = {
-    .id = LIMINE_HHDM_REQUEST,
-    .revision = 0,
-};
 
 static uint64_t hhdm_offset;
 static uint64_t managed_frames;  /* how many frames the allocator covers */
@@ -26,28 +14,27 @@ static uint64_t highest_addr;    /* top of the direct map, see pmm.h */
 static uint64_t peak_used;       /* the high-water mark, in frames */
 static uint64_t meta_bytes;      /* what the buddy's bookkeeping costs */
 
-/* the frames the bookkeeping itself lives in, so we know not to give
+/* the frames the bookkeeping itself lives in, so I know not to give
  * them away. an allocator that hands out its own records is briefly
  * very fast and then very confused */
 static uint64_t meta_first, meta_last;
 
-/* limine's own memory, noted down at init because the memmap we would
- * otherwise read it from is itself sitting in that memory */
+/* the loader's own memory, noted down at init because the memmap I
+ * would otherwise read it from is itself sitting in that memory */
 #define MAX_RECLAIM 16
 static struct { uint64_t base, length; } reclaim[MAX_RECLAIM];
 static size_t reclaim_count;
 
 static const char *memmap_type_name(uint64_t type) {
     switch (type) {
-    case LIMINE_MEMMAP_USABLE:                 return "usable";
-    case LIMINE_MEMMAP_RESERVED:               return "reserved";
-    case LIMINE_MEMMAP_ACPI_RECLAIMABLE:       return "acpi reclaimable";
-    case LIMINE_MEMMAP_ACPI_NVS:               return "acpi nvs";
-    case LIMINE_MEMMAP_BAD_MEMORY:             return "bad memory (yikes)";
-    case LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE: return "bootloader (reclaimable)";
-    case LIMINE_MEMMAP_KERNEL_AND_MODULES:     return "kernel + modules";
-    case LIMINE_MEMMAP_FRAMEBUFFER:            return "framebuffer";
-    default:                                   return "???";
+    case PH_MEM_USABLE:            return "usable";
+    case PH_MEM_RESERVED:          return "reserved";
+    case PH_MEM_ACPI_RECLAIMABLE:  return "acpi reclaimable";
+    case PH_MEM_ACPI_NVS:          return "acpi nvs";
+    case PH_MEM_BAD:               return "bad memory (yikes)";
+    case PH_MEM_LOADER:            return "the loader's (reclaimable)";
+    case PH_MEM_KERNEL:            return "kernel + ramdisk";
+    default:                       return "???";
     }
 }
 
@@ -90,7 +77,7 @@ static uint64_t give_away(uint64_t first, uint64_t last) {
     return last - first;
 }
 
-void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
+void pmm_init_from_map(const struct ph_memmap_entry *entries, size_t count,
                        uint64_t hhdm) {
     hhdm_offset = hhdm;
 
@@ -101,32 +88,61 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
     reclaim_count = 0;
     peak_used = 0;
     for (size_t i = 0; i < count; i++) {
-        struct limine_memmap_entry *e = entries[i];
+        const struct ph_memmap_entry *e = &entries[i];
         kprintf("  %016lx - %016lx  %s\n", e->base, e->base + e->length,
                 memmap_type_name(e->type));
-        if (e->type != LIMINE_MEMMAP_RESERVED
-            && e->type != LIMINE_MEMMAP_BAD_MEMORY
+        if (e->type != PH_MEM_RESERVED
+            && e->type != PH_MEM_BAD
             && e->base + e->length > highest_addr) {
             highest_addr = e->base + e->length;
         }
-        if (e->type == LIMINE_MEMMAP_USABLE) {
+        if (e->type == PH_MEM_USABLE) {
             total_frames += e->length / PAGE_SIZE;
         }
-        /* the allocator has to cover limine's memory too, or we would
-         * have nowhere to record those frames when we reclaim them
+        /* the allocator has to cover the loader's memory too, or I would
+         * have nowhere to record those frames when I reclaim them
          * later -- they sit above the last usable region on most
          * machines */
-        if (e->type == LIMINE_MEMMAP_USABLE
-            || e->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE) {
+        if (e->type == PH_MEM_USABLE
+            || e->type == PH_MEM_LOADER) {
             if (e->base + e->length > highest) {
                 highest = e->base + e->length;
             }
         }
-        if (e->type == LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE
+        if (e->type == PH_MEM_LOADER
             && reclaim_count < MAX_RECLAIM) {
             reclaim[reclaim_count].base = e->base;
             reclaim[reclaim_count].length = e->length;
             reclaim_count++;
+        }
+    }
+
+    /* the direct map has to reach anything the kernel will ever read,
+     * and the firmware's own tables are not in memory it calls usable.
+     * on this machine they sit immediately above the last usable region
+     * in something the bios types "reserved" -- so grow the top to
+     * swallow reserved regions that butt up against what is already
+     * there, and stop at the first real gap.
+     *
+     * that gap is the whole point. the enormous reserved holes up near
+     * the terabyte mark are on the far side of it and stay out; mapping
+     * as far as those would cost more page tables than this machine has
+     * memory. this went unnoticed until I stopped using a bootloader
+     * that quietly retyped that region for me */
+    for (bool grew = true; grew; ) {
+        grew = false;
+        for (size_t i = 0; i < count; i++) {
+            const struct ph_memmap_entry *e = &entries[i];
+            uint64_t end = e->base + e->length;
+            if (e->type == PH_MEM_BAD || end <= highest_addr) {
+                continue;
+            }
+            /* adjacent, or near enough that the gap is padding rather
+             * than a different part of the address space entirely */
+            if (e->base <= highest_addr + 1024 * 1024) {
+                highest_addr = end;
+                grew = true;
+            }
         }
     }
 
@@ -136,8 +152,8 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
     /* pass 2: find a usable region big enough to park the bookkeeping */
     void *meta = NULL;
     for (size_t i = 0; i < count; i++) {
-        struct limine_memmap_entry *e = entries[i];
-        if (e->type == LIMINE_MEMMAP_USABLE && e->length >= meta_bytes) {
+        const struct ph_memmap_entry *e = &entries[i];
+        if (e->type == PH_MEM_USABLE && e->length >= meta_bytes) {
             meta = (void *)(e->base + hhdm_offset);
             meta_first = e->base / PAGE_SIZE;
             meta_last  = (e->base + meta_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -154,25 +170,29 @@ void pmm_init_from_map(struct limine_memmap_entry **entries, size_t count,
     /* pass 3: everything starts taken, and the usable regions are given
      * away one at a time */
     for (size_t i = 0; i < count; i++) {
-        struct limine_memmap_entry *e = entries[i];
-        if (e->type != LIMINE_MEMMAP_USABLE) {
+        const struct ph_memmap_entry *e = &entries[i];
+        if (e->type != PH_MEM_USABLE) {
             continue;
         }
         give_away(e->base / PAGE_SIZE, (e->base + e->length) / PAGE_SIZE);
     }
 }
 
+/* the plumbing, which needs a real boot to have happened. the brains
+ * are in pmm_init_from_map above, which takes a map instead of asking
+ * for one -- that is the line the tests run up to */
+#ifndef TINYOS_HOSTED
+
 void pmm_init(void) {
-    if (memmap_request.response == NULL || hhdm_request.response == NULL) {
-        panic("limine kept the memory map to itself");
-    }
-    kprintf("memory map, as declared by limine:\n");
-    pmm_init_from_map(memmap_request.response->entries,
-                      memmap_request.response->entry_count,
-                      hhdm_request.response->offset);
+    const struct ph_handoff *h = boot_handoff();
+    kprintf("memory map, as philemon found it:\n");
+    pmm_init_from_map((const struct ph_memmap_entry *)h->memmap,
+                      h->memmap_count, h->hhdm);
     kprintf("  -> %lu MiB usable, %lu KiB spent on the buddy's books\n",
             pmm_total_bytes() / (1024 * 1024), meta_bytes / 1024);
 }
+
+#endif
 
 uint64_t pmm_alloc_pages(size_t count) {
     if (count == 0) {

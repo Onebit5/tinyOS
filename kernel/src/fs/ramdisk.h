@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-/* a read-only filesystem that is just a tar file limine handed us at
+/* a read-only filesystem that is just a tar file limine handed me at
  * boot. ustar is about as simple as a container format gets: a 512 byte
  * header of ascii fields, the file's bytes rounded up to 512, repeat,
  * and two blocks of zeroes to finish.
@@ -19,7 +19,7 @@ struct ramdisk_file {
     const void *data;
     uint64_t    size;
 
-    /* the unix mode tar recorded. we only ever look at one bit of it --
+    /* the unix mode tar recorded. I only ever look at one bit of it --
      * whether the world may read -- but that one bit is enough to give
      * a uid something it can and cannot do */
     uint32_t    mode;
@@ -29,8 +29,8 @@ struct ramdisk_file {
  * anything; everybody else needs the other-read bit */
 bool ramdisk_may_read(const struct ramdisk_file *f, int uid);
 
-/* take the archive from limine. must run before the bootloader memory
- * is reclaimed, since the module list lives in it */
+/* take the archive philemon loaded. must run before the loader's memory
+ * is reclaimed, since the handoff struct lives in it */
 void ramdisk_init(void);
 
 /* point at an archive directly. the guts, so tests can hand it bytes */

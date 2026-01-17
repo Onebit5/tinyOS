@@ -44,14 +44,14 @@ struct acpi_info {
     size_t   override_count;
 };
 
-/* walk from the rsdp to the madt and fill in what we found. `read` maps
+/* walk from the rsdp to the madt and fill in what I found. `read` maps
  * a physical address to something readable -- the direct map in the
  * kernel, a test's own arena on a host */
 struct acpi_info acpi_parse(uint64_t rsdp_phys, void *(*read)(uint64_t phys));
 
 /* checksum a table the way acpi specifies: every byte, summed, must
  * come to zero. split out because a wrong one means the table is not
- * what it claims and we must not act on it */
+ * what it claims and I must not act on it */
 bool acpi_checksum_ok(const void *table, size_t len);
 
 /* where an isa irq really arrives, after any override */
@@ -61,7 +61,7 @@ uint32_t acpi_gsi_for_irq(const struct acpi_info *info, uint8_t isa_irq);
 const struct acpi_ioapic *acpi_ioapic_for_gsi(const struct acpi_info *info,
                                               uint32_t gsi);
 
-/* read the tables limine pointed us at. returns what was found */
+/* read the tables limine pointed me at. returns what was found */
 struct acpi_info acpi_init(void);
 
 #endif

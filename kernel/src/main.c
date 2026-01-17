@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "limine.h"
+#include "boot.h"
 #include "cpu/gdt.h"
 #include "cpu/idt.h"
 #include "cpu/pic.h"
@@ -30,32 +30,6 @@
 #include "version.h"
 
 
-
-/* limine protocol stuff. these markers have to live in their own section
- * (see linker.ld) or the bootloader never finds us and we boot into a
- * black screen of nothing. ask me how i know. */
-
-__attribute__((used, section(".limine_requests")))
-static volatile LIMINE_BASE_REVISION(3);
-
-__attribute__((used, section(".limine_requests")))
-static volatile struct limine_framebuffer_request framebuffer_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST,
-    .revision = 0,
-};
-
-__attribute__((used, section(".limine_requests_start")))
-static volatile LIMINE_REQUESTS_START_MARKER;
-
-__attribute__((used, section(".limine_requests_end")))
-static volatile LIMINE_REQUESTS_END_MARKER;
-
-/* halt and catch fire */
-static void hcf(void) {
-    for (;;) {
-        asm volatile ("hlt");
-    }
-}
 
 /* the m4 demo: put the fresh allocators through their paces at boot.
  * every failure panics, so reaching the prompt means it all held */
@@ -113,7 +87,7 @@ static void memory_selftest(void) {
 
     /* the buddy's whole point is that memory comes back *together*, not
      * merely back. after all that churn a big contiguous run must still
-     * be there -- if the halves never merged, this is where we find out
+     * be there -- if the halves never merged, this is where I find out
      * rather than the first time something large is asked for */
     uint64_t big = pmm_alloc_pages(512);
     if (big == 0) {
@@ -153,7 +127,7 @@ static void greet(void) {
 
 /* the shell runs here rather than on the boot thread, because this
  * stack came from the pmm. that is what lets the boot thread walk away
- * from limine's stack and lets us hand limine's memory back */
+ * from the loader's stack and lets me hand the loader's memory back */
 static void shell_thread(void *arg) {
     (void)arg;
 
@@ -169,11 +143,12 @@ static void shell_thread(void *arg) {
     shell_run();
 }
 
-void kmain(void) {
-    /* too early to even panic() properly, so just park */
-    if (LIMINE_BASE_REVISION_SUPPORTED == false) {
-        hcf();
-    }
+void kmain(const struct ph_handoff *handoff) {
+    boot_take_handoff(handoff);
+
+    /* boot_take_handoff has already refused to come back if the struct
+     * is not one of philemon's, which is the only check worth making
+     * this early -- there is no console and no serial to complain to */
 
     serial_init();
     gdt_init();
@@ -182,15 +157,14 @@ void kmain(void) {
     keyboard_init();
     serial_input_init();
 
-    if (framebuffer_request.response == NULL
-        || framebuffer_request.response->framebuffer_count < 1) {
-        panic("limine handed us no framebuffer, cant even draw a sad face");
-    }
-
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-    console_init(fb);
-    if (!console_ready()) {
-        kprintf("console refused %u bpp, serial only from here\n", fb->bpp);
+    const struct ph_framebuffer *fb = &boot_handoff()->fb;
+    if (fb->width == 0) {
+        kprintf("no video mode. serial only, which is enough to see by\n");
+    } else {
+        console_init(fb);
+        if (!console_ready()) {
+            kprintf("console refused %u bpp, serial only from here\n", fb->bpp);
+        }
     }
 
     /* from here until the shell is ready, everything goes to serial and
@@ -199,13 +173,13 @@ void kmain(void) {
     kprintf_to_console(false);
 
     kprintf("tinyOS v%s\n", VERSION);
-    kprintf("framebuffer : %lux%lu @ %u bpp, pitch %lu bytes, at %p\n",
+    kprintf("framebuffer : %ux%u @ %u bpp, pitch %lu bytes, at %016lx\n",
             fb->width, fb->height, fb->bpp, fb->pitch, fb->address);
     kprintf("font        : spleen 8x16 (bsd 2-clause)\n");
     kprintf("gdt         : loaded, tss slot reserved for later\n");
     kprintf("idt         : 256 gates armed, exceptions get caught now\n");
     kprintf("pic         : 8259 remapped to vectors 32-47, ghosts filtered\n");
-    kprintf("keyboard    : ps/2 on irq1, us layout, listening\n");
+    kprintf("keyboard    : ps/2 on irq1, me layout, listening\n");
     kprintf("serial in   : com1 on irq4, the shell answers over the wire too\n");
     kprintf("timer       : pit channel 0 at %u hz, %ums per tick\n",
             PIT_HZ, 1000 / PIT_HZ);
@@ -220,7 +194,7 @@ void kmain(void) {
             pmm_total_bytes() / (1024 * 1024),
             kheap_total_bytes() / 1024);
 
-    kprintf("building our own page tables:\n");
+    kprintf("building my own page tables:\n");
     vmm_init();
 
     /* needs the pmm for its stacks, so it waits until now */
@@ -231,12 +205,12 @@ void kmain(void) {
     syscall_init();
     kprintf("  -> syscall/sysret armed, ring 3 has a way in\n\n");
 
-    /* before the shell reclaims limine's memory, since the module list
-     * we read this out of is sitting in it */
+    /* before the shell reclaims the loader's memory, since the ramdisk
+     * I read this out of is sitting in it */
     pci_scan();
     kprintf("pci        : %zu devices on the bus\n", pci_count());
 
-    /* the first time anything is done with a device we found rather
+    /* the first time anything is done with a device I found rather
      * than merely counted. a machine with no disk carries on exactly as
      * it did before there was any of this */
     if (disk_mount()) {
@@ -262,7 +236,7 @@ void kmain(void) {
     /* and now, if the firmware will say where they are, move every
      * interrupt off the 8259 and onto the apics. this is lateral on its
      * own -- the same interrupts by a better road -- and it is the
-     * thing a second cpu would need. if acpi tells us nothing we stay
+     * thing a second cpu would need. if acpi tells me nothing I stay
      * on the old chip, which works perfectly well */
     if (!interrupts_use_apic()) {
         kprintf("interrupts : staying on the 8259 and the pit\n");
@@ -279,7 +253,7 @@ void kmain(void) {
 
 
     /* the boot thread's work is finished. it has to actually leave --
-     * its stack is limine's, sitting in the memory the shell is about
+     * its stack is the loader's, sitting in the memory the shell is about
      * to reclaim, and you cannot free the ground you are standing on */
     thread_exit(0);
 }

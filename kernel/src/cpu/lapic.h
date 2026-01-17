@@ -14,7 +14,7 @@
  * everything after it. */
 
 /* the vector the timer arrives on. above the 8259's old range so the
- * two can coexist while we are still deciding which to trust */
+ * two can coexist while I am still deciding which to trust */
 #define LAPIC_TIMER_VECTOR   0x40
 #define LAPIC_SPURIOUS_VECTOR 0xff
 
@@ -28,7 +28,7 @@ void lapic_eoi(void);
 uint32_t lapic_id(void);
 
 /* the timer, running at `hz`. it is driven by the bus clock, whose
- * speed nobody will tell us, so it has to be measured against something
+ * speed nobody will tell me, so it has to be measured against something
  * that already keeps time -- which is what the pit is still good for */
 void lapic_timer_start(uint32_t hz, uint64_t ticks_per_second);
 

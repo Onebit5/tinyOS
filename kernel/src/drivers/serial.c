@@ -11,7 +11,7 @@
 static bool serial_ok = false;
 
 bool serial_init(void) {
-    outb(COM1 + 1, 0x00);   /* no uart interrupts, we poll like cavemen for now */
+    outb(COM1 + 1, 0x00);   /* no uart interrupts, I poll like cavemen for now */
     outb(COM1 + 3, 0x80);   /* dlab on so the divisor registers are visible */
     outb(COM1 + 0, 0x01);   /* divisor 1 -> 115200 baud */
     outb(COM1 + 1, 0x00);
@@ -54,7 +54,7 @@ void serial_write(const char *s) {
 
 /* ---- input ---------------------------------------------------------- */
 
-/* where we are in an escape sequence: 0 = nowhere, 1 = saw ESC,
+/* where I am in an escape sequence: 0 = nowhere, 1 = saw ESC,
  * 2 = saw ESC[ and the next byte says which arrow */
 static int esc_state;
 
@@ -70,7 +70,7 @@ void serial_feed(uint8_t b) {
         case 'B': input_push(KEY_DOWN);  return;
         case 'C': input_push(KEY_RIGHT); return;
         case 'D': input_push(KEY_LEFT);  return;
-        default:  return;   /* some other CSI sequence, not ours */
+        default:  return;   /* some other CSI sequence, not mine */
         }
     }
 
@@ -78,7 +78,7 @@ void serial_feed(uint8_t b) {
     case 0x1b:              /* ESC: might be an arrow, wait and see */
         esc_state = 1;
         return;
-    case '\r':              /* terminals send CR for enter, we want LF */
+    case '\r':              /* terminals send CR for enter, I want LF */
         input_push('\n');
         return;
     case 0x7f:              /* DEL is what most terminals send for backspace */
@@ -92,7 +92,7 @@ void serial_feed(uint8_t b) {
 
 static void serial_irq(struct interrupt_frame *f) {
     (void)f;
-    /* drain the fifo, we may have been handed several bytes at once */
+    /* drain the fifo, I may have been handed several bytes at once */
     while (inb(COM1 + 5) & 1) {
         serial_feed(inb(COM1));
     }

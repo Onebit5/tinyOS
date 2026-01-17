@@ -64,7 +64,7 @@ int input_getchar_blocking(void) {
     int c;
     while ((c = buf_pop()) < 0) {
         /* nothing there. sleep with interrupts still off so an irq
-         * cant slip a key past us in the gap between looking and
+         * cant slip a key past me in the gap between looking and
          * sleeping -- waitq_block hands them back on the way out */
         waitq_block(&waiters);
     }

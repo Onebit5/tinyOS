@@ -3,7 +3,7 @@
 
 #define BAD_CLUSTER  0x0ffffff7u
 #define EOC          0x0ffffff8u     /* anything at or above ends a chain */
-#define CLUSTER_MASK 0x0fffffffu     /* the top four bits are not ours */
+#define CLUSTER_MASK 0x0fffffffu     /* the top four bits are not mine */
 
 /* ---- little endian, read a byte at a time -------------------------- */
 
@@ -95,7 +95,7 @@ static uint32_t alloc_cluster(struct fat32 *fs) {
         return 0;
     }
     /* a linear search for a zero entry. the fsinfo sector carries a hint
-     * about where to start looking, which we do not trust and do not
+     * about where to start looking, which I do not trust and do not
      * use -- it is advisory, and wrong on any disk that was not
      * unmounted cleanly */
     for (uint32_t c = 2; c < fs->cluster_count + 2; c++) {
@@ -127,7 +127,7 @@ bool fat32_mount(struct fat32 *fs, fat32_io read, fat32_out write, void *ctx) {
     }
 
     /* the signature every boot sector ends with. its absence means this
-     * is not a filesystem, or not one we know */
+     * is not a filesystem, or not one I know */
     if (boot[510] != 0x55 || boot[511] != 0xaa) {
         return false;
     }
@@ -295,7 +295,7 @@ static void lfn_take(struct lfn_state *l, const uint8_t *entry) {
             continue;       /* padding past the end of the name */
         }
         /* anything outside ascii becomes a question mark rather than
-         * half a character. we have no business pretending to unicode */
+         * half a character. I have no business pretending to unicode */
         l->name[at] = (c < 0x80) ? (char)c : '?';
     }
 }
@@ -433,7 +433,7 @@ bool fat32_readdir(struct fat32 *fs, uint32_t dir_cluster, size_t index,
     struct fat32_file f;
     while (walk_next(fs, &w, &f)) {
         if (is_dot(f.name)) {
-            continue;       /* nothing above us has any use for these */
+            continue;       /* nothing above me has any use for these */
         }
         if (seen == index) {
             *out = f;
@@ -447,7 +447,7 @@ bool fat32_readdir(struct fat32 *fs, uint32_t dir_cluster, size_t index,
 /* ---- looking a path up --------------------------------------------- */
 
 static bool name_eq(const char *a, const char *b) {
-    /* fat has never cared about case and neither do we */
+    /* fat has never cared about case and neither do I */
     while (*a != '\0' && *b != '\0') {
         char x = *a, y = *b;
         if (x >= 'A' && x <= 'Z') x = (char)(x + 32);
@@ -669,7 +669,7 @@ int64_t fat32_write(struct fat32 *fs, struct fat32_file *f,
         uint64_t at = offset + done;
         uint32_t cluster;
         if (!cluster_for_write(fs, f, at, &cluster)) {
-            break;      /* the disk is full. keep what we managed */
+            break;      /* the disk is full. keep what I managed */
         }
 
         uint32_t within = (uint32_t)(at % fat32_cluster_bytes(fs));
@@ -677,7 +677,7 @@ int64_t fat32_write(struct fat32 *fs, struct fat32_file *f,
         uint32_t in_sector = within % FAT32_SECTOR;
 
         /* a partial sector has to be read before it is written, or the
-         * bytes either side of ours would be replaced with nothing */
+         * bytes either side of mine would be replaced with nothing */
         uint64_t chunk = FAT32_SECTOR - in_sector;
         if (chunk > len - done) {
             chunk = len - done;
@@ -747,7 +747,7 @@ static bool to_short(const char *name, uint8_t *out11, uint8_t *case_bits) {
     }
 
     /* mixed case in one part cannot be recorded by a single bit, so
-     * such a name genuinely does need a long entry, and we refuse it */
+     * such a name genuinely does need a long entry, and I refuse it */
     if ((base_lower && base_upper) || (ext_lower && ext_upper)) {
         return false;
     }
@@ -838,7 +838,7 @@ bool fat32_create(struct fat32 *fs, const char *path, struct fat32_file *out) {
     uint8_t short11[11];
     uint8_t case_bits;
     if (!to_short(name, short11, &case_bits)) {
-        return false;       /* a name we cannot store honestly */
+        return false;       /* a name I cannot store honestly */
     }
 
     uint64_t lba;
@@ -849,7 +849,7 @@ bool fat32_create(struct fat32 *fs, const char *path, struct fat32_file *out) {
 
     /* whether this slot was the end of the directory matters: if it was,
      * the next slot has to be left as a zero to say so, and read_sector
-     * has already given us a sector where it is */
+     * has already given me a sector where it is */
     if (!read_sector(fs, lba, fs->scratch)) {
         return false;
     }

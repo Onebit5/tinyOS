@@ -117,7 +117,7 @@ int main(void) {
     expect_keys((int[]){'a', KEY_UP, 'b'}, 3, "arrows keep their place in the queue");
 
     feed((uint8_t[]){0xe0, 0x5b, 0xe0, 0xdb, 0x1e, 0x9e}, 6);
-    expect("a", "an e0 key we dont know is swallowed whole");
+    expect("a", "an e0 key I dont know is swallowed whole");
 
     /* ---- overflow ---- */
     for (int i = 0; i < 400; i++) feed((uint8_t[]){0x1e, 0x9e}, 2);

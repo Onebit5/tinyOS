@@ -9,8 +9,8 @@
 #define KBD_STATUS 0x64
 #define KBD_IRQ    1
 
-/* scancode set 1 -> ascii, us layout. 0 means "nothing printable here",
- * which covers modifiers, f-keys and everything else we dont care about.
+/* scancode set 1 -> ascii, me layout. 0 means "nothing printable here",
+ * which covers modifiers, f-keys and everything else I dont care about.
  * 27 is escape, which will draw as a weird glyph if you print it. thats
  * between you and your conscience */
 
@@ -46,7 +46,7 @@ static bool lshift, rshift, caps;
 static bool lctrl, rctrl;
 static bool e0_prefix;
 
-/* the e0-prefixed keys we care about. everything else with an e0 in
+/* the e0-prefixed keys I care about. everything else with an e0 in
  * front still gets quietly dropped */
 static void feed_extended(uint8_t code, bool release) {
     if (code == 0x1d) {         /* right ctrl is a modifier, not a key */
@@ -103,7 +103,7 @@ void keyboard_feed(uint8_t sc) {
 
     /* ctrl+letter collapses to the matching control code, so ctrl+c
      * arrives as 3 and the shell can treat it like every terminal
-     * has since forever. ctrl+anything-else we simply drop */
+     * has since forever. ctrl+anything-else I simply drop */
     if (lctrl || rctrl) {
         if (c >= 'a' && c <= 'z') {
             input_push(c - 'a' + 1);

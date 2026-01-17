@@ -3,10 +3,10 @@
  * this could not work before 0.1.3. the shell used to sit in a loop
  * peeking at keys while a program ran, so anything a program tried to
  * read had already been taken. now the terminal has a foreground
- * process, and while this runs, that is us.
+ * process, and while this runs, that is me.
  *
- * ctrl+c is delivered here rather than acted on for us: a read comes
- * back -1 and we get to decide what that means. pressing it twice says
+ * ctrl+c is delivered here rather than acted on for me: a read comes
+ * back -1 and I get to decide what that means. pressing it twice says
  * the kernel should stop asking nicely. */
 
 #include "syscall.h"

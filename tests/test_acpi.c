@@ -1,10 +1,10 @@
 /* walking from the rsdp to the madt.
  *
  * these are tables written by firmware, which means they are the least
- * trustworthy bytes in the machine and the ones we must act on earliest.
+ * trustworthy bytes in the machine and the ones I must act on earliest.
  * so most of what follows is malformed: a bad checksum, a table that
  * lies about its length, an entry whose length is zero. the assertion
- * is always that we decline rather than improvise, because improvising
+ * is always that I decline rather than improvise, because improvising
  * here means routing interrupts at an address nobody chose. */
 #include <stdio.h>
 #include <string.h>

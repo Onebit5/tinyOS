@@ -7,7 +7,7 @@
  *
  * directories come back with a slash on the end, which is how everyone
  * has said "this one can be descended into" since long before any of
- * us. */
+ * this. */
 
 #include "syscall.h"
 

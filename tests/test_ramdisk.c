@@ -14,7 +14,7 @@
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 
-/* ---- build a tar by hand, so we control every byte ---- */
+/* ---- build a tar by hand, so I control every byte ---- */
 
 #define BLK 512
 static uint8_t archive[64 * 1024];
@@ -131,7 +131,7 @@ int main(void) {
     add_file("liar.txt", "short", '0');
     put_octal((char *)archive + 124, 12, 999999);   /* claim it is huge */
     ramdisk_mount(archive, used);
-    CHECK(!ramdisk_stat(1, &f), "a lying size field cannot walk us off the end");
+    CHECK(!ramdisk_stat(1, &f), "a lying size field cannot walk me off the end");
 
     /* ---- the real archive the build produces ---- */
     {

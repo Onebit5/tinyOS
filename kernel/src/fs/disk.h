@@ -13,7 +13,7 @@
  * is the vfs's job, not this file's.
  *
  * everything degrades quietly. a machine with no disk, or a disk with
- * no filesystem we recognise, answers false to all of this and boots
+ * no filesystem I recognise, answers false to all of this and boots
  * exactly as it did before there was any of it. */
 
 #define DISK_NAME_MAX   128
@@ -51,7 +51,7 @@ int64_t disk_read(uint32_t cluster, uint64_t size, uint64_t offset,
                   void *buf, uint64_t len);
 
 /* make a file if it is not there, and hand back where it lives. the
- * name has to fit 8.3, since we mint short entries only */
+ * name has to fit 8.3, since I mint short entries only */
 bool disk_create(const char *path, struct disk_entry *out);
 
 /* write to a file found by disk_create or disk_lookup. `e` is updated

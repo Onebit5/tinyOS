@@ -56,8 +56,8 @@ static int caller_pid(void);
  * address space of its own since 0.1.0, and the kernel's tables have no
  * mapping for a program's memory at all -- so checking there says no to
  * every pointer that was ever going to be valid, and a program prints
- * nothing for no visible reason. we are running on the caller's cr3 at
- * this moment, so this is also what the cpu would use if we simply
+ * nothing for no visible reason. I am running on the caller's cr3 at
+ * this moment, so this is also what the cpu would use if I simply
  * dereferenced the thing */
 static uint64_t caller_pml4(void) {
     struct thread *me = sched_current();
@@ -67,7 +67,7 @@ static uint64_t caller_pml4(void) {
     return vmm_kernel_pml4();
 }
 
-/* a pointer handed to us by ring 3 is a claim, not a fact. check the
+/* a pointer handed to me by ring 3 is a claim, not a fact. check the
  * whole span really is mapped before touching a byte of it -- a user
  * program should not be able to make the kernel fault by lying */
 static bool user_range_ok(uint64_t addr, uint64_t len) {
@@ -107,7 +107,7 @@ static int caller_pid(void) {
     return (me != NULL) ? me->pid : 0;
 }
 
-/* copy a path out of ring 3 into somewhere we can trust it. paths are
+/* copy a path out of ring 3 into somewhere I can trust it. paths are
  * short by definition, so a fixed buffer is honest rather than lazy */
 static bool copy_path(uint64_t ptr, uint64_t len, char *out, size_t max) {
     if (len == 0 || len >= max || !user_range_ok(ptr, len)) {
@@ -161,11 +161,11 @@ static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
 }
 
 static int64_t sys_write_console(uint64_t ptr, uint64_t len) {
-    /* clamp first, then check what we clamped to. a program asking to
+    /* clamp first, then check what I clamped to. a program asking to
      * write four exabytes gets a short write rather than a refusal,
      * which is the ordinary contract -- and the range actually checked
-     * below is the one we actually touch, so an absurd length can
-     * never widen what we are willing to read */
+     * below is the one I actually touch, so an absurd length can
+     * never widen what I am willing to read */
     if (len > WRITE_MAX) {
         len = WRITE_MAX;
     }
@@ -218,7 +218,7 @@ static int64_t sys_read(uint64_t fd, uint64_t ptr, uint64_t len) {
     }
 
     /* a file in the ramdisk. the bytes are already in memory -- the
-     * descriptor only says how far through them we had got */
+     * descriptor only says how far through them I had got */
     const void *data = NULL;
     uint64_t left = 0;
     if (!process_fd_peek(caller_pid(), (int)fd, &data, &left)) {
@@ -308,7 +308,7 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr, uint64_t len,
 
     /* a directory comes back with a trailing slash, which is how
      * everyone has said "this one can be descended into" since long
-     * before any of us. no protocol needed */
+     * before any of this. no protocol needed */
     uint64_t n = strlen(f.name);
     bool slash = f.is_dir && (n == 0 || f.name[n - 1] != '/');
     if (slash) {
@@ -334,7 +334,7 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
      * would give it. richer arguments want a syscall that can carry
      * them, which is not this one.
      *
-     * it also inherits our uid rather than choosing one: a program that
+     * it also inherits my uid rather than choosing one: a program that
      * could pick its own user would make the whole idea decorative */
     const char *why = NULL;
     const char *argv[1] = { path };
@@ -367,7 +367,7 @@ static int64_t sys_wait(uint64_t pid, uint64_t code_ptr) {
 }
 
 /* the number is in rax, arguments in rdi rsi rdx rcx (the asm moved r10
- * there for us) and r8. returns into rax */
+ * there for me) and r8. returns into rax */
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4) {
     if (nr < SYSCALL_COUNT) {
@@ -425,9 +425,9 @@ void syscall_init(void) {
 
     wrmsr(MSR_LSTAR, (uint64_t)syscall_entry);
 
-    /* flags to clear on entry. IF is the important one: it means we
+    /* flags to clear on entry. IF is the important one: it means I
      * arrive with interrupts off and can swap onto a kernel stack
-     * without anything preempting us halfway. DF because the sysv abi
+     * without anything preempting me halfway. DF because the sysv abi
      * insists it be clear, TF so a user single-stepping cannot drag the
      * kernel along with it */
     wrmsr(MSR_SFMASK, RFLAGS_IF | RFLAGS_DF | RFLAGS_TF);

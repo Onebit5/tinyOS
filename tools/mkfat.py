@@ -9,7 +9,7 @@ records.
 
 the risk in writing both the formatter and the reader is that they
 agree with each other and are both wrong. so this aims at the spec
-rather than at our parser, and TESTING.md says to mount the result on
+rather than at my parser, and TESTING.md says to mount the result on
 linux -- if a driver nobody here wrote can read it, the layout is right.
 
 usage: mkfat.py <output.img> <source-dir> [size-in-mib]

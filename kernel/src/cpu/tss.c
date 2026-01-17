@@ -41,7 +41,7 @@ void tss_init(void) {
 
     tss.ist[IST_DOUBLE_FAULT - 1] = alloc_stack("double fault");
 
-    /* where the cpu lands on a trap from ring 3. we have no ring 3 yet,
+    /* where the cpu lands on a trap from ring 3. I have no ring 3 yet,
      * so this is one stack for the whole system -- when usermode
      * arrives it has to become per-thread, or two threads trapping at
      * once would land on the same stack and eat each other */

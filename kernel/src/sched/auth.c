@@ -6,7 +6,7 @@ static struct account accounts[AUTH_MAX_ACCOUNTS];
 static size_t count;
 
 /* copy one colon-delimited field, stopping at the delimiter, the end of
- * the line, or the end of the buffer we were given */
+ * the line, or the end of the buffer I was given */
 static size_t take_field(const char *text, size_t len, size_t at,
                          char *out, size_t max) {
     size_t n = 0;

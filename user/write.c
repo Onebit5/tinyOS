@@ -28,7 +28,7 @@ void _start(int argc, char **argv) {
         exit(1);
     }
 
-    /* create leaves us at the start; go to the end so a second run adds
+    /* create leaves me at the start; go to the end so a second run adds
      * to the file rather than writing over what is already there */
     char scratch[256];
     long at = 0;
