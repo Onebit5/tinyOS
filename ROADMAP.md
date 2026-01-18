@@ -78,7 +78,8 @@ for booting one medium to install onto another.
 
 **0.1.12 my own bootloader.** ~~stage 1 and stage 2, filling in the same
 structures the kernel expects so the kernel itself need not change.~~
-**done in 0.1.12**, and kept alongside the loader rather than in place of
-it: `make run` is unchanged, `make run-mine` boots the one I wrote.
-the assembly half cannot be tested on a machine with no qemu, so it
-narrates every step over the serial port instead.
+**done in 0.1.12.** philemon: one file, whose first 512 bytes are the
+only part the bios will read, and a 64-bit half in C. limine is gone
+entirely, along with the iso, the uefi path and the boot protocol that
+came with it. the kernel is handed one struct in rdi and knows nothing
+about anybody's protocol including mine.
