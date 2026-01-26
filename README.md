@@ -647,6 +647,25 @@ with preemption live, `kmalloc`/`kfree`/`pmm_alloc`/`pmm_free`/`kprintf` all dis
 
 threads that need to wait for something other than the clock park on a `waitq`. the keyboard has one, which is how the shell sits at a prompt costing exactly zero cpu until you press a key. the subtle part is the handoff: `waitq_block()` must be entered with interrupts already off and returns with them still off, so that "look in the buffer, find it empty, go to sleep" is one atomic move. get that wrong and a key arriving in the gap between the check and the sleep is lost forever, and the shell waits for something that already happened.
 
+## what is next
+
+**0.2.0 is more than one cpu**, and the twelve versions of 0.1.x turn
+out to have been the easy part. there are 39 `irq_save` pairs in this
+kernel and every one of them is a lie on a second core -- turning
+interrupts off here says nothing about a thread running there. so the
+version after it is an audit rather than a feature, and the one after
+that is a scheduler that runs on every core with the tlb shootdown to
+go with it.
+
+0.2.x carries on from there: a shell that knows what a directory is,
+commands typed by name rather than by path, pipes, an editor, fork and
+copy on write, demand paging, a filesystem with opinions about who owns
+what, partitions, and an `arch/` boundary that a second architecture is
+the only honest way to test. it ends with a live mode that can install
+this system onto a disk, which is what the ramdisk has been kept for.
+
+0.3.0 puts it on a wire. see [ROADMAP.md](ROADMAP.md).
+
 ## changelog
 
 - **0.1.12** — philemon, my own bootloader, and now the only one. limine is gone, along with the iso, the uefi path and the protocol that came with it: writing a bootloader and then booting with somebody else's is not much of a bootloader. one file, whose first 512 bytes are the only part the bios will read and which do nothing but pull in the rest of the same file; a20 and unreal mode so the kernel can be read in above a megabyte; page tables and long mode; and a 64-bit half in C that parses the elf and builds the memory map. the kernel is handed one struct in rdi and knows nothing about anybody's boot protocol including mine -- `limine.h` is deleted and there is not one request structure left in it. the C half is host-tested, and writing those tests found two real bugs: a carve loop walking unsorted regions that handed the ramdisk's memory away as free, and boot-table offsets read as though the struct had 16-byte fields. a third was found by reading: the video mode code loaded `fs` in real mode, which quietly undid unreal mode and left the page tables being written somewhere else entirely.
