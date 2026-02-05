@@ -360,6 +360,14 @@ static void die(const char *why) {
 
 /* ---- and the whole of it, in order ---- */
 
+/* gcc is right that reading and writing fixed numeric addresses is
+ * usually a bug: it cannot see an object there, so it cannot know the
+ * access is in bounds. down here there are no objects -- there is a
+ * machine, and agreed addresses in it, which is the whole of how the
+ * two halves of this loader speak to each other */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+
 __attribute__((section(".text.entry"), used, noreturn))
 void philemon_main(void) {
     say("[philemon] long mode. the 64-bit half is running.\n");
@@ -388,14 +396,8 @@ void philemon_main(void) {
 
     /* the acpi tables, where the firmware leaves them: behind a pointer
      * at 0x40e, and failing that in the read-only region at the top of
-     * the first megabyte.
-     *
-     * gcc is right that reading a fixed low address is usually a bug.
-     * it is what a bootloader does all day */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Warray-bounds"
+     * the first megabyte */
     uint64_t ebda = (uint64_t)(*(volatile uint16_t *)0x40e) << 4;
-#pragma GCC diagnostic pop
 
     struct ph_handoff *out = (struct ph_handoff *)PH_HANDOFF_ADDR;
     struct ph_memmap_entry *map = (struct ph_memmap_entry *)PH_MEMMAP_ADDR;
@@ -465,5 +467,7 @@ void philemon_main(void) {
 
     __builtin_unreachable();
 }
+
+#pragma GCC diagnostic pop
 
 #endif  /* TINYOS_HOSTED */

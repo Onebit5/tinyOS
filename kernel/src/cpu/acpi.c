@@ -83,8 +83,13 @@ static void parse_madt(const struct madt *m, struct acpi_info *out) {
 
         switch (e->type) {
         case MADT_LAPIC:
-            /* byte 4 is the flags; bit 0 says the cpu is usable */
+            /* byte 4 is the flags; bit 0 says the cpu is usable. byte 3
+             * is its apic id, which is the only way to address a core
+             * that is not running yet -- there is no other name for it */
             if (e->length >= 8 && (p[4] & 1)) {
+                if (out->cpu_count < ACPI_MAX_CPUS) {
+                    out->lapic_ids[out->cpu_count] = p[3];
+                }
                 out->cpu_count++;
             }
             break;

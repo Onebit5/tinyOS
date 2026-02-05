@@ -94,7 +94,7 @@ about anybody's protocol including mine.
 assumptions underneath that turning out to be too small: one cpu, one
 directory, one architecture, one process at the front of everything.
 
-**0.2.0 more than one cpu.** the firmware has been telling me how many
+**0.2.0 more than one cpu.** ~~the firmware has been telling me how many
 there are since 0.1.7 and I have been ignoring all but the first. the
 other cores wake in real mode at a page-aligned address below a
 megabyte, so this needs a second small trampoline out into long mode --
@@ -102,7 +102,10 @@ philemon just taught me how to write one, and this time the budget is
 four kilobytes rather than 512 bytes. per-cpu state to go with it:
 `current`, the idle thread, the tss and the gdt stop being globals.
 one enormous lock around the kernel to begin with, because a wrong
-answer that is slow is still an answer.
+answer that is slow is still an answer.~~ **done in 0.2.0**, except for
+the lock -- the woken cores halt instead. giving them kernel code to run
+before 0.2.1 has replaced the thirty-nine places that call `cli` mutual
+exclusion would not be a slow answer, it would be a corrupt one.
 
 **0.2.1 locks worth the name.** there are 39 `irq_save` pairs across
 twelve files and every one of them is a lie on a second core: turning

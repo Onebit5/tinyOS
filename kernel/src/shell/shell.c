@@ -16,6 +16,7 @@
 #include "fs/disk.h"
 #include "fs/vfs.h"
 #include "drivers/ahci.h"
+#include "cpu/smp.h"
 #include "sched/usermode.h"
 #include "sched/auth.h"
 #include "cpu/syscall.h"
@@ -200,6 +201,39 @@ static void cmd_disk(int argc, char **argv) {
 
     kprintf("\ntry: ls, cat welcome.txt, write /notes.txt "
             "something worth keeping\n");
+}
+
+static void cmd_cpus(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    size_t n = smp_cpu_count();
+    if (n == 0) {
+        kprintf("the firmware never said how many processors this machine "
+                "has,\nso I am using the one I woke up on.\n");
+        return;
+    }
+
+    kprintf("%-4s %-6s %-7s %-8s %s\n",
+            "cpu", "apic", "state", "threads", "");
+    for (size_t i = 0; i < n; i++) {
+        const struct cpu *c = smp_cpu_at(i);
+        kprintf("%-4u %-6u %-7s %-8zu %s%s\n", c->index, c->apic_id,
+                c->online ? "awake" : "silent",
+                c->bootstrap ? sched_thread_count() : 0,
+                c->bootstrap ? "runs everything" : "idle -- nothing to run yet",
+                (c->online && !c->bootstrap && c->reported_id != c->apic_id)
+                    ? "  (and reported a different apic id!)" : "");
+    }
+
+    kprintf("\n%zu of %zu processors awake.\n\n", smp_online_count(), n);
+    kprintf("these are cores, not threads. `ps` lists threads -- and every\n");
+    kprintf("one of them is taking turns on cpu 0, because there is one run\n");
+    kprintf("queue and only the first core runs the scheduler. summoning\n");
+    kprintf("more makes that queue longer, not the machine wider.\n\n");
+    kprintf("the others are halted on purpose. this kernel still calls\n");
+    kprintf("turning interrupts off mutual exclusion, which is only true\n");
+    kprintf("while one core runs it -- 0.2.1 is that audit, and 0.2.2 is\n");
+    kprintf("when these get a run queue of their own.\n");
 }
 
 static void cmd_mount(int argc, char **argv) {
@@ -794,6 +828,7 @@ static const struct command commands[] = {
     { "slabs",  "the object caches, and what they hold", cmd_slabs, false },
     { "disk",   "the drive, and the filesystem on it",  cmd_disk, false },
     { "mount",  "which filesystem is where",            cmd_mount, false },
+    { "cpus",   "the processors, and which are awake",  cmd_cpus, false },
     { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },

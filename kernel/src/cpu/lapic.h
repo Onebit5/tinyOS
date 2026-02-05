@@ -27,6 +27,27 @@ void lapic_eoi(void);
 
 uint32_t lapic_id(void);
 
+/* wake another core.
+ *
+ * a processor that has never run holds itself in reset until its own
+ * local apic tells it otherwise, and the only thing that can send that
+ * message is another core's local apic. so starting a cpu is not a
+ * function call -- it is an interrupt, addressed to a piece of hardware
+ * inside a processor that is not yet executing anything.
+ *
+ * the sequence is fixed by the manual and is not negotiable: assert
+ * INIT, wait, then send STARTUP twice. the vector is the *page* the
+ * core begins executing at, in real mode, below one megabyte -- so
+ * vector 8 means it wakes up at 0x8000 with no idea what year it is */
+/* set up the local apic of whichever core is asking. every core has its
+ * own set of these registers behind the same address, so this configures
+ * the one running it and nobody else -- which is the only way a core
+ * that has just woken can prepare itself */
+void lapic_enable_here(void);
+
+bool lapic_send_init(uint32_t apic_id);
+bool lapic_send_startup(uint32_t apic_id, uint8_t vector);
+
 /* the timer, running at `hz`. it is driven by the bus clock, whose
  * speed nobody will tell me, so it has to be measured against something
  * that already keeps time -- which is what the pit is still good for */

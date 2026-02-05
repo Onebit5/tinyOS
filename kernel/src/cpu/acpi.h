@@ -19,6 +19,7 @@
 
 #define ACPI_MAX_IOAPICS  4
 #define ACPI_MAX_OVERRIDES 16
+#define ACPI_MAX_CPUS     32
 
 struct acpi_ioapic {
     uint8_t  id;
@@ -36,6 +37,12 @@ struct acpi_info {
     bool     found;
     uint64_t lapic_address;
     size_t   cpu_count;             /* how many the firmware admits to */
+
+    /* and which they are. every core has a local apic with an id, and
+     * that id is the only way to address one -- there is no other name
+     * for a cpu you have not started yet. the first entry is the core
+     * reading this, by convention that firmware keeps */
+    uint8_t  lapic_ids[ACPI_MAX_CPUS];
 
     struct acpi_ioapic ioapics[ACPI_MAX_IOAPICS];
     size_t   ioapic_count;

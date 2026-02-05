@@ -60,8 +60,8 @@ static size_t build_madt(uint32_t lapic_addr) {
     memcpy(m + 36, &lapic_addr, 4);
 
     uint8_t *e = m + 44;
-    /* a usable cpu */
-    e[0] = 0; e[1] = 8; e[4] = 1;                   e += 8;
+    /* a usable cpu, apic id 0 */
+    e[0] = 0; e[1] = 8; e[2] = 0; e[3] = 0; e[4] = 1;   e += 8;
     /* an io apic at 0xfec00000, gsi base 0 */
     { uint32_t a = 0xfec00000, g = 0;
       e[0] = 1; e[1] = 12; e[2] = 2;
@@ -104,6 +104,7 @@ int main(void) {
     CHECK(info.ioapic_count == 1, "one io apic found");
     CHECK(info.ioapics[0].address == 0xfec00000, "at the right address");
     CHECK(info.cpu_count == 1, "one usable cpu counted");
+    CHECK(info.lapic_ids[0] == 0, "and its apic id noted");
 
     /* the override is the part that matters most: irq 0 is wired to
      * line 2 on nearly every real machine, and a kernel that assumes
@@ -125,6 +126,47 @@ int main(void) {
     build_rsdp(2, 0, RSDT_AT);
     info = acpi_parse(RSDP_AT, read_phys);
     CHECK(info.found, "an acpi 2.0 chain works through the xsdt");
+
+    /* ---- several processors, which is what 0.2.0 is for ----
+     *
+     * the apic id is the only way to address a core that is not running
+     * yet, so counting them is not enough -- they have to be named. and
+     * the ids are not consecutive on real hardware, which is exactly the
+     * sort of thing a kernel that assumes gets wrong on somebody else's
+     * machine and never on its own */
+    {
+        uint8_t *m = mem + MADT_AT;
+        memset(m, 0, 256);
+        memcpy(m, "APIC", 4);
+        m[8] = 1;
+        uint32_t addr = 0xfee00000;
+        memcpy(m + 36, &addr, 4);
+
+        uint8_t *e = m + 44;
+        /* four processors with awkward ids, and a fifth the firmware
+         * says is not usable -- which must not be woken and must not be
+         * counted, or every core after it is off by one */
+        const uint8_t ids[4] = { 0, 2, 4, 6 };
+        for (int i = 0; i < 4; i++) {
+            e[0] = 0; e[1] = 8; e[2] = (uint8_t)i; e[3] = ids[i]; e[4] = 1;
+            e += 8;
+        }
+        e[0] = 0; e[1] = 8; e[2] = 9; e[3] = 9; e[4] = 0;   /* disabled */
+        e += 8;
+
+        uint32_t len = (uint32_t)(e - m);
+        memcpy(m + 4, &len, 4);
+        checksum(m, len);
+        build_rsdt(MADT_AT, false);
+        build_rsdp(0, RSDT_AT, 0);
+
+        info = acpi_parse(RSDP_AT, read_phys);
+        CHECK(info.found, "an madt with several processors parses");
+        CHECK(info.cpu_count == 4, "the usable ones are counted");
+        CHECK(info.lapic_ids[0] == 0 && info.lapic_ids[1] == 2
+              && info.lapic_ids[2] == 4 && info.lapic_ids[3] == 6,
+              "and named, in order, with the ids the firmware gave");
+    }
 
     /* ---- a 64-bit lapic address supersedes the 32-bit one ---- */
     memset(mem, 0, sizeof mem);

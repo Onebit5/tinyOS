@@ -79,6 +79,10 @@ static bool timer_on_lapic;
 static bool external_on_ioapic;
 static struct acpi_info acpi;
 
+const struct acpi_info *interrupts_acpi(void) {
+    return &acpi;
+}
+
 bool interrupts_on_apic(void) {
     return timer_on_lapic;
 }

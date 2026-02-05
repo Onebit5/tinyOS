@@ -19,6 +19,15 @@
 #define LAPIC_TIMER_INIT    0x380
 #define LAPIC_TIMER_CURRENT 0x390
 #define LAPIC_TIMER_DIVIDE  0x3e0
+#define LAPIC_ICR_LOW       0x300
+#define LAPIC_ICR_HIGH      0x310
+
+/* the interrupt command register, which is how one core says anything
+ * at all to another */
+#define ICR_DELIVERY_INIT   (5u << 8)
+#define ICR_DELIVERY_STARTUP (6u << 8)
+#define ICR_LEVEL_ASSERT    (1u << 14)
+#define ICR_PENDING         (1u << 12)
 
 #define SPURIOUS_ENABLE     (1u << 8)
 #define LVT_MASKED          (1u << 16)
@@ -115,4 +124,48 @@ void lapic_timer_start(uint32_t hz, uint64_t ticks_per_second) {
     write32(LAPIC_TIMER_DIVIDE, 0x3);
     write32(LAPIC_LVT_TIMER, LAPIC_TIMER_VECTOR | LVT_PERIODIC);
     write32(LAPIC_TIMER_INIT, (uint32_t)count);
+}
+
+
+void lapic_enable_here(void) {
+    if (!lapic_available()) {
+        return;
+    }
+    write32(LAPIC_TPR, 0);      /* accept every priority */
+    write32(LAPIC_SPURIOUS, SPURIOUS_ENABLE | LAPIC_SPURIOUS_VECTOR);
+}
+
+/* ---- waking another core ---- */
+
+/* the command is only accepted when the last one has been delivered, and
+ * "delivered" is a bit the hardware clears in its own time */
+static bool icr_idle(void) {
+    for (int spin = 0; spin < 1000000; spin++) {
+        if (!(read32(LAPIC_ICR_LOW) & ICR_PENDING)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* the target goes in the high half and the command in the low half, and
+ * writing the low half is what sends it -- so the order matters and is
+ * the wrong way round from how it reads */
+static bool send(uint32_t apic_id, uint32_t command) {
+    if (!lapic_available() || !icr_idle()) {
+        return false;
+    }
+    write32(LAPIC_ICR_HIGH, apic_id << 24);
+    write32(LAPIC_ICR_LOW, command);
+    return icr_idle();
+}
+
+bool lapic_send_init(uint32_t apic_id) {
+    return send(apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT);
+}
+
+bool lapic_send_startup(uint32_t apic_id, uint8_t vector) {
+    /* the vector is a page number, not an address: the core begins at
+     * vector * 0x1000, in real mode, knowing nothing */
+    return send(apic_id, ICR_DELIVERY_STARTUP | ICR_LEVEL_ASSERT | vector);
 }

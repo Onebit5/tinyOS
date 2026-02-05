@@ -80,7 +80,7 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'ps\r';     sleep 1
     printf 'dmesg\r';  sleep 2
 } | timeout 90 qemu-system-x86_64 \
-        -M q35 -m 2G -boot order=c \
+        -M q35 -m 2G -smp "${CPUS:-2}" -boot order=c \
         -drive id=boot,file="$BOOTIMG",format=raw,if=none \
         -device ide-hd,drive=boot,bus=ide.0,bootindex=0 \
         -drive id=data,file="$DISK",format=raw,if=none \

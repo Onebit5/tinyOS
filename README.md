@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.1.12** (**philemon.** my own bootloader, and the only one -- named for the one who grants the power and then steps back, which is the whole job description)
+**version: 0.2.0** (**more than one cpu.** the other cores wake, climb into long mode, say which processor they are, and halt -- because giving them work before the locks exist would not be slow, it would be wrong)
 
 ## what it does
 
@@ -36,6 +36,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a sata driver and fat32: files on a real disk, that survive a reboot
 - [x] one namespace over both, and a machine that boots with neither missing
 - [x] philemon: my own bootloader, and now the only one on the disk
+- [x] the other processors, woken and accounted for
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -201,6 +202,51 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### waking the other cores
+
+the firmware has been telling me how many processors this machine has
+since 0.1.7 and I have been using exactly one of them. the rest sit in
+reset, and the only thing in the world that can bring one out is an
+interrupt sent from another core's local apic -- which is why none of
+this could be attempted before there was a local apic to send it from.
+
+a core that wakes does not resume. it **starts**: real mode, sixteen
+bits, at a page below one megabyte, knowing nothing about the last forty
+years. the startup message carries a vector and the vector is a *page
+number*, so vector 8 means the core begins executing at 0x8000 with no
+stack, no page tables, and no idea what year it is. so there has to be a
+page of code sitting there to catch it, making the same climb into long
+mode that philemon makes at boot -- in a quarter of the space, on a
+processor that is not the first.
+
+two details are worth knowing because they are where this goes wrong:
+
+**the page tables it climbs on cannot be the kernel's.** the kernel maps
+none of low memory, and the trampoline is down in low memory -- so the
+instruction after paging comes on would be unreachable. it climbs on a
+copy with the first two megabytes identity-mapped, and the C it lands in
+switches to the real ones as its first act, once it is executing at an
+address the kernel knows about.
+
+**it is asked twice.** the sequence is fixed by the manual: assert INIT,
+wait, then send STARTUP, then send STARTUP again. the second is not
+superstition -- some processors miss the first, and sending it to one
+that already started is harmless because it is no longer listening.
+
+**what they do when they arrive is nothing.** each core reads its own
+apic id and writes it down, which is proof it really executed my code on
+that processor -- it is the one thing a core cannot be wrong about or
+fake -- and then halts. `cpus` shows the result.
+
+that restraint is the whole point of stopping here. there are **39
+`irq_save` pairs across twelve files** in this kernel, and every one of
+them is a lie the moment a second core runs kernel code: turning
+interrupts off *here* says nothing about a thread running *there*. the
+fat32 driver has a single 512-byte scratch buffer shared by every call
+into it. giving these cores work now would not be a slow answer, it
+would be a corrupt one. 0.2.1 is that audit; 0.2.2 gives them something
+to do.
 
 ### philemon
 
@@ -668,6 +714,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.0** — the other processors wake up. a core that has never run holds itself in reset until another core's local apic tells it otherwise, and when it starts it starts in real mode at a page below a megabyte, so there is a trampoline sitting there to walk it back into long mode -- on page tables that are a copy of the kernel's with low memory identity-mapped, because the kernel maps none of where that code lives. each woken core reports its own apic id, which is the one thing it cannot fake, and then halts. `cpus` lists them. they are given nothing to do on purpose: there are 39 `irq_save` pairs in this kernel that call turning interrupts off mutual exclusion, and every one is false on a second core -- so 0.2.1 is an audit before 0.2.2 is a scheduler. also fixed: `all: $(BOOTIMG)` was written above the line defining `BOOTIMG`, so a bare `make` had been quietly building nothing at all.
 - **0.1.12** — philemon, my own bootloader, and now the only one. limine is gone, along with the iso, the uefi path and the protocol that came with it: writing a bootloader and then booting with somebody else's is not much of a bootloader. one file, whose first 512 bytes are the only part the bios will read and which do nothing but pull in the rest of the same file; a20 and unreal mode so the kernel can be read in above a megabyte; page tables and long mode; and a 64-bit half in C that parses the elf and builds the memory map. the kernel is handed one struct in rdi and knows nothing about anybody's boot protocol including mine -- `limine.h` is deleted and there is not one request structure left in it. the C half is host-tested, and writing those tests found two real bugs: a carve loop walking unsorted regions that handed the ramdisk's memory away as free, and boot-table offsets read as though the struct had 16-byte fields. a third was found by reading: the video mode code loaded `fs` in real mode, which quietly undid unreal mode and left the page tables being written somewhere else entirely.
 - **0.1.11** — one namespace instead of two filesystems side by side. the disk is the root; the ramdisk moved to `/boot`. a bare name is looked for on the disk first and the ramdisk second, so a disk may supply its own copy of anything while a machine without one falls through to what it booted with. `mount` shows the table, and `cat welcome.txt` versus `cat /boot/welcome.txt` demonstrates the order in one line. the syscall layer lost its prefix tests and its two branches -- `open`, `read`, `write` and `readdir` all go through one resolver now, and programs and `passwd` come through it too, which is what lets either of them live on either filesystem. the ramdisk stays on purpose: it is a module handed over before any driver exists, so a kernel that needed a sata controller to find its own programs would be one a missing cable bricks. the vfs suite runs every check twice, once with the disk switched off, to keep that true.
 - **0.1.10** — a disk, and a filesystem on it that remembers. an ahci driver reaches the sata controller pci enumeration found: commands are built in ram -- a header, a table holding the frame the drive receives, a scatter list of physical addresses -- and one bit says go, after which the controller moves every byte itself. polled rather than interrupt-driven, with every wait bounded. on top of that, fat32: cluster chains, subdirectories, and long filenames assembled from the records hidden in front of the short ones (checked for completeness, since a half-assembled name is worse than none). writes go to existing files, past their end, and to files that did not exist yet. `ls`, `cat welcome.txt`, and `write /notes.txt something` -- then reboot and it is still there. the filesystem takes its disk as two functions, so the suite runs the real parser against a real image; but the formatter and the parser share an author, so the check that counts is mounting the image on linux.

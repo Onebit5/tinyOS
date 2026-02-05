@@ -6,6 +6,7 @@
 #include "cpu/idt.h"
 #include "cpu/pic.h"
 #include "cpu/interrupts.h"
+#include "cpu/smp.h"
 #include "cpu/tss.h"
 #include "cpu/syscall.h"
 #include "drivers/serial.h"
@@ -241,6 +242,12 @@ void kmain(const struct ph_handoff *handoff) {
     if (!interrupts_use_apic()) {
         kprintf("interrupts : staying on the 8259 and the pit\n");
     }
+
+    /* and then wake everything else this machine has. they climb out
+     * into long mode, say which core they are, and halt -- giving them
+     * work needs locks that do not exist yet. before the shell reclaims
+     * the loader's memory, because the page they start on is in it */
+    smp_init(interrupts_acpi());
 
     if (thread_create("shell", shell_thread, NULL) == NULL) {
         panic("no memory for a shell. there is nobody left to talk to");

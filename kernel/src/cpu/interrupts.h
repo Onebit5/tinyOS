@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "cpu/acpi.h"
 
 /* what isr_common in isr.asm leaves on the stack, low address first.
  * if you touch the push order over there, touch this too. the static
@@ -23,6 +24,11 @@ void interrupt_dispatch(struct interrupt_frame *frame);
  * interrupt over to them. returns false if I am staying on the 8259,
  * which is not a failure -- it is the same behaviour by an older road */
 bool interrupts_use_apic(void);
+
+/* what acpi said about this machine, read once at boot. smp needs the
+ * list of processors out of it, and there is no reason to walk the
+ * tables twice */
+const struct acpi_info *interrupts_acpi(void);
 
 /* move the external interrupts to the io apic as well. deliberately not
  * done at boot -- see the note in interrupts.c. returns false without

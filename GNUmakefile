@@ -2,10 +2,23 @@
 #
 # targets:
 #   make        -> kernel elf in bin/
-#   make run    -> boot it in qemu
+#   make run    -> boot it in qemu (CPUS=4, MEM=512M, QEMU_EXTRA=...)
 #   make clean
 
 KERNEL := tinyos
+
+# the bootable image, and the default target. defined up here with the
+# other names because a prerequisite is expanded where it is written --
+# further down, `all: $(BOOTIMG)` quietly meant `all:` with nothing to do
+BOOTIMG := tinyos.img
+
+# knobs for `make run`. they have to be make variables rather than extra
+# words on the command line, because `make run -smp 4` hands -s -m -p to
+# *make* -- and -p means "print the entire database", which is a
+# surprising amount of ukrainian
+CPUS ?= 1
+MEM  ?= 2G
+QEMU_EXTRA ?=
 
 CC   := gcc
 LD   := ld
@@ -24,9 +37,11 @@ LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld
 NASMFLAGS := -f elf64 -g
 
 CSRC := $(shell find kernel/src -name '*.c')
-ASRC := $(shell find kernel/src -name '*.asm')
+ASRC := $(filter-out kernel/src/cpu/trampoline.asm, \
+          $(shell find kernel/src -name '*.asm'))
 OBJ  := $(patsubst kernel/src/%.c,obj/%.c.o,$(CSRC)) \
-        $(patsubst kernel/src/%.asm,obj/%.asm.o,$(ASRC))
+        $(patsubst kernel/src/%.asm,obj/%.asm.o,$(ASRC)) \
+        obj/cpu/trampoline.c.o
 
 .PHONY: all run bootimg clean distclean
 
@@ -57,6 +72,19 @@ obj/%.c.o: kernel/src/%.c
 obj/%.asm.o: kernel/src/%.asm
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) $< -o $@
+
+# the code a second cpu wakes up in. it runs in real mode at a fixed low
+# address, which is nowhere the linker would put anything, so it is
+# assembled flat and carried inside the kernel as bytes
+obj/cpu/trampoline.bin: kernel/src/cpu/trampoline.asm
+	@mkdir -p $(@D)
+	$(NASM) -f bin $< -o $@
+
+obj/cpu/trampoline.c: obj/cpu/trampoline.bin tools/bin2c.py
+	@python3 tools/bin2c.py smp_trampoline $< > $@
+
+obj/cpu/trampoline.c.o: obj/cpu/trampoline.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 -include $(OBJ:.o=.d)
 
@@ -109,7 +137,6 @@ $(RAMDISK): $(USER_PROGS) $(RAMDISK_FILES)
 # came with it. the kernel is handed one struct now, in rdi, and knows
 # nothing about anybody's boot protocol including mine.
 
-BOOTIMG   := tinyos.img
 BOOTCC    := gcc
 BOOTCFLAGS := -std=gnu11 -ffreestanding -fno-pic -fno-stack-protector \
               -mno-red-zone -mno-sse -mno-mmx -mno-80387 -mcmodel=small \
@@ -142,12 +169,17 @@ bootimg: $(BOOTIMG)
 #
 # the kernel does not care which is which: it tries every drive until one
 # has a filesystem it recognises, and the boot image has none
+#   make run            one cpu
+#   make run CPUS=4     four
+#   make run MEM=512M QEMU_EXTRA="-d int"
 run: $(BOOTIMG) $(DISK)
-	qemu-system-x86_64 -M q35 -m 2G -serial stdio -boot order=c \
+	qemu-system-x86_64 -M q35 -m $(MEM) -smp $(CPUS) -serial stdio \
+		-boot order=c \
 		-drive id=boot,file=$(BOOTIMG),format=raw,if=none \
 		-device ide-hd,drive=boot,bus=ide.0,bootindex=0 \
 		-drive id=data,file=$(DISK),format=raw,if=none \
-		-device ide-hd,drive=data,bus=ide.1,bootindex=1
+		-device ide-hd,drive=data,bus=ide.1,bootindex=1 \
+		$(QEMU_EXTRA)
 
 # the disk, which is a real filesystem rather than an archive: built by
 # tools/mkfat.py out of whatever is in diskroot/, and attached to qemu
