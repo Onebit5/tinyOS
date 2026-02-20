@@ -25,6 +25,7 @@
 #include "lib/ksyms.h"
 #include "version.h"
 #include "sched/sched.h"
+#include "sched/spinlock.h"
 #include "sched/thread.h"
 #include "sched/process.h"
 #include <stdint.h>
@@ -201,6 +202,34 @@ static void cmd_disk(int argc, char **argv) {
 
     kprintf("\ntry: ls, cat welcome.txt, write /notes.txt "
             "something worth keeping\n");
+}
+
+static void cmd_locks(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    kprintf("%-10s %-5s %-6s %s\n", "lock", "rank", "held", "times waited");
+
+    uint64_t total = 0;
+    for (size_t i = 0; i < spin_count(); i++) {
+        const struct spinlock *l = spin_at(i);
+        kprintf("%-10s %-5d %-6s %lu\n", l->name, (int)l->rank,
+                l->held ? "yes" : "no", l->contended);
+        total += l->contended;
+    }
+
+    kprintf("\n%zu locks. ", spin_count());
+    if (total == 0) {
+        kprintf("nothing has ever waited on one, which is what a\n");
+        kprintf("machine running kernel code on one core looks like.\n");
+    } else {
+        kprintf("waited %lu times in total.\n", total);
+    }
+    kprintf("\nrank is the order they may be taken in: a lock may only be\n");
+    kprintf("taken while holding lower-ranked ones. it is read off the call\n");
+    kprintf("graph -- tty calls the scheduler, the scheduler reaches into\n");
+    kprintf("the process table, all of them allocate, and anything may\n");
+    kprintf("print. two locks taken in opposite orders by two cores is a\n");
+    kprintf("machine that stops with nothing to say, so it is checked.\n");
 }
 
 static void cmd_cpus(int argc, char **argv) {
@@ -829,6 +858,7 @@ static const struct command commands[] = {
     { "disk",   "the drive, and the filesystem on it",  cmd_disk, false },
     { "mount",  "which filesystem is where",            cmd_mount, false },
     { "cpus",   "the processors, and which are awake",  cmd_cpus, false },
+    { "locks",  "what guards what, and what waits",     cmd_locks, false },
     { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },

@@ -107,7 +107,7 @@ the lock -- the woken cores halt instead. giving them kernel code to run
 before 0.2.1 has replaced the thirty-nine places that call `cli` mutual
 exclusion would not be a slow answer, it would be a corrupt one.
 
-**0.2.1 locks worth the name.** there are 39 `irq_save` pairs across
+**0.2.1 locks worth the name.** ~~there are 39 `irq_save` pairs across
 twelve files and every one of them is a lie on a second core: turning
 interrupts off here says nothing about a thread running there. this is
 the audit -- spinlocks, and then going through all 39 deciding what each
@@ -116,7 +116,10 @@ and some turn out never to have needed anything. the fat32 driver has a
 single 512-byte scratch buffer shared by every call into it, which is
 not a race so much as a promise of one. the allocators get a host test
 that hammers them from several threads at once, since that is the only
-way I can see these bugs at all.
+way I can see these bugs at all.~~ **done in 0.2.1.** the rank rule
+complains rather than panics for now: with one core running kernel code
+a wrong order cannot deadlock anything, so it should cost a line of text
+and not a working machine. it becomes fatal in 0.2.2.
 
 **0.2.2 a scheduler on every core.** a run queue per cpu instead of one
 behind a lock, work moved between them when they drift apart, and tlb

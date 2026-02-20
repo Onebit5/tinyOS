@@ -8,6 +8,7 @@
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include "sched/process.h"
 #include "drivers/pit.h"
 
@@ -37,6 +38,11 @@ void thread_set_name(struct thread *t, const char *name) {
  * switch_context, not by iretq, which has one important consequence
  * spelled out below */
 static void thread_bootstrap(void) {
+    /* I was switched to with the scheduler's lock held, and the release
+     * for it is on the stack of whoever switched to me -- a stack I will
+     * never return to. so it is mine to give back */
+    sched_first_run();
+
     /* I inherited IF=0 from whoever switched to me, because switching
      * happens with interrupts off. a preempted thread would get its
      * flags back from the iretq it eventually returns through, and a
@@ -53,6 +59,9 @@ static void thread_bootstrap(void) {
 
 /* threads are all exactly the same size and get created and destroyed
  * constantly, which is precisely what an object cache is for */
+/* the thread ids, which must not be handed out twice */
+static struct spinlock thread_lock = SPINLOCK("thread", LOCK_RANK_SCHED);
+
 static struct slab_cache thread_cache;
 
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg) {
@@ -144,9 +153,9 @@ void thread_exit(int code) {
         kprintf("[%s] hath returned to the sea of souls\n", me->name);
     }
 
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&thread_lock);
     me->state = THREAD_DEAD;
-    irq_restore(flags);
+    spin_unlock_irq(&thread_lock, flags);
 
     /* the scheduler will never pick a dead thread, so this yield is a
      * one way door. the next thread to run reaps my stack out from

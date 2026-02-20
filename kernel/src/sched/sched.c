@@ -9,6 +9,7 @@
 #include "lib/panic.h"
 #include "lib/string.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include "cpu/tss.h"
 #include "cpu/syscall.h"
 #include "mm/pmm.h"
@@ -22,6 +23,11 @@
 
 /* implemented in switch.asm */
 extern void switch_context(uint64_t *save_rsp, uint64_t *load_rsp);
+
+/* the run queue: a ring every core will eventually walk, and the
+ * one place a thread can be in two states at once if nobody is
+ * holding anything */
+static struct spinlock sched_lock = SPINLOCK("sched", LOCK_RANK_SCHED);
 
 static struct thread *current;
 static struct thread *idle_thread;
@@ -49,10 +55,10 @@ void sched_add(struct thread *t) {
     if (current == NULL) {
         panic("sched_add before sched_init, the wheel hath no hub yet");
     }
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
     t->next = current->next;
     current->next = t;
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 /* free anything that has finished. I walk from current outward and
@@ -105,6 +111,11 @@ static struct thread *pick_next(void) {
 }
 
 /* the actual switch. must be entered with interrupts off */
+/* the run queue is rewritten here, so the lock has to be held on the way
+ * in. it is *not* held on the way out by the thread that arrives: a
+ * brand new one starts at thread_bootstrap and never returns through
+ * this function at all, so it gives the lock back itself. see
+ * sched_first_run */
 static void schedule(void) {
     reap_dead();
 
@@ -145,26 +156,59 @@ static void schedule(void) {
      * I am `prev` again. everything above is somebody elses story */
 }
 
-void sched_yield(void) {
-    uint64_t flags = irq_save();
-    schedule();
-    irq_restore(flags);
+/* the first thing a newly created thread does.
+ *
+ * switching happens with the lock held, and normally the thread that
+ * comes back releases it -- but a thread running for the first time
+ * has no "comes back": it starts at the top of thread_bootstrap with
+ * somebody else's lock in its hand and their release sitting on a stack
+ * it will never return to. so it hands it back itself.
+ *
+ * getting this wrong looks like a keyboard interrupt panicking about
+ * recursion, which is exactly how it was found */
+void sched_first_run(void) {
+    spin_unlock(&sched_lock);
 }
 
-void waitq_block(struct waitq *q) {
-    /* interrupts are already off -- see the contract in sched.h.
-     * I go on the queue and off the run queue in the same breath */
+void sched_yield(void) {
+    uint64_t flags = spin_lock_irq(&sched_lock);
+    schedule();
+    spin_unlock_irq(&sched_lock, flags);
+}
+
+static void unlink(struct waitq *q, struct thread *t);
+
+void waitq_enqueue(struct waitq *q) {
+    uint64_t flags = spin_lock_irq(&sched_lock);
     current->wait_next = q->head;
     current->waiting_on = q;
     q->head = current;
     current->state = THREAD_BLOCKED;
-    schedule();
+    spin_unlock_irq(&sched_lock, flags);
+}
+
+void waitq_sleep(void) {
+    uint64_t flags = spin_lock_irq(&sched_lock);
+
+    /* if somebody woke me between enqueueing and getting here, I am
+     * already READY and there is nothing to sleep through. that gap is
+     * the whole reason these are two calls: it is what lets a caller
+     * drop its own lock in the middle without losing the wakeup */
+    if (current->state == THREAD_BLOCKED) {
+        schedule();
+    }
     current->waiting_on = NULL;
-    /* somebody woke me and the scheduler picked me back up */
+
+    spin_unlock_irq(&sched_lock, flags);
+}
+
+void waitq_block(struct waitq *q) {
+    waitq_enqueue(q);
+    waitq_sleep();
 }
 
 void waitq_wake_all(struct waitq *q) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
 
     struct thread *t = q->head;
     while (t != NULL) {
@@ -178,11 +222,11 @@ void waitq_wake_all(struct waitq *q) {
     }
     q->head = NULL;
 
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 void sched_wake_thread(int id) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
 
     struct thread *t = current;
     do {
@@ -191,7 +235,7 @@ void sched_wake_thread(int id) {
                 if (t->waiting_on != NULL) {
                     struct waitq *q = t->waiting_on;
                     t->waiting_on = NULL;
-                    waitq_remove(q, t);
+                    unlink(q, t);   /* the lock is already mine */
                 }
                 t->state = THREAD_READY;
             }
@@ -200,14 +244,13 @@ void sched_wake_thread(int id) {
         t = t->next;
     } while (t != current);
 
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
-void waitq_remove(struct waitq *q, struct thread *t) {
-    uint64_t flags = irq_save();
-
-    /* walk with a pointer to the link rather than the node, so removing
-     * the head needs no special case */
+/* the guts, for callers already holding the lock. walking with a pointer
+ * to the link rather than the node means removing the head needs no
+ * special case */
+static void unlink(struct waitq *q, struct thread *t) {
     struct thread **link = &q->head;
     while (*link != NULL) {
         if (*link == t) {
@@ -218,8 +261,12 @@ void waitq_remove(struct waitq *q, struct thread *t) {
         }
         link = &(*link)->wait_next;
     }
+}
 
-    irq_restore(flags);
+void waitq_remove(struct waitq *q, struct thread *t) {
+    uint64_t flags = spin_lock_irq(&sched_lock);
+    unlink(q, t);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 void sleep_ms(uint64_t ms) {
@@ -228,17 +275,22 @@ void sleep_ms(uint64_t ms) {
         ticks = 1;      /* asking for less than a tick still costs a tick */
     }
 
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
     current->wake_at = pit_ticks() + ticks;
     current->state = THREAD_SLEEPING;
     schedule();
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 void sched_tick(void) {
     if (current == NULL) {
         return;     /* timer beat the scheduler to it, nothing to do yet */
     }
+
+    /* this walks the ring and may switch away, both of which are the
+     * lock's business. it arrives from an interrupt with interrupts
+     * already off, which used to be the whole of the protection */
+    uint64_t flags = spin_lock_irq(&sched_lock);
 
     /* charge the tick to whoever was running when it arrived. the idle
      * thread is charged too -- time spent doing nothing is still time,
@@ -250,6 +302,8 @@ void sched_tick(void) {
     if (--quantum_left <= 0) {
         schedule();
     }
+
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 static void dump_one(struct thread *t) {
@@ -280,7 +334,7 @@ static void dump_one(struct thread *t) {
 }
 
 void sched_dump(void) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
 
     kprintf("threads\n");
     kprintf("  id  name             state    cpu  running\n");
@@ -309,20 +363,20 @@ void sched_dump(void) {
         }
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
 }
 
 size_t sched_thread_count(void) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
     size_t n = 0;
     struct thread *t = current;
     do { n++; t = t->next; } while (t != current);
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
     return n;
 }
 
 bool sched_thread_alive(int id) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
     bool alive = false;
 
     struct thread *t = current;
@@ -334,12 +388,12 @@ bool sched_thread_alive(int id) {
         t = t->next;
     } while (t != current);
 
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
     return alive;
 }
 
 enum sched_kill_result sched_kill(int id) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&sched_lock);
     enum sched_kill_result result = SCHED_KILL_NO_SUCH;
 
     struct thread *t = current;
@@ -357,7 +411,7 @@ enum sched_kill_result sched_kill(int id) {
                 if (t->waiting_on != NULL) {
                     struct waitq *q = t->waiting_on;
                     t->waiting_on = NULL;
-                    waitq_remove(q, t);
+                    unlink(q, t);   /* the lock is already mine */
                 }
                 if (t->pid != 0) {
                     process_exited(t->pid, PROCESS_KILLED, pit_uptime_ms());
@@ -370,7 +424,7 @@ enum sched_kill_result sched_kill(int id) {
         t = t->next;
     } while (t != current);
 
-    irq_restore(flags);
+    spin_unlock_irq(&sched_lock, flags);
     return result;
 }
 

@@ -233,6 +233,7 @@ const char *pci_device_name(uint16_t vendor, uint16_t device) {
 
 #include "cpu/io.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 
 /* the original way in, and still the one every machine supports: an
  * address written to one port, the answer read from another. there is a
@@ -240,6 +241,10 @@ const char *pci_device_name(uint16_t vendor, uint16_t device) {
  * config space, but nothing here needs the parts it can reach */
 #define PCI_CONFIG_ADDRESS 0xcf8
 #define PCI_CONFIG_DATA    0xcfc
+
+/* config space is an address port and a data port, and the pair is
+ * only meaningful together -- machine-wide, not per core */
+static struct spinlock pci_lock = SPINLOCK("pci", LOCK_RANK_DEVICE);
 
 static uint32_t port_read(uint8_t bus, uint8_t slot, uint8_t fn, uint8_t off) {
     uint32_t address = (1u << 31)
@@ -249,10 +254,10 @@ static uint32_t port_read(uint8_t bus, uint8_t slot, uint8_t fn, uint8_t off) {
                      | (off & 0xfc);
 
     /* two ports, one after the other, and nothing else may go between */
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&pci_lock);
     outl(PCI_CONFIG_ADDRESS, address);
     uint32_t value = inl(PCI_CONFIG_DATA);
-    irq_restore(flags);
+    spin_unlock_irq(&pci_lock, flags);
 
     return value;
 }

@@ -42,6 +42,22 @@ struct waitq {
  * thread waits forever for something that already happened */
 void waitq_block(struct waitq *q);
 
+/* the same thing in two halves, for a caller holding a lock of its own.
+ * go on the queue first, then drop your lock, then sleep -- a wake that
+ * lands in the gap has already marked you ready, so the sleep returns
+ * at once instead of being missed.
+ *
+ * a lock must never be held across the sleep. turning interrupts off is
+ * a property of a thread and rides through a context switch harmlessly;
+ * a lock is a property of the machine, and a sleeping thread holding one
+ * is a machine where nobody else can ever have it */
+void waitq_enqueue(struct waitq *q);
+void waitq_sleep(void);
+
+/* given back by a thread on its very first run, because it starts
+ * holding a lock whose release is on a stack it will never return to */
+void sched_first_run(void);
+
 /* wake everyone parked on the queue. safe to call from an irq */
 void waitq_wake_all(struct waitq *q);
 

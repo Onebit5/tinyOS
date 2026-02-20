@@ -1,16 +1,20 @@
 #include "drivers/tty.h"
 #include "drivers/input.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include "lib/kprintf.h"
 #include "sched/process.h"
 #include "sched/sched.h"
 
+/* which process is at the front of the terminal */
+static struct spinlock tty_lock = SPINLOCK("tty", LOCK_RANK_DEVICE);
+
 static int foreground = TTY_SHELL;
 
 void tty_set_foreground(int pid) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&tty_lock);
     foreground = pid;
-    irq_restore(flags);
+    spin_unlock_irq(&tty_lock, flags);
 }
 
 int tty_foreground(void) {

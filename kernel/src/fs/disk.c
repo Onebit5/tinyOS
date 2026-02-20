@@ -3,6 +3,12 @@
 #include "drivers/ahci.h"
 #include "lib/string.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
+
+/* the filesystem keeps one sector of scratch and every path through
+ * it assumes nobody else is halfway through another. that was a
+ * promise of a race rather than a race, and this is it being kept */
+static struct spinlock disk_lock = SPINLOCK("disk", LOCK_RANK_DEVICE);
 
 static struct fat32 fs;
 static bool ready;
@@ -10,8 +16,8 @@ static bool ready;
 /* the filesystem keeps one sector of scratch and every path through it
  * assumes nobody else is halfway through another. two threads reading
  * at once would hand each other the wrong sector, so they do not */
-static uint64_t enter(void) { return irq_save(); }
-static void leave(uint64_t flags) { irq_restore(flags); }
+static uint64_t enter(void) { return spin_lock_irq(&disk_lock); }
+static void leave(uint64_t flags) { spin_unlock_irq(&disk_lock, flags); }
 
 bool disk_ready(void) { return ready; }
 

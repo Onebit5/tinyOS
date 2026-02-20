@@ -3,6 +3,7 @@
 #include "mm/pmm.h"
 #include "lib/panic.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 
 /* the heap, which is now mostly not a heap.
  *
@@ -39,6 +40,10 @@ static const char *const class_name[CLASS_COUNT] = {
     "kmalloc-16",  "kmalloc-32",  "kmalloc-64", "kmalloc-128",
     "kmalloc-256", "kmalloc-512", "kmalloc-1024",
 };
+
+/* only the counters below. the objects themselves are the slab's
+ * problem and the pages are the pmm's, both of which lock their own */
+static struct spinlock large_lock = SPINLOCK("kmalloc", LOCK_RANK_HEAP);
 
 static uint64_t large_pages;    /* pages held by over-sized allocations */
 
@@ -78,9 +83,9 @@ void *kmalloc(size_t size) {
     h->magic = LARGE_MAGIC;
     h->pages = pages;
 
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&large_lock);
     large_pages += pages;
-    irq_restore(flags);
+    spin_unlock_irq(&large_lock, flags);
 
     return (uint8_t *)h + sizeof(struct large);
 }
@@ -105,9 +110,9 @@ void kfree(void *ptr) {
     uint64_t pages = h->pages;
     h->magic = 0;               /* so a second kfree is caught, not repeated */
 
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&large_lock);
     large_pages -= pages;
-    irq_restore(flags);
+    spin_unlock_irq(&large_lock, flags);
 
     pmm_free_pages((uint64_t)h - pmm_hhdm_offset(), pages);
 }

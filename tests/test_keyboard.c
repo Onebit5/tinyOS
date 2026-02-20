@@ -4,6 +4,18 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdarg.h>
+#include <stdlib.h>
+
+/* what the lock complains through */
+void kprintf(const char *fmt, ...) { (void)fmt; }
+void panic(const char *fmt, ...) {
+    printf("PANIC: ");
+    va_list ap; va_start(ap, fmt); vprintf(fmt, ap); va_end(ap);
+    printf("\n");
+    exit(1);
+}
+
 #include <stdbool.h>
 
 /* kernel bits the driver links against but doesnt need here */
@@ -12,6 +24,8 @@ void irq_register(uint8_t irq, void (*h)(struct interrupt_frame *)) { (void)irq;
 void pic_unmask(uint8_t irq) { (void)irq; }
 struct waitq;
 void waitq_block(struct waitq *q) { (void)q; }
+void waitq_enqueue(struct waitq *q) { (void)q; }
+void waitq_sleep(void) { }
 void waitq_wake_all(struct waitq *q) { (void)q; }
 
 /* input_push offers every key to the tty first, so ctrl+c aimed at a

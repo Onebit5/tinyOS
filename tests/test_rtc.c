@@ -3,6 +3,18 @@
  * is a thing that reads correctly at 3pm on a tuesday and then gets
  * midnight wrong. */
 #include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+
+/* the lock complains through these when something is wrong with it */
+void panic(const char *fmt, ...) {
+    printf("PANIC: ");
+    va_list ap; va_start(ap, fmt); vprintf(fmt, ap); va_end(ap);
+    printf("\n");
+    exit(1);
+}
+void kprintf(const char *fmt, ...) { (void)fmt; }
+
 #include <stdint.h>
 
 #include "drivers/rtc.h"

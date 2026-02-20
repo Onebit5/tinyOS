@@ -1,6 +1,7 @@
 #include "drivers/rtc.h"
 #include "cpu/io.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include <stdbool.h>
 
 #define CMOS_ADDR 0x70
@@ -52,6 +53,10 @@ void rtc_decode(struct rtc_time *t, uint8_t status_b) {
 
 #ifndef TINYOS_HOSTED
 
+/* the clock is read through an index port and a data port, and two
+ * readers interleaving get a time neither of them asked for */
+static struct spinlock rtc_lock = SPINLOCK("rtc", LOCK_RANK_DEVICE);
+
 static uint8_t cmos_read(uint8_t reg) {
     /* the top bit of the address port also gates NMIs. keep it clear so
      * I dont silently leave them masked */
@@ -73,7 +78,7 @@ static void read_raw(struct rtc_time *t) {
 }
 
 void rtc_read(struct rtc_time *out) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&rtc_lock);
 
     struct rtc_time a, b;
 
@@ -92,7 +97,7 @@ void rtc_read(struct rtc_time *out) {
     rtc_decode(&a, cmos_read(RTC_STATUS_B));
 
     *out = a;
-    irq_restore(flags);
+    spin_unlock_irq(&rtc_lock, flags);
 }
 
 #endif /* TINYOS_HOSTED */

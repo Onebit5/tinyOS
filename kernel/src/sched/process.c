@@ -1,11 +1,17 @@
 #include "sched/process.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include "lib/string.h"
 
 /* a fixed table rather than a linked list of allocations. thirty-two is
  * more programs than this machine will ever usefully run at once, and a
  * fixed table has no lifetime questions at all -- which matters a great
  * deal for the one structure whose job is to outlive things */
+/* the process table and every descriptor in it. ranked above the
+ * scheduler because the scheduler reaches in here when a thread
+ * dies, and nothing here ever calls back out */
+static struct spinlock process_lock = SPINLOCK("process", LOCK_RANK_PROCESS);
+
 static struct process table[MAX_PROCESSES];
 static int next_pid = 1;
 
@@ -23,7 +29,7 @@ static struct process *slot_for(int pid) {
 
 int process_create(const char *name, int parent, int uid, bool announce,
                    uint64_t now_ms) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     int pid = 0;
 
     for (size_t i = 0; i < MAX_PROCESSES; i++) {
@@ -57,21 +63,21 @@ int process_create(const char *name, int parent, int uid, bool announce,
         break;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return pid;
 }
 
 void process_set_thread(int pid, int thread_id) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     struct process *p = slot_for(pid);
     if (p != NULL) {
         p->thread_id = thread_id;
     }
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
 }
 
 void process_exited(int pid, int code, uint64_t now_ms) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     struct process *p = slot_for(pid);
     /* the first answer is the true one: a process killed while it was
      * already on its way out should not have its code overwritten */
@@ -87,11 +93,11 @@ void process_exited(int pid, int code, uint64_t now_ms) {
             p->fds[f].open = false;
         }
     }
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
 }
 
 bool process_collect(int pid, int *code) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     bool collected = false;
 
     struct process *p = slot_for(pid);
@@ -103,7 +109,7 @@ bool process_collect(int pid, int *code) {
         collected = true;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return collected;
 }
 
@@ -148,12 +154,12 @@ size_t process_count(void) {
 /* ---- interrupts ----------------------------------------------------- */
 
 void process_interrupt(int pid) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     struct process *p = slot_for(pid);
     if (p != NULL) {
         p->interrupted = true;
     }
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
 }
 
 bool process_interrupt_pending(int pid) {
@@ -162,21 +168,21 @@ bool process_interrupt_pending(int pid) {
 }
 
 bool process_take_interrupt(int pid) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     bool had = false;
     struct process *p = slot_for(pid);
     if (p != NULL && p->interrupted) {
         p->interrupted = false;
         had = true;
     }
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return had;
 }
 
 /* ---- open files ---------------------------------------------------- */
 
 int process_fd_open(int pid, const void *data, uint64_t size) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     int fd = -1;
 
     struct process *p = slot_for(pid);
@@ -196,13 +202,13 @@ int process_fd_open(int pid, const void *data, uint64_t size) {
         }
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return fd;
 }
 
 int process_fd_open_disk(int pid, uint32_t cluster, uint64_t size,
                          uint64_t entry_sector, uint32_t entry_offset) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     int fd = -1;
 
     struct process *p = slot_for(pid);
@@ -224,12 +230,12 @@ int process_fd_open_disk(int pid, uint32_t cluster, uint64_t size,
         }
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return fd;
 }
 
 bool process_fd_disk(int pid, int fd, struct fd_disk *out) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     bool ok = false;
 
     struct process *p = slot_for(pid);
@@ -245,12 +251,12 @@ bool process_fd_disk(int pid, int fd, struct fd_disk *out) {
         ok = true;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return ok;
 }
 
 void process_fd_grew(int pid, int fd, uint32_t cluster, uint64_t size) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
 
     struct process *p = slot_for(pid);
     if (p != NULL && fd >= FD_FIRST_FILE && fd < MAX_FDS
@@ -259,11 +265,11 @@ void process_fd_grew(int pid, int fd, uint32_t cluster, uint64_t size) {
         p->fds[fd].size = size;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
 }
 
 bool process_fd_peek(int pid, int fd, const void **data, uint64_t *remaining) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     bool ok = false;
 
     struct process *p = slot_for(pid);
@@ -279,12 +285,12 @@ bool process_fd_peek(int pid, int fd, const void **data, uint64_t *remaining) {
         ok = true;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return ok;
 }
 
 void process_fd_advance(int pid, int fd, uint64_t n) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
 
     struct process *p = slot_for(pid);
     if (p != NULL && fd >= FD_FIRST_FILE && fd < MAX_FDS && p->fds[fd].open) {
@@ -292,11 +298,11 @@ void process_fd_advance(int pid, int fd, uint64_t n) {
         f->pos = (f->pos + n > f->size) ? f->size : f->pos + n;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
 }
 
 bool process_fd_close(int pid, int fd) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&process_lock);
     bool closed = false;
 
     struct process *p = slot_for(pid);
@@ -305,7 +311,7 @@ bool process_fd_close(int pid, int fd) {
         closed = true;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&process_lock, flags);
     return closed;
 }
 

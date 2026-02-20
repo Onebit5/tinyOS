@@ -3,9 +3,13 @@
 #include "mm/buddy.h"
 #include "lib/kprintf.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include <stdbool.h>
 #include "lib/panic.h"
 #include "lib/string.h"
+
+/* the buddy free lists, which every allocation walks and rewrites */
+static struct spinlock pmm_lock = SPINLOCK("pmm", LOCK_RANK_PMM);
 
 static uint64_t hhdm_offset;
 static uint64_t managed_frames;  /* how many frames the allocator covers */
@@ -206,11 +210,11 @@ uint64_t pmm_alloc_pages(size_t count) {
 
     /* threads can be preempted mid-list and the allocator would hand
      * the same block to two of them */
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&pmm_lock);
 
     uint64_t frame = buddy_alloc(order);
     if (frame == BUDDY_NO_BLOCK) {
-        irq_restore(flags);
+        spin_unlock_irq(&pmm_lock, flags);
         return 0;       /* the well is dry */
     }
 
@@ -219,7 +223,7 @@ uint64_t pmm_alloc_pages(size_t count) {
         peak_used = used;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&pmm_lock, flags);
     return frame * PAGE_SIZE;
 }
 
@@ -234,12 +238,12 @@ void pmm_free_pages(uint64_t phys, size_t count) {
     uint64_t frame = phys / PAGE_SIZE;
     unsigned order = buddy_order_for(count);
 
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&pmm_lock);
     if (frame >= managed_frames || buddy_is_free_block(frame, order)) {
         panic("pmm: freeing frame %016lx which was never thine to free", phys);
     }
     buddy_free(frame, order);
-    irq_restore(flags);
+    spin_unlock_irq(&pmm_lock, flags);
 }
 
 uint64_t pmm_alloc(void)         { return pmm_alloc_pages(1); }
@@ -250,7 +254,7 @@ void *pmm_phys_to_virt(uint64_t phys) {
 }
 
 uint64_t pmm_reclaim_bootloader(void) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&pmm_lock);
     uint64_t gained = 0;
 
     for (size_t i = 0; i < reclaim_count; i++) {
@@ -265,7 +269,7 @@ uint64_t pmm_reclaim_bootloader(void) {
     /* forget the ranges, so a second call cant double free them */
     reclaim_count = 0;
 
-    irq_restore(flags);
+    spin_unlock_irq(&pmm_lock, flags);
     return gained;
 }
 

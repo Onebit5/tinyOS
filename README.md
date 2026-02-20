@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.0** (**more than one cpu.** the other cores wake, climb into long mode, say which processor they are, and halt -- because giving them work before the locks exist would not be slow, it would be wrong)
+**version: 0.2.1** (**locks worth the name.** thirty-nine places that used `cli` as mutual exclusion, audited one at a time -- correct on one core, and quietly reclassified as wrong by the version before this one)
 
 ## what it does
 
@@ -37,6 +37,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] one namespace over both, and a machine that boots with neither missing
 - [x] philemon: my own bootloader, and now the only one on the disk
 - [x] the other processors, woken and accounted for
+- [x] real locks, in ranked order, and a test that can see a race
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -202,6 +203,80 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### locks worth the name
+
+this kernel spent twelve versions using `cli` as mutual exclusion. that
+worked, and for a real reason: with one core, the only thing that could
+interrupt a critical section was an interrupt, and turning them off
+stopped it. it was not a shortcut. it was the correct answer to the
+question being asked.
+
+the question changed in 0.2.0. turning interrupts off on *this* core
+says nothing whatsoever about a thread running on *that* one. thirty-nine
+places across twelve files went from correct to wrong without a single
+one of them being edited.
+
+so 0.2.1 is an audit rather than a feature. every one of those sites is
+now a real lock -- and the primitive was deliberately shaped like the
+thing it replaces:
+
+```c
+uint64_t flags = spin_lock_irq(&pmm_lock);
+...
+spin_unlock_irq(&pmm_lock, flags);
+```
+
+that is the same shape `irq_save`/`irq_restore` had, which is the point:
+an audit of thirty-nine call sites is worth doing where every change
+looks identical and any that does not stands out. it does both halves at
+once, because a critical section that needs protecting from another core
+almost always also needs protecting from this core's own interrupt
+handlers, and needs both or neither.
+
+**the order they are taken in is checked, not hoped for.** two locks
+taken in opposite orders by two cores is a machine that stops -- no
+fault, nothing printed, nothing to debug. so every lock declares a rank,
+and the ranks are not invented: they are read off the call graph. the
+tty calls the scheduler, the scheduler reaches into the process table,
+all of them allocate, and anything may print. nothing goes back the
+other way. a lock may only be taken while holding lower-ranked ones.
+
+for now that check *complains* rather than panics, and the difference is
+the whole reason for doing this a version early: with one core running
+kernel code, a wrong order cannot actually deadlock anything, so a rank
+I got wrong should cost a line of text rather than a working machine. it
+becomes fatal in 0.2.2, when it can bite.
+
+**and there is finally a test that can see a race.** every other suite
+runs one thread through code that used to assume one core, and passes
+whether or not that code is safe -- because with one thread it *is*
+safe. `test_locks` runs eight real threads through the real allocators
+at once. on the host the interrupt half of the lock is a no-op and the
+lock half is entirely real, so what gets exercised is precisely the half
+0.2.0 made necessary.
+
+it carries its own control: the same counter is incremented with the
+lock and without it, and the test asserts the unguarded one **comes out
+wrong**. if it did not, the threads never really overlapped and nothing
+else in the file proved anything. that check runs several rounds and
+needs to lose an update only once -- a race is not obliged to happen on
+any particular try, and a flaky test in the one file whose job is
+catching races would be worse than not having it.
+
+and it earned itself on the first boot. the lock caught four things the
+audit had walked straight past, all the same shape: **a lock is a
+property of the machine and must never be held across a context switch,
+where `cli` was a property of the thread and rode through one
+harmlessly.** a new thread was starting with the scheduler's lock held
+and its release sitting on a stack it would never return to; the
+blocking reader held the keyboard's lock while asleep, so the interrupt
+that would have woken it spun on that same lock; the timer tick walked
+the run queue with nothing held at all; and waking a thread took the
+scheduler's lock twice over. every one of them was correct on one core
+and none of them survived having a second.
+
+`locks` shows what guards what, and how often anything has had to wait.
 
 ### waking the other cores
 
@@ -619,6 +694,7 @@ $ make test
   fat32      ok        a real image: long names, subdirectories, writes
   vfs        ok        resolution, shadowing, and all of it with no disk
   philemon   ok        the loader's elf parsing and its memory map
+  locks      ok        eight threads through the allocators, and a control
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -714,6 +790,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.1** — locks, at last. thirty-nine `irq_save` pairs across twelve files were correct mutual exclusion for one core and were quietly reclassified as wrong by 0.2.0; every one is now a real lock. the primitive is deliberately the same shape as what it replaces, so the audit reads as one change repeated thirty-nine times and anything that is not stands out. lock order is checked against a rank read off the call graph rather than assumed -- and it warns rather than panics, because with one core a wrong rank cannot deadlock and should not cost a working machine. `test_locks` is the first suite in this project that can see a race: eight threads through the real allocators, with a deliberately unguarded counter as a control, asserted to come out *wrong* so that the guarded one means something. `locks` shows the ranks and the contention. a lock declared where it is defined never called `spin_init`, so none of the twelve were on the list the shell shows -- they register themselves on first use now. and the recursion check paid for the whole version on its first boot, catching four bugs of one shape: a lock is a property of the machine and must never be held across a context switch, where `cli` was a property of the thread and rode through one harmlessly. a new thread began holding the scheduler's lock with its release on a stack it would never return to; the blocking reader slept holding the keyboard's lock, so the interrupt meant to wake it spun on that lock forever; the timer tick walked the run queue holding nothing; and waking a thread took the scheduler's lock twice. all four were correct on one core.
 - **0.2.0** — the other processors wake up. a core that has never run holds itself in reset until another core's local apic tells it otherwise, and when it starts it starts in real mode at a page below a megabyte, so there is a trampoline sitting there to walk it back into long mode -- on page tables that are a copy of the kernel's with low memory identity-mapped, because the kernel maps none of where that code lives. each woken core reports its own apic id, which is the one thing it cannot fake, and then halts. `cpus` lists them. they are given nothing to do on purpose: there are 39 `irq_save` pairs in this kernel that call turning interrupts off mutual exclusion, and every one is false on a second core -- so 0.2.1 is an audit before 0.2.2 is a scheduler. also fixed: `all: $(BOOTIMG)` was written above the line defining `BOOTIMG`, so a bare `make` had been quietly building nothing at all.
 - **0.1.12** — philemon, my own bootloader, and now the only one. limine is gone, along with the iso, the uefi path and the protocol that came with it: writing a bootloader and then booting with somebody else's is not much of a bootloader. one file, whose first 512 bytes are the only part the bios will read and which do nothing but pull in the rest of the same file; a20 and unreal mode so the kernel can be read in above a megabyte; page tables and long mode; and a 64-bit half in C that parses the elf and builds the memory map. the kernel is handed one struct in rdi and knows nothing about anybody's boot protocol including mine -- `limine.h` is deleted and there is not one request structure left in it. the C half is host-tested, and writing those tests found two real bugs: a carve loop walking unsorted regions that handed the ramdisk's memory away as free, and boot-table offsets read as though the struct had 16-byte fields. a third was found by reading: the video mode code loaded `fs` in real mode, which quietly undid unreal mode and left the page tables being written somewhere else entirely.
 - **0.1.11** — one namespace instead of two filesystems side by side. the disk is the root; the ramdisk moved to `/boot`. a bare name is looked for on the disk first and the ramdisk second, so a disk may supply its own copy of anything while a machine without one falls through to what it booted with. `mount` shows the table, and `cat welcome.txt` versus `cat /boot/welcome.txt` demonstrates the order in one line. the syscall layer lost its prefix tests and its two branches -- `open`, `read`, `write` and `readdir` all go through one resolver now, and programs and `passwd` come through it too, which is what lets either of them live on either filesystem. the ramdisk stays on purpose: it is a module handed over before any driver exists, so a kernel that needed a sata controller to find its own programs would be one a missing cable bricks. the vfs suite runs every check twice, once with the disk switched off, to keep that true.

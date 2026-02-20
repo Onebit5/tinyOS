@@ -1,5 +1,6 @@
 #include "drivers/input.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include "sched/sched.h"
 #include "drivers/tty.h"
 
@@ -7,6 +8,10 @@
  * theres one core, so interrupts-off is all the mutual exclusion this
  * needs. 16 bits wide because arrow keys dont fit in a char */
 #define INPUT_BUF_SIZE 256
+
+/* the ring the keyboard and the serial port both push into, from
+ * interrupt handlers, on whichever core takes the interrupt */
+static struct spinlock input_lock = SPINLOCK("input", LOCK_RANK_DEVICE);
 
 static uint16_t buf[INPUT_BUF_SIZE];
 static volatile unsigned int head, tail;
@@ -41,16 +46,16 @@ static int buf_pop(void) {
 }
 
 int input_getchar(void) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&input_lock);
     int c = buf_pop();
-    irq_restore(flags);
+    spin_unlock_irq(&input_lock, flags);
     return c;
 }
 
 int input_peek(void) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&input_lock);
     int c = (tail == head) ? -1 : buf[tail];
-    irq_restore(flags);
+    spin_unlock_irq(&input_lock, flags);
     return c;
 }
 
@@ -59,16 +64,24 @@ bool input_haskey(void) {
 }
 
 int input_getchar_blocking(void) {
-    uint64_t flags = irq_save();
+    for (;;) {
+        uint64_t flags = spin_lock_irq(&input_lock);
+        int c = buf_pop();
+        if (c >= 0) {
+            spin_unlock_irq(&input_lock, flags);
+            return c;
+        }
 
-    int c;
-    while ((c = buf_pop()) < 0) {
-        /* nothing there. sleep with interrupts still off so an irq
-         * cant slip a key past me in the gap between looking and
-         * sleeping -- waitq_block hands them back on the way out */
-        waitq_block(&waiters);
+        /* nothing there. go on the queue while I still hold the lock, so
+         * a key arriving the instant I let go finds me on it -- that is
+         * what closes the gap between looking and sleeping */
+        waitq_enqueue(&waiters);
+        spin_unlock_irq(&input_lock, flags);
+
+        /* and only now stop running. this lock must not be held across
+         * the sleep: interrupts-off rides through a context switch with
+         * the thread, but a lock does not, and the keyboard interrupt
+         * that would wake me needs this very one */
+        waitq_sleep();
     }
-
-    irq_restore(flags);
-    return c;
 }

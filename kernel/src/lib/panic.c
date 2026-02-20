@@ -1,4 +1,5 @@
 #include "lib/panic.h"
+#include "sched/spinlock.h"
 #include "lib/kprintf.h"
 #include "lib/backtrace.h"
 #include "drivers/console.h"
@@ -8,6 +9,12 @@
 #include <stdint.h>
 
 void panic(const char *fmt, ...) {
+    /* whatever this core was holding, it is not going to give back. a
+     * panic that stopped to take the print lock -- and found it already
+     * held by itself -- would panic about that instead, and say nothing
+     * about what actually went wrong */
+    spin_abandon_all();
+
     asm volatile ("cli");
 
     console_set_colors(0xe64553, 0x101018);

@@ -2,6 +2,7 @@
 #include "mm/pmm.h"
 #include "lib/panic.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include <stdbool.h>
 
 #define SLAB_MAGIC 0x51ab7a11ed900dull
@@ -17,6 +18,12 @@ struct slab {
 };
 
 #define SLAB_HEADER ((sizeof(struct slab) + 15) & ~15ull)
+
+/* every cache, and the lists threaded through their pages. ranked
+ * below the pmm because a slab that runs out asks it for a page --
+ * and the pmm never asks a slab for anything, which is what makes
+ * that one-way and safe */
+static struct spinlock slab_lock = SPINLOCK("slab", LOCK_RANK_HEAP);
 
 static struct slab_cache *all_caches;
 
@@ -108,13 +115,13 @@ static struct slab *new_slab(struct slab_cache *cache) {
 /* ---- the two calls that matter ------------------------------------- */
 
 void *slab_alloc(struct slab_cache *cache) {
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&slab_lock);
 
     struct slab *s = cache->partial;
     if (s == NULL) {
         s = new_slab(cache);
         if (s == NULL) {
-            irq_restore(flags);
+            spin_unlock_irq(&slab_lock, flags);
             return NULL;
         }
     }
@@ -135,7 +142,7 @@ void *slab_alloc(struct slab_cache *cache) {
         cache->high_water = cache->in_use;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&slab_lock, flags);
     return object;
 }
 
@@ -150,7 +157,7 @@ void slab_free(void *object) {
     }
 
     struct slab_cache *cache = s->cache;
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&slab_lock);
 
     if (s->in_use == 0) {
         panic("slab_free: %p returned to %s twice over", object, cache->name);
@@ -176,12 +183,12 @@ void slab_free(void *object) {
         s->magic = 0;
         cache->pages--;
         uint64_t phys = (uint64_t)s - pmm_hhdm_offset();
-        irq_restore(flags);
+        spin_unlock_irq(&slab_lock, flags);
         pmm_free(phys);
         return;
     }
 
-    irq_restore(flags);
+    spin_unlock_irq(&slab_lock, flags);
 }
 
 int slab_owns(const void *object) {

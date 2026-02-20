@@ -1,6 +1,17 @@
 /* host-side test for the kernel's kprintf formatter.
  * stubs out serial/console, captures output, compares against libc printf */
 #include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+
+/* the lock complains through these when something is wrong with it */
+void panic(const char *fmt, ...) {
+    printf("PANIC: ");
+    va_list ap; va_start(ap, fmt); vprintf(fmt, ap); va_end(ap);
+    printf("\n");
+    exit(1);
+}
+
 #include <string.h>
 #include <stdbool.h>
 #include <stdint.h>

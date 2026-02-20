@@ -8,6 +8,17 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdarg.h>
+#include <stdlib.h>
+
+/* what the lock complains through */
+void panic(const char *fmt, ...) {
+    printf("PANIC: ");
+    va_list ap; va_start(ap, fmt); vprintf(fmt, ap); va_end(ap);
+    printf("\n");
+    exit(1);
+}
+
 #include <stdbool.h>
 #include <stdlib.h>
 

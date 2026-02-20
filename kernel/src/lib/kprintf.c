@@ -2,6 +2,7 @@
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "cpu/interrupts.h"
+#include "sched/spinlock.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -11,6 +12,11 @@
  * throw anything away. 32k is a few hundred lines, which covers boot
  * and then some */
 #define KLOG_SIZE (32 * 1024)
+/* so two cores do not interleave halfway through a word. ranked last
+ * on purpose: anything at all may print, and printing calls nothing
+ * that could want a lock back */
+static struct spinlock print_lock = SPINLOCK("print", LOCK_RANK_PRINT);
+
 static char klog[KLOG_SIZE];
 static size_t klog_head;
 static bool klog_wrapped;
@@ -194,12 +200,12 @@ void kprintf(const char *fmt, ...) {
      * once produce a lovely mess of interleaved half-words on screen.
      * yes this means a slow framebuffer scroll can cost me a timer
      * tick -- uptime drifts a hair, the alternative is unreadable */
-    uint64_t flags = irq_save();
+    uint64_t flags = spin_lock_irq(&print_lock);
 
     va_list ap;
     va_start(ap, fmt);
     kvprintf(fmt, ap);
     va_end(ap);
 
-    irq_restore(flags);
+    spin_unlock_irq(&print_lock, flags);
 }

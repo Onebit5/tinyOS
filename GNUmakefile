@@ -16,7 +16,7 @@ BOOTIMG := tinyos.img
 # words on the command line, because `make run -smp 4` hands -s -m -p to
 # *make* -- and -p means "print the entire database", which is a
 # surprising amount of ukrainian
-CPUS ?= 1
+CPUS ?= 4
 MEM  ?= 2G
 QEMU_EXTRA ?=
 
@@ -169,8 +169,8 @@ bootimg: $(BOOTIMG)
 #
 # the kernel does not care which is which: it tries every drive until one
 # has a filesystem it recognises, and the boot image has none
-#   make run            one cpu
-#   make run CPUS=4     four
+#   make run            four cpus, 2G
+#   make run CPUS=1     one, which must always still work
 #   make run MEM=512M QEMU_EXTRA="-d int"
 run: $(BOOTIMG) $(DISK)
 	qemu-system-x86_64 -M q35 -m $(MEM) -smp $(CPUS) -serial stdio \
@@ -216,25 +216,31 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/syscall bin/tests/tty bin/tests/auth bin/tests/acpi bin/tests/pci \
              bin/tests/keyboard bin/tests/serial \
              bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
+             bin/tests/locks \
              bin/tests/shell bin/tests/switch
 
-bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
-bin/tests/mm:       tests/test_mm.c       kernel/src/mm/pmm.c \
+bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
+                    kernel/src/sched/spinlock.c
+bin/tests/mm:       tests/test_mm.c       kernel/src/sched/spinlock.c \
+                    kernel/src/mm/pmm.c \
                     kernel/src/mm/buddy.c kernel/src/mm/slab.c \
                     kernel/src/mm/kmalloc.c kernel/src/lib/string.c
 bin/tests/buddy:    tests/test_buddy.c    kernel/src/mm/buddy.c \
                     kernel/src/lib/string.c
-bin/tests/slab:     tests/test_slab.c     kernel/src/mm/slab.c \
+bin/tests/slab:     tests/test_slab.c     kernel/src/sched/spinlock.c \
+                    kernel/src/mm/slab.c \
                     kernel/src/mm/pmm.c kernel/src/mm/buddy.c \
                     kernel/src/mm/kmalloc.c kernel/src/lib/string.c
 bin/tests/addrspace: tests/test_addrspace.c kernel/src/mm/addrspace.c \
                     kernel/src/mm/vmm.c kernel/src/mm/slab.c \
-                    kernel/src/lib/string.c
+                    kernel/src/sched/spinlock.c kernel/src/lib/string.c
 bin/tests/vmm:      tests/test_vmm.c      kernel/src/mm/vmm.c \
                     kernel/src/lib/string.c
 bin/tests/ksyms:    tests/test_ksyms.c    kernel/src/lib/ksyms.c
-bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c
-bin/tests/process:  tests/test_process.c  kernel/src/sched/process.c \
+bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c \
+                    kernel/src/sched/spinlock.c
+bin/tests/process:  tests/test_process.c  kernel/src/sched/spinlock.c \
+                    kernel/src/sched/process.c \
                     kernel/src/lib/string.c
 bin/tests/pci:      tests/test_pci.c      kernel/src/drivers/pci.c \
                     kernel/src/lib/string.c
@@ -242,9 +248,11 @@ bin/tests/acpi:     tests/test_acpi.c     kernel/src/cpu/acpi.c \
                     kernel/src/lib/string.c
 bin/tests/auth:     tests/test_auth.c     kernel/src/sched/auth.c \
                     kernel/src/lib/string.c
-bin/tests/tty:      tests/test_tty.c      kernel/src/drivers/tty.c \
+bin/tests/tty:      tests/test_tty.c      kernel/src/sched/spinlock.c \
+                    kernel/src/drivers/tty.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c
-bin/tests/syscall:  tests/test_syscall.c  kernel/src/cpu/syscall.c \
+bin/tests/syscall:  tests/test_syscall.c  kernel/src/sched/spinlock.c \
+                    kernel/src/cpu/syscall.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c \
                     kernel/src/fs/vfs.c
 bin/tests/elf:      tests/test_elf.c      kernel/src/fs/elf.c \
@@ -253,22 +261,34 @@ bin/tests/ramdisk:  tests/test_ramdisk.c  kernel/src/fs/ramdisk.c \
                     kernel/src/lib/string.c
 bin/tests/fat32:    tests/test_fat32.c    kernel/src/fs/fat32.c \
                     kernel/src/lib/string.c
+# the one suite that can see a race: real threads through the real
+# allocators, so it needs the real thread library
+bin/tests/locks:    tests/test_locks.c    kernel/src/sched/spinlock.c \
+                    kernel/src/mm/pmm.c kernel/src/mm/buddy.c \
+                    kernel/src/mm/slab.c kernel/src/mm/kmalloc.c \
+                    kernel/src/lib/string.c
+bin/tests/locks:    LDLIBS = -pthread
+
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c
 bin/tests/philemon:  tests/test_philemon.c boot/philemon.c boot/philemon.h
 bin/tests/gdt:      tests/test_gdt.c      kernel/src/cpu/gdt.c
 bin/tests/gdt:      SRCS = tests/test_gdt.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
-                    kernel/src/drivers/input.c
+                    kernel/src/drivers/input.c \
+                    kernel/src/sched/spinlock.c
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
-                    kernel/src/drivers/input.c
+                    kernel/src/drivers/input.c \
+                    kernel/src/sched/spinlock.c
 bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c \
                     kernel/src/fs/ramdisk.c kernel/src/sched/auth.c \
                     kernel/src/drivers/pci.c kernel/src/fs/vfs.c \
+                    kernel/src/sched/spinlock.c \
                     kernel/src/shell/shell.c kernel/src/version.h
 bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c \
                            kernel/src/fs/ramdisk.c kernel/src/sched/auth.c \
-                           kernel/src/drivers/pci.c kernel/src/fs/vfs.c
+                           kernel/src/drivers/pci.c kernel/src/fs/vfs.c \
+                           kernel/src/sched/spinlock.c
 
 # SRCS overrides what gets compiled, for tests that #include a kernel
 # .c file directly -- that file still belongs in the prerequisites so
@@ -276,7 +296,7 @@ bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c \
 # duplicate symbols
 $(filter-out bin/tests/switch,$(TEST_BINS)):
 	@mkdir -p $(@D)
-	$(HOSTCC) $(HOSTFLAGS) $(if $(SRCS),$(SRCS),$^) -o $@
+	$(HOSTCC) $(HOSTFLAGS) $(if $(SRCS),$(SRCS),$^) -o $@ $(LDLIBS)
 
 # the switch test calls into the real switch.asm, and needs -no-pie so
 # the `callq switch_context` in its inline asm resolves
