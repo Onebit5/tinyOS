@@ -121,13 +121,19 @@ complains rather than panics for now: with one core running kernel code
 a wrong order cannot deadlock anything, so it should cost a line of text
 and not a working machine. it becomes fatal in 0.2.2.
 
-**0.2.2 a scheduler on every core.** a run queue per cpu instead of one
+**0.2.2 a scheduler on every core.** ~~a run queue per cpu instead of one
 behind a lock, work moved between them when they drift apart, and tlb
 shootdown -- when one core unmaps a page the others still have it
 cached, and nothing in the hardware tells them. that takes an
 inter-processor interrupt and a handshake, and it is where real kernels
 have real bugs. `ps` gains a column for which core, and `top` a row per
-core.
+core.~~ **done in 0.2.2**, with one deliberate difference: **one shared
+run queue that every core picks from**, rather than a queue each with
+migration between them. at four cores the lock is not the bottleneck,
+and an idle core taking whatever is ready is load balancing already --
+without the machinery that per-core queues then need in order to undo
+what they took apart. worth revisiting when there is evidence the lock
+is the thing in the way.
 
 **0.2.3 somewhere to stand.** the shell has no idea where it is. `cd`,
 `pwd`, a working directory per process, and paths resolved relative to

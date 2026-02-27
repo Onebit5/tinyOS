@@ -3,6 +3,7 @@
 #include "mm/vmm.h"
 #include "mm/kmalloc.h"
 #include "mm/slab.h"
+#include "cpu/smp.h"
 #include "lib/string.h"
 
 /* the lower half is per-process, the upper half is everyone's. the
@@ -85,6 +86,11 @@ void addrspace_destroy(struct addrspace *as) {
     if (live_pml4 == as->pml4) {
         addrspace_switch(NULL);
     }
+
+    /* every core that ever ran a thread in this space may still be
+     * holding translations out of tables I am about to hand back to the
+     * allocator */
+    smp_tlb_shootdown();
 
     free_level(as->pml4, 4);
     slab_free(as);

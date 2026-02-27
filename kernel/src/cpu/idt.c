@@ -26,6 +26,15 @@ static struct idt_entry idt[256];
 /* built by isr.asm */
 extern void *isr_stub_table[256];
 
+/* the idtr, and loading it on whichever core is asking */
+void idt_load_here(void) {
+    struct __attribute__((packed)) { uint16_t limit; uint64_t base; } idtr = {
+        .limit = sizeof(idt) - 1,
+        .base  = (uint64_t)idt,
+    };
+    asm volatile ("lidt %0" :: "m"(idtr));
+}
+
 void idt_init(void) {
     for (int i = 0; i < 256; i++) {
         uint64_t off = (uint64_t)isr_stub_table[i];

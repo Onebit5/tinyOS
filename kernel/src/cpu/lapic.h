@@ -48,6 +48,10 @@ void lapic_enable_here(void);
 bool lapic_send_init(uint32_t apic_id);
 bool lapic_send_startup(uint32_t apic_id, uint8_t vector);
 
+/* an ordinary interrupt, from this core to another. how one processor
+ * says anything at all to another once they are both running */
+bool lapic_send_ipi(uint32_t apic_id, uint8_t vector);
+
 /* the timer, running at `hz`. it is driven by the bus clock, whose
  * speed nobody will tell me, so it has to be measured against something
  * that already keeps time -- which is what the pit is still good for */

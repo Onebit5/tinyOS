@@ -5,6 +5,7 @@
 #include "mm/addrspace.h"
 #include "mm/kmalloc.h"
 #include "mm/slab.h"
+#include "cpu/smp.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "cpu/interrupts.h"
@@ -64,7 +65,20 @@ static struct spinlock thread_lock = SPINLOCK("thread", LOCK_RANK_SCHED);
 
 static struct slab_cache thread_cache;
 
+static struct thread *create(const char *name, void (*entry)(void *),
+                             void *arg, bool parked);
+
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg) {
+    return create(name, entry, arg, false);
+}
+
+struct thread *thread_create_parked(const char *name, void (*entry)(void *),
+                                    void *arg) {
+    return create(name, entry, arg, true);
+}
+
+static struct thread *create(const char *name, void (*entry)(void *),
+                             void *arg, bool parked) {
     slab_cache_init(&thread_cache, "thread", sizeof(struct thread));
 
     struct thread *t = slab_alloc(&thread_cache);
@@ -87,7 +101,8 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     t->stack_phys  = phys;
     t->stack_pages = THREAD_STACK_PAGES + 1;
 
-    t->state       = THREAD_READY;
+    t->state       = parked ? THREAD_BLOCKED : THREAD_READY;
+    t->on_cpu      = -1;    /* ready is not the same as running */
     t->wake_at     = 0;
     t->cpu_ticks   = 0;
     t->entry       = entry;
@@ -109,6 +124,10 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     if (vmm_kernel_pml4() != 0) {
         vmm_unmap_page(vmm_kernel_pml4(), guard);
         vmm_flush_page(guard);
+
+        /* and every other core, which is still holding the translation
+         * I just took away and has no way of noticing */
+        smp_tlb_shootdown();
     }
 
     /* fabricate a stack that looks exactly like a thread which is
@@ -184,6 +203,7 @@ void thread_free_stack(struct thread *t) {
         vmm_map_range(vmm_kernel_pml4(), guard, t->stack_phys, PAGE_SIZE,
                       PTE_WRITE | vmm_nx());
         vmm_flush_page(guard);
+        smp_tlb_shootdown();
     }
 
     pmm_free_pages(t->stack_phys, t->stack_pages);

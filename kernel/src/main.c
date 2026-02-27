@@ -247,7 +247,7 @@ void kmain(const struct ph_handoff *handoff) {
      * into long mode, say which core they are, and halt -- giving them
      * work needs locks that do not exist yet. before the shell reclaims
      * the loader's memory, because the page they start on is in it */
-    smp_init(interrupts_acpi());
+    smp_init(interrupts_acpi(), interrupts_timer_rate());
 
     if (thread_create("shell", shell_thread, NULL) == NULL) {
         panic("no memory for a shell. there is nobody left to talk to");

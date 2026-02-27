@@ -14,12 +14,23 @@ global enter_usermode
 ;                rdi    rsi              rdx      rcx      r8    r9
 enter_usermode:
     ; the segment registers are not covered by iretq and would otherwise
-    ; still hold kernel selectors in ring 3
+    ; still hold kernel selectors in ring 3.
+    ;
+    ; gs is deliberately not among them. in 64-bit mode its base does not
+    ; come from the descriptor table at all -- it comes from an msr, and
+    ; loading any real selector into it overwrites that base with the
+    ; descriptor's, which is zero. this kernel keeps the per-core pointer
+    ; there, so one `mov gs, ax` on the way into ring 3 quietly unnames
+    ; the core, and the program's very first system call writes through a
+    ; base of zero and faults inside the kernel.
+    ;
+    ; leaving it alone costs nothing: nothing in ring 3 reads gs, and
+    ; iretq nulls the selector on its own when dropping privilege -- a
+    ; null selector being the one load that leaves the msr base intact
     mov ax, cx
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
 
     push rcx                ; ss
     push rsi                ; rsp

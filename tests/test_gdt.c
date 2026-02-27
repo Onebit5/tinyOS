@@ -17,7 +17,7 @@ static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 
 static void check_roundtrip(uint64_t base, uint32_t limit, const char *what) {
-    gdt_set_tss(base, limit);
+    gdt_set_tss(0, base, limit);
 
     uint64_t lo = gdt[GDT_TSS / 8];
     uint64_t hi = gdt[GDT_TSS / 8 + 1];
@@ -51,7 +51,7 @@ int main(void) {
     check_roundtrip(0xffffffffffffffffull, 0xfffff,  "every bit set");
 
     /* now the type bits, which decide whether ltr works at all */
-    gdt_set_tss(0xffffffff8000c160ull, 103);
+    gdt_set_tss(0, 0xffffffff8000c160ull, 103);
     uint64_t lo = gdt[GDT_TSS / 8];
     CHECK(((lo >> 40) & 0xf) == 9, "type is 9 (available 64-bit tss)");
     CHECK(((lo >> 44) & 1) == 0,   "S is 0, marking it a system segment");
@@ -75,6 +75,30 @@ int main(void) {
 
     /* the tss takes two slots and the table has to be big enough */
     CHECK(sizeof(gdt) / 8 >= GDT_TSS / 8 + 2, "the gdt has room for both halves");
+
+    /* one tss per core, and each core loads a different selector -- which
+     * is what lets a core name itself by asking the cpu which one it
+     * loaded. so the table has to have room for all of them, and the
+     * arithmetic in both directions has to agree */
+    CHECK(sizeof(gdt) / 8 >= (GDT_TSS_FOR(GDT_MAX_TSS - 1) / 8) + 2,
+          "and room for every core's, not just the first");
+    for (unsigned cpu = 0; cpu < GDT_MAX_TSS; cpu++) {
+        uint16_t sel = (uint16_t)GDT_TSS_FOR(cpu);
+        CHECK((unsigned)((sel - GDT_TSS) / GDT_TSS_STRIDE) == cpu,
+              "a selector maps back to the core that loaded it");
+    }
+
+    /* and each one lands in its own slot rather than on its neighbour */
+    for (unsigned cpu = 0; cpu < GDT_MAX_TSS; cpu++) {
+        gdt_set_tss(cpu, 0x1000 + cpu * 0x100, 103);
+    }
+    int distinct = 1;
+    for (unsigned cpu = 0; cpu < GDT_MAX_TSS; cpu++) {
+        uint64_t e = gdt[GDT_TSS_FOR(cpu) / 8];
+        uint64_t got = (e >> 16) & 0xffffff;
+        if (got != 0x1000 + cpu * 0x100) distinct = 0;
+    }
+    CHECK(distinct, "every core's descriptor holds its own base");
 
     if (!failures) printf("all good\n");
     return failures;

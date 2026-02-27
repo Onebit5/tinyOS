@@ -1,4 +1,5 @@
 #include "sched/sched.h"
+#include "cpu/smp.h"
 #include "sched/thread.h"
 #include "drivers/pit.h"
 #include "mm/pmm.h"
@@ -29,9 +30,32 @@ extern void switch_context(uint64_t *save_rsp, uint64_t *load_rsp);
  * holding anything */
 static struct spinlock sched_lock = SPINLOCK("sched", LOCK_RANK_SCHED);
 
-static struct thread *current;
-static struct thread *idle_thread;
-static int quantum_left;
+/* the ring is shared: one queue that every core picks from, rather than
+ * a queue each. with four cores the lock is not the bottleneck, and an
+ * idle core taking whatever is ready *is* load balancing -- without the
+ * migration machinery that per-core queues then need to put back what
+ * they took apart.
+ *
+ * what is per core is which thread it is running, which idle thread it
+ * falls back to, and how much of its slice is left. those cannot be
+ * shared by definition */
+struct percpu {
+    /* not called `current`: there is a macro of that name just below,
+     * so that the rest of this file reads as it always did, and a member
+     * sharing the name would be rewritten out from under itself */
+    struct thread *running;
+    struct thread *idle;
+    int quantum_left;
+    bool scheduling;        /* has this core entered the scheduler yet */
+};
+
+static struct percpu percpu[SMP_MAX_CPUS];
+
+/* the ring itself, and any thread in it. `ring` is just a way in */
+static struct thread *ring;
+
+#define ME (&percpu[smp_this_cpu()])
+#define current (ME->running)
 
 /* the thread that limine handed the cpu to. its stack came from the
  * bootloader rather than the pmm, which is why stack_phys stays 0 --
@@ -42,42 +66,76 @@ struct thread *sched_current(void) {
     return current;
 }
 
+static void reap_dead(void);
+
 static void idle_loop(void *arg) {
     (void)arg;
-    /* the lowest form of life in the system. exists so theres always
-     * someone to hand the cpu to when everybody else is asleep */
+    /* the lowest form of life in the system. exists so there is always
+     * someone to hand the cpu to when everybody else is asleep -- and,
+     * now, so that clearing up after the dead has somewhere to happen
+     * that is not inside the scheduler holding the run queue */
     for (;;) {
+        reap_dead();
         asm volatile ("hlt");
     }
 }
 
 void sched_add(struct thread *t) {
-    if (current == NULL) {
+    /* the ring, not `current`. this used to ask whether *this core* had
+     * a thread, which meant the same thing back when there was only one
+     * core -- but a core building its own idle thread has no current
+     * thread yet by definition, and that is precisely when it calls
+     * this. the question was always meant to be "does the ring exist" */
+    if (ring == NULL) {
         panic("sched_add before sched_init, the wheel hath no hub yet");
     }
+
     uint64_t flags = spin_lock_irq(&sched_lock);
-    t->next = current->next;
-    current->next = t;
+    t->next = ring->next;
+    ring->next = t;
     spin_unlock_irq(&sched_lock, flags);
 }
 
 /* free anything that has finished. I walk from current outward and
  * never touch current itself, so I am structurally incapable of
  * freeing the stack I am standing on */
+/* dead threads, unlinked under the lock and freed outside it.
+ *
+ * two reasons it cannot be done in one breath any more. a thread marked
+ * dead may still be *running* -- `kill` can mark one that is on another
+ * core this instant -- and freeing the stack out from under a processor
+ * that is standing on it is not a race, it is a crash. so nothing is
+ * touched until its core has let it go.
+ *
+ * and the freeing itself takes the allocators' locks and tells every
+ * other core to forget a mapping, which means waiting for an answer. a
+ * core waiting for that answer while holding the run queue would be
+ * waiting on cores that are waiting for the run queue */
 static void reap_dead(void) {
+    struct thread *dead[8];
+    int n = 0;
+
+    uint64_t flags = spin_lock_irq(&sched_lock);
+
     struct thread *prev = current;
     struct thread *t = current->next;
-
-    while (t != current) {
-        if (t->state == THREAD_DEAD) {
+    while (t != current && n < 8) {
+        if (t->state == THREAD_DEAD && t->on_cpu < 0) {
             prev->next = t->next;
-            thread_free_stack(t);
-            thread_free(t);     /* a no-op for the boot thread */
+            dead[n++] = t;
             t = prev->next;
         } else {
             prev = t;
             t = t->next;
         }
+    }
+    ring = current;     /* whatever I unlinked, this is still in the ring */
+
+    spin_unlock_irq(&sched_lock, flags);
+
+    for (int i = 0; i < n; i++) {
+        thread_free_stack(dead[i]);
+        thread_free(dead[i]);   /* a no-op for the boot thread */
     }
 }
 
@@ -92,22 +150,43 @@ static void wake_sleepers(void) {
     } while (t != current);
 }
 
-/* next in the ring who wants the cpu. idle is skipped on the walk and
- * only handed out when literally nobody else can use it */
-static struct thread *pick_next(void) {
-    struct thread *t = current->next;
+/* is this thread one of the idle threads -- anybody's, not just mine?
+ * an idle thread belongs to its own core and must never be picked up by
+ * another, or two cores end up sharing one idle stack */
+static bool is_idle(const struct thread *t) {
+    for (size_t i = 0; i < SMP_MAX_CPUS; i++) {
+        if (percpu[i].idle == t) {
+            return true;
+        }
+    }
+    return false;
+}
 
-    while (t != current) {
-        if (t != idle_thread && t->state == THREAD_READY) {
+/* next in the ring who wants a cpu. idle is skipped on the walk and only
+ * handed out when literally nobody else can use the core.
+ *
+ * the important word is READY. a thread another core is running is
+ * marked RUNNING, and picking it up here would put two cores on one
+ * stack -- which is not a race that corrupts something later, it is two
+ * processors executing the same function with the same rsp */
+static struct thread *pick_next(void) {
+    struct thread *start = current != NULL ? current : ring;
+    if (start == NULL) {
+        return ME->idle;
+    }
+
+    struct thread *t = start->next;
+    while (t != start) {
+        if (!is_idle(t) && t->state == THREAD_READY) {
             return t;
         }
         t = t->next;
     }
 
-    if (current->state == THREAD_RUNNING) {
+    if (current != NULL && current->state == THREAD_RUNNING) {
         return current;     /* still runnable and nobody is waiting */
     }
-    return idle_thread;
+    return ME->idle;
 }
 
 /* the actual switch. must be entered with interrupts off */
@@ -117,22 +196,25 @@ static struct thread *pick_next(void) {
  * this function at all, so it gives the lock back itself. see
  * sched_first_run */
 static void schedule(void) {
-    reap_dead();
-
     struct thread *prev = current;
     struct thread *next = pick_next();
 
-    quantum_left = QUANTUM_TICKS;
+    ME->quantum_left = QUANTUM_TICKS;
 
     if (next == prev) {
         prev->state = THREAD_RUNNING;
+        prev->on_cpu = (int)smp_this_cpu();
         return;
     }
 
-    if (prev->state == THREAD_RUNNING) {
+    if (prev != NULL && prev->state == THREAD_RUNNING) {
         prev->state = THREAD_READY;
     }
+    if (prev != NULL) {
+        prev->on_cpu = -1;
+    }
     next->state = THREAD_RUNNING;
+    next->on_cpu = (int)smp_this_cpu();
     current = next;
 
     /* whose memory is real from here on. the kernel half is identical
@@ -141,14 +223,15 @@ static void schedule(void) {
     addrspace_switch(next->space);
 
     /* both of these say "where does the kernel stand when this thread
-     * traps in from ring 3". the tss answers it for interrupts, the
-     * global for `syscall`, and they must follow the thread or two
-     * user threads would land on the same stack and eat each other */
+     * traps in from ring 3". the tss answers it for interrupts and the
+     * syscall stub's own word answers it for `syscall`. both are per
+     * core and both follow the thread -- two user threads landing on one
+     * stack would eat each other, and so would two cores */
     if (next->stack_phys != 0) {
         uint64_t ktop = (uint64_t)pmm_phys_to_virt(next->stack_phys)
                       + next->stack_pages * PAGE_SIZE;
         tss_set_rsp0(ktop);
-        syscall_kernel_rsp = ktop;
+        syscall_set_kernel_rsp(ktop);
     }
 
     switch_context(&prev->rsp, &next->rsp);
@@ -299,7 +382,7 @@ void sched_tick(void) {
 
     wake_sleepers();
 
-    if (--quantum_left <= 0) {
+    if (--ME->quantum_left <= 0) {
         schedule();
     }
 
@@ -312,6 +395,15 @@ static void dump_one(struct thread *t) {
         kprintf(" ");
     }
     kprintf("%-9s", thread_state_name(t->state));
+
+    /* which core, if any, is running it this instant. a thread that is
+     * merely ready is on nobody's cpu -- and with more than one core
+     * that is the interesting column */
+    if (t->on_cpu >= 0) {
+        kprintf("%-6d", t->on_cpu);
+    } else {
+        kprintf("%-6s", "-");
+    }
 
     /* what share of the ticks so far went to this one. the idle thread
      * usually holds most of them, which is the honest picture of a
@@ -337,7 +429,7 @@ void sched_dump(void) {
     uint64_t flags = spin_lock_irq(&sched_lock);
 
     kprintf("threads\n");
-    kprintf("  id  name             state    cpu  running\n");
+    kprintf("  id  name             state    core  cpu  running\n");
 
     /* the ring is in newest-first order, because sched_add splices each
      * new thread in just after current. that is fine for scheduling and
@@ -401,7 +493,7 @@ enum sched_kill_result sched_kill(int id) {
         if (t->id == id) {
             if (t == current) {
                 result = SCHED_KILL_SELF;
-            } else if (t == idle_thread) {
+            } else if (is_idle(t)) {
                 result = SCHED_KILL_PROTECTED;
             } else if (t->state == THREAD_DEAD) {
                 result = SCHED_KILL_NO_SUCH;    /* already gone */
@@ -443,11 +535,71 @@ void sched_init(void) {
     boot_thread.cpu_ticks = 0;
     boot_thread.from_heap = false;      /* it lives in .bss */
 
-    current = &boot_thread;
-    quantum_left = QUANTUM_TICKS;
+    boot_thread.on_cpu = 0;
 
-    idle_thread = thread_create("idle", idle_loop, NULL);
-    if (idle_thread == NULL) {
+    ring = &boot_thread;
+    current = &boot_thread;
+    ME->quantum_left = QUANTUM_TICKS;
+    ME->scheduling = true;
+
+    ME->idle = thread_create("idle0", idle_loop, NULL);
+    if (ME->idle == NULL) {
         panic("could not summon the idle thread. the wheel cannot turn");
     }
+}
+
+/* a core other than the first, joining in.
+ *
+ * it needs an idle thread of its own before it can enter the scheduler
+ * at all -- the fallback when nothing is ready has to be a thread this
+ * core alone is standing on, because two cores sharing an idle stack is
+ * two cores sharing a stack.
+ *
+ * this is called on the core that will run it, so `current` and `idle`
+ * below are that core's */
+bool sched_join(unsigned cpu, const char *idle_name) {
+    /* parked, so that between it going into the ring and this core
+     * claiming it, no other core can pick it up. an idle thread belongs
+     * to one core and two cores standing on one stack is the end of the
+     * machine */
+    struct thread *idle = thread_create_parked(idle_name, idle_loop, NULL);
+    if (idle == NULL) {
+        return false;
+    }
+
+    uint64_t flags = spin_lock_irq(&sched_lock);
+    percpu[cpu].idle = idle;
+    percpu[cpu].quantum_left = QUANTUM_TICKS;
+    percpu[cpu].scheduling = true;
+
+    /* claimed. it was parked so nobody else could take it; now it is
+     * this core's, and this core is standing on it */
+    idle->state = THREAD_RUNNING;
+    idle->on_cpu = (int)cpu;
+    percpu[cpu].running = idle;
+    spin_unlock_irq(&sched_lock, flags);
+    return true;
+}
+
+/* which core a thread is on, or -1. for `ps` */
+int sched_thread_cpu(const struct thread *t) {
+    return t->on_cpu;
+}
+
+const char *sched_cpu_running(unsigned cpu) {
+    if (cpu >= SMP_MAX_CPUS) {
+        return "?";
+    }
+    struct thread *t = percpu[cpu].running;
+    return (t != NULL) ? t->name : "nothing yet";
+}
+
+size_t sched_cores_scheduling(void) {
+    size_t n = 0;
+    for (size_t i = 0; i < SMP_MAX_CPUS; i++) {
+        if (percpu[i].scheduling) {
+            n++;
+        }
+    }
+    return n;
 }

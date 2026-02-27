@@ -4,8 +4,15 @@
 #include "mm/vmm.h"
 #include "drivers/pit.h"
 #include "cpu/msr.h"
+#include "cpu/tss.h"
 #include "lib/kprintf.h"
+#include "sched/spinlock.h"
 #include "lib/string.h"
+#include "cpu/gdt.h"
+#include "cpu/idt.h"
+#include "sched/sched.h"
+#include "cpu/syscall.h"
+#include "sched/thread.h"
 
 /* the trampoline, assembled separately and carried here as bytes. it has
  * to run at a fixed low address in real mode, which is nowhere the
@@ -48,13 +55,12 @@ const struct cpu *smp_cpu_at(size_t index) {
 }
 
 uint32_t smp_this_cpu(void) {
-    uint32_t id = lapic_id();
-    for (size_t i = 0; i < cpu_count; i++) {
-        if (cpus[i].apic_id == id) {
-            return cpus[i].index;
-        }
-    }
-    return 0;   /* before the table exists, everything is the first core */
+    /* out of the task register, which every core loaded differently.
+     * this is asked on every lock and every context switch, so it has to
+     * be cheap -- reading the local apic would be an uncached access to
+     * a device, thousands of times a second, to learn something the cpu
+     * already knows */
+    return tss_current_cpu();
 }
 
 /* ---- where a woken core lands ---- */
@@ -74,8 +80,27 @@ void smp_ap_entry(struct cpu *me) {
     __asm__ volatile ("movq %0, %%cr3" :: "r"(vmm_kernel_pml4()) : "memory");
     ap_say('H');
 
-    lapic_enable_here();
+    /* the real descriptor tables. until now this core has been running
+     * on the trampoline's gdt, which sits at a low address the kernel
+     * does not map -- so any interrupt at all would have been fatal.
+     * loading its own task segment is also how it learns its own name */
+    gdt_load_here();
+    if (!tss_init_cpu(me->index)) {
+        ap_say('!');
+        for (;;) {
+            __asm__ volatile ("cli; hlt");
+        }
+    }
+    idt_load_here();
+
+    /* star, lstar, sfmask and the gs bases are every one of them per
+     * core. a thread that got scheduled onto a core without them would
+     * execute `syscall` and jump to address zero -- in ring 0, on the
+     * user's stack, which is exactly as bad as it sounds */
+    syscall_init();
     ap_say('I');
+
+    lapic_enable_here();
 
     /* out of its own local apic, which is the one thing this core cannot
      * be wrong about. if this matches what the firmware said, the code
@@ -84,20 +109,98 @@ void smp_ap_entry(struct cpu *me) {
     me->online = true;
     ap_say('J');
 
-    /* and nothing else. this core has no run queue, no idle thread and
-     * no business touching anything the other one is holding -- that is
-     * 0.2.1 and 0.2.2, in that order.
-     *
-     * it also still has the trampoline's gdt, which lives at a low
-     * address the kernel's page tables do not map, and no idt at all.
-     * neither matters while it does nothing: a gdt is only consulted
-     * when a segment register is loaded, and interrupts are off. an nmi
-     * would still take the machine down, and giving each core its own
-     * descriptor tables is part of having somewhere to put them, which
-     * is 0.2.2 */
-    for (;;) {
-        __asm__ volatile ("cli; hlt");
+    /* an idle thread of its own, and then into the scheduler. from here
+     * this core is a peer: it takes whatever is ready out of the same
+     * ring the first one does */
+    char name[8] = { 'i', 'd', 'l', 'e', (char)('0' + (me->index % 10)), 0 };
+    if (!sched_join(me->index, name)) {
+        ap_say('?');
+        for (;;) {
+            __asm__ volatile ("cli; hlt");
+        }
     }
+    me->scheduling = true;
+    ap_say('K');
+
+    /* its own timer. the local apic is part of the processor, so every
+     * core has one and each has to be started where it runs */
+    lapic_timer_start(SMP_TICK_HZ, me->timer_ticks_per_second);
+
+    /* and let the world in. everything from here is ordinary: the timer
+     * arrives, the scheduler picks something, and this core starts doing
+     * the same work as any other */
+    __asm__ volatile ("sti");
+    for (;;) {
+        __asm__ volatile ("hlt");
+    }
+}
+
+/* ---- telling the other cores to forget what they remember ---- */
+
+static volatile uint32_t shootdown_wanted;
+static volatile uint32_t shootdown_done;
+static struct spinlock shootdown_lock = SPINLOCK("tlb", LOCK_RANK_DEVICE);
+
+void smp_tlb_ipi(void) {
+    /* reloading cr3 throws away every cached translation that is not
+     * marked global. a targeted invlpg would be cheaper and needs the
+     * address carried across, which is worth doing when there is
+     * evidence it matters rather than because it sounds better */
+    uint64_t cr3;
+    __asm__ volatile ("movq %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile ("movq %0, %%cr3" :: "r"(cr3) : "memory");
+
+    __atomic_fetch_add(&shootdown_done, 1, __ATOMIC_SEQ_CST);
+    lapic_eoi();
+}
+
+void smp_tlb_shootdown(void) {
+    if (online <= 1 || !lapic_available()) {
+        return;         /* nobody else is remembering anything */
+    }
+
+    /* a core that has not joined the scheduler yet is still being
+     * brought up, and the only mappings it changes are for pages it has
+     * just been given -- which no other core has ever had a reason to
+     * translate. more to the point, the core that woke it is sitting in
+     * a polling loop waiting for it, and would not answer an interrupt
+     * until it stopped. asking anyway means waiting out the whole bound,
+     * three times over, for an answer that was never needed */
+    uint32_t here = smp_this_cpu();
+    if (here < cpu_count && !cpus[here].scheduling) {
+        return;
+    }
+
+    uint64_t flags = spin_lock_irq(&shootdown_lock);
+
+    uint32_t others = 0;
+    __atomic_store_n(&shootdown_done, 0, __ATOMIC_SEQ_CST);
+
+    for (size_t i = 0; i < cpu_count; i++) {
+        if (!cpus[i].online || cpus[i].index == here || !cpus[i].scheduling) {
+            continue;
+        }
+        if (lapic_send_ipi(cpus[i].apic_id, SMP_IPI_TLB)) {
+            others++;
+        }
+    }
+    __atomic_store_n(&shootdown_wanted, others, __ATOMIC_SEQ_CST);
+
+    /* wait for every one of them. carrying on early would mean using a
+     * mapping I have taken away while somebody else still has it --
+     * bounded, because a core that never answers must not take the
+     * machine with it */
+    /* well short of what the spinlock is willing to wait for. a core
+     * that has not answered by now is one that cannot, and waiting past
+     * the point where somebody else declares *me* stuck helps nobody */
+    for (uint64_t spin = 0; others > 0 && spin < 20000000ull; spin++) {
+        if (__atomic_load_n(&shootdown_done, __ATOMIC_SEQ_CST) >= others) {
+            break;
+        }
+        __asm__ volatile ("pause");
+    }
+
+    spin_unlock_irq(&shootdown_lock, flags);
 }
 
 /* ---- page tables just for the climb ---- */
@@ -202,7 +305,7 @@ static bool wake(struct cpu *c, uint64_t climb_pml4, bool loud) {
 
 /* ---- and all of them ---- */
 
-bool smp_init(const struct acpi_info *info) {
+bool smp_init(const struct acpi_info *info, uint64_t timer_ticks_per_second) {
     cpu_count = 0;
     online = 0;
 
@@ -222,9 +325,11 @@ bool smp_init(const struct acpi_info *info) {
         c->index = (uint32_t)cpu_count;
         c->apic_id = info->lapic_ids[i];
         c->bootstrap = (c->apic_id == me);
+        c->timer_ticks_per_second = timer_ticks_per_second;
         if (c->bootstrap) {
             c->online = true;
             c->reported_id = me;
+            c->scheduling = true;
             online++;
         }
         cpu_count++;

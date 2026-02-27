@@ -1,4 +1,5 @@
 #include "cpu/syscall.h"
+#include "cpu/smp.h"
 #include "cpu/msr.h"
 #include <stdbool.h>
 #include "cpu/gdt.h"
@@ -26,8 +27,6 @@
 #define RFLAGS_IF (1ull << 9)
 #define RFLAGS_DF (1ull << 10)
 #define RFLAGS_TF (1ull << 8)
-
-uint64_t syscall_kernel_rsp;
 
 static uint64_t call_counts[SYSCALL_COUNT];
 
@@ -414,6 +413,21 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     }
 }
 
+/* one pair of words per core, reached through gs by the entry stub.
+ * these cannot be globals any more: two cores in a syscall at the same
+ * instant would trample each other's stacks, and the scheduler on one
+ * core would be rewriting the kernel stack the other is about to use */
+struct syscall_percpu {
+    uint64_t kernel_rsp;    /* gs:0 -- keep this first */
+    uint64_t scratch_rsp;   /* gs:8 */
+};
+
+static struct syscall_percpu syscall_cpu[SMP_MAX_CPUS];
+
+void syscall_set_kernel_rsp(uint64_t rsp) {
+    syscall_cpu[smp_this_cpu()].kernel_rsp = rsp;
+}
+
 void syscall_init(void) {
     /* STAR[47:32] is the kernel selector pair syscall loads: cs from it
      * and ss from it+8. STAR[63:48] is the base sysret computes from,
@@ -433,4 +447,15 @@ void syscall_init(void) {
     wrmsr(MSR_SFMASK, RFLAGS_IF | RFLAGS_DF | RFLAGS_TF);
 
     wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_SCE);
+
+    /* gs names this core, in both rings, for as long as the machine
+     * runs. both halves are set to the same thing so that a stray
+     * swapgs -- from anywhere, ever -- is a no-op rather than a fault
+     * three instructions into the next system call.
+     *
+     * every one of the registers set in this function is per core, which
+     * is the whole reason it runs on each of them rather than once */
+    uint64_t mine = (uint64_t)&syscall_cpu[smp_this_cpu()];
+    wrmsr(MSR_GS_BASE, mine);
+    wrmsr(MSR_KERNEL_GS_BASE, mine);
 }

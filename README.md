@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.1** (**locks worth the name.** thirty-nine places that used `cli` as mutual exclusion, audited one at a time -- correct on one core, and quietly reclassified as wrong by the version before this one)
+**version: 0.2.2** (**a scheduler on every core.** every processor takes work out of the same ring, with its own descriptor tables, its own timer and its own idle thread -- and a way to tell the others to forget what they remember)
 
 ## what it does
 
@@ -38,6 +38,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] philemon: my own bootloader, and now the only one on the disk
 - [x] the other processors, woken and accounted for
 - [x] real locks, in ranked order, and a test that can see a race
+- [x] every core running threads, and tlb shootdown between them
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -203,6 +204,100 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### a scheduler on every core
+
+0.2.0 woke the other processors and gave them nothing to do. 0.2.1 made
+the locks real. this is the version where they start doing the work.
+
+**one run queue, not one each.** the roadmap said a queue per core with
+work moved between them; I built a single ring that every core picks
+from, and that is a deliberate difference. at four cores the lock is not
+the bottleneck, and an idle core taking whatever happens to be ready
+*is* load balancing -- without the migration machinery that per-core
+queues then need in order to undo what splitting them apart did. worth
+revisiting when there is evidence the lock is the thing in the way,
+which there is not.
+
+what genuinely cannot be shared is per core: which thread it is running,
+the idle thread it falls back to, how much of a slice is left, and its
+own task state segment.
+
+**a core learns its own name from the task register.** every core loads
+a different tss selector, so the register the processor is already
+holding *is* a core's identity -- two cycles to read, and it needs
+nothing in memory to have been reached first. that last part is what
+makes it usable: this question gets asked on every lock and every
+context switch, and the obvious alternative -- reading the local apic --
+is an uncached access to a device thousands of times a second, to learn
+something the cpu already knew.
+
+**and the syscall path was per-machine where it had to be per core.**
+`syscall` is fast because it does almost nothing: it does not even
+change the stack pointer, so the kernel arrives in ring 0 standing on
+the *user's* stack and the first job is to get off it. that swap used
+two globals, and the stub said why that was safe -- SFMASK clears the
+interrupt flag, so nothing can preempt those three instructions.
+
+the reasoning was airtight and is now wrong: it says nothing about
+another core. with four of them, a global kernel stack pointer means a
+thread can `syscall` its way onto a stack another core is standing on.
+so those two words are per core now, reached through `gs` -- which can
+be read without clobbering a single register, and that matters here more
+than anywhere: `rax` holds the call number, `rcx` and `r11` hold what
+`sysret` needs, everything else holds arguments, and there is no stack
+yet to save anything on.
+
+there is no `swapgs`: `gs` simply names the current core in both rings,
+always, so there is no parity to keep in step and nothing to get wrong
+when a thread migrates mid-call.
+
+that only works if nothing zeroes the base -- and the trip into ring 3
+was doing exactly that. in 64-bit mode the `gs` base does not come from
+the descriptor table at all; it comes from an msr. loading any real
+selector into `gs` overwrites that base with the descriptor's, which is
+zero. `enter_usermode` was loading a user selector into `gs` along with
+the others, so the instant any program reached ring 3 its core stopped
+knowing which core it was, and the program's first system call wrote
+through a base of zero and faulted inside the kernel.
+
+it is left alone now. nothing in ring 3 reads `gs`, and `iretq` nulls
+the selector by itself when it drops privilege.
+
+`star`, `lstar`, `sfmask` and the gs bases are every one of them per
+core too, and only the boot core had them. a thread scheduled onto any
+other executed `syscall` and jumped to address zero -- in ring 0, on the
+user's stack.
+
+**three things had to change that are not about scheduling at all:**
+
+- **the clock.** every core has its own timer and all of them arrive at
+  the same tick handler. if all four counted, an hour would pass in
+  fifteen minutes and every sleep in the system would end early. the
+  boot core keeps time; the rest only schedule.
+- **the reaper.** a thread marked dead may still be *running* -- `kill`
+  can mark one that is on another core this instant -- so freeing its
+  stack is not a race, it is pulling the floor out from under a
+  processor. dead threads are now unlinked under the lock and freed
+  outside it, from the idle loop, and only once their core has let go.
+- **the idle thread.** a core creating its own idle thread puts it in
+  the ring before claiming it, and in that gap another core could pick
+  it up -- two processors on one stack. it goes in parked.
+
+**and tlb shootdown**, because when one core changes a page table the
+others are still holding the old translation and nothing in the hardware
+tells them. it takes an interrupt to each and a wait until every one has
+answered -- the wait being the part that matters, since returning early
+means carrying on while another core still uses a mapping you have
+already taken away.
+
+the wait is bounded, and deliberately far shorter than the spinlock's
+own patience: a core that has not answered by then is one that cannot,
+and waiting past the point where somebody else declares *you* stuck
+helps nobody.
+
+`ps` now says which core each thread is on -- and a thread that is
+merely ready is on none of them. `cpus` says what each core is running.
 
 ### locks worth the name
 
@@ -790,6 +885,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.2** — every core runs threads now. one shared ring rather than a queue each, which is a deliberate departure from the roadmap: at four cores the lock is not the bottleneck and an idle core taking whatever is ready is already load balancing, without the migration machinery per-core queues then need. each core gets its own descriptor tables, its own timer and its own idle thread, and learns its own name from the task register -- every core loads a different tss selector, so the register the cpu already holds is its identity, which costs two cycles and needs nothing in memory to have been reached first. tlb shootdown by inter-processor interrupt with a bounded wait for every core to answer. the syscall path turned out to be per-machine where it had to be per core -- the entry stub swapped stacks through two globals, and `star`/`lstar`/`sfmask` were set only on the boot core, so a program scheduled anywhere else executed `syscall` and jumped to address zero in ring 0; it uses per-core words reached through `gs` now -- and deliberately *without* `swapgs`, because the parity of those swaps is per thread while the bases are per core, so a thread preempted inside a syscall and resumed elsewhere leaves a core's bases reversed. three bugs that are not about scheduling had to be fixed first: all four cores were counting the same clock, so an hour would have passed in fifteen minutes; the reaper freed the stacks of threads that another core might still be standing on; and a core's idle thread was visible in the ring before that core had claimed it. `ps` gained a core column, `cpus` says what each is running.
 - **0.2.1** — locks, at last. thirty-nine `irq_save` pairs across twelve files were correct mutual exclusion for one core and were quietly reclassified as wrong by 0.2.0; every one is now a real lock. the primitive is deliberately the same shape as what it replaces, so the audit reads as one change repeated thirty-nine times and anything that is not stands out. lock order is checked against a rank read off the call graph rather than assumed -- and it warns rather than panics, because with one core a wrong rank cannot deadlock and should not cost a working machine. `test_locks` is the first suite in this project that can see a race: eight threads through the real allocators, with a deliberately unguarded counter as a control, asserted to come out *wrong* so that the guarded one means something. `locks` shows the ranks and the contention. a lock declared where it is defined never called `spin_init`, so none of the twelve were on the list the shell shows -- they register themselves on first use now. and the recursion check paid for the whole version on its first boot, catching four bugs of one shape: a lock is a property of the machine and must never be held across a context switch, where `cli` was a property of the thread and rode through one harmlessly. a new thread began holding the scheduler's lock with its release on a stack it would never return to; the blocking reader slept holding the keyboard's lock, so the interrupt meant to wake it spun on that lock forever; the timer tick walked the run queue holding nothing; and waking a thread took the scheduler's lock twice. all four were correct on one core.
 - **0.2.0** — the other processors wake up. a core that has never run holds itself in reset until another core's local apic tells it otherwise, and when it starts it starts in real mode at a page below a megabyte, so there is a trampoline sitting there to walk it back into long mode -- on page tables that are a copy of the kernel's with low memory identity-mapped, because the kernel maps none of where that code lives. each woken core reports its own apic id, which is the one thing it cannot fake, and then halts. `cpus` lists them. they are given nothing to do on purpose: there are 39 `irq_save` pairs in this kernel that call turning interrupts off mutual exclusion, and every one is false on a second core -- so 0.2.1 is an audit before 0.2.2 is a scheduler. also fixed: `all: $(BOOTIMG)` was written above the line defining `BOOTIMG`, so a bare `make` had been quietly building nothing at all.
 - **0.1.12** — philemon, my own bootloader, and now the only one. limine is gone, along with the iso, the uefi path and the protocol that came with it: writing a bootloader and then booting with somebody else's is not much of a bootloader. one file, whose first 512 bytes are the only part the bios will read and which do nothing but pull in the rest of the same file; a20 and unreal mode so the kernel can be read in above a megabyte; page tables and long mode; and a 64-bit half in C that parses the elf and builds the memory map. the kernel is handed one struct in rdi and knows nothing about anybody's boot protocol including mine -- `limine.h` is deleted and there is not one request structure left in it. the C half is host-tested, and writing those tests found two real bugs: a carve loop walking unsorted regions that handed the ramdisk's memory away as free, and boot-table offsets read as though the struct had 16-byte fields. a third was found by reading: the video mode code loaded `fs` in real mode, which quietly undid unreal mode and left the page tables being written somewhere else entirely.

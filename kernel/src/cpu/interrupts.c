@@ -2,6 +2,7 @@
 #include "cpu/pic.h"
 #include "cpu/acpi.h"
 #include "cpu/lapic.h"
+#include "cpu/smp.h"
 #include "cpu/ioapic.h"
 #include "cpu/idt.h"
 #include "drivers/pit.h"
@@ -83,6 +84,12 @@ const struct acpi_info *interrupts_acpi(void) {
     return &acpi;
 }
 
+static uint64_t timer_rate;
+
+uint64_t interrupts_timer_rate(void) {
+    return timer_rate;
+}
+
 bool interrupts_on_apic(void) {
     return timer_on_lapic;
 }
@@ -101,6 +108,13 @@ void interrupt_dispatch(struct interrupt_frame *f) {
         /* the same tick, arriving by a different road. everything above
          * counts in these, so the change must be invisible from there */
         pit_tick();
+        return;
+    }
+
+    /* another core changed a page table and this one still remembers the
+     * old translation. nothing in the hardware would have told it */
+    if (f->vector == SMP_IPI_TLB) {
+        smp_tlb_ipi();
         return;
     }
 
@@ -255,6 +269,7 @@ bool interrupts_use_apic(void) {
      * boot, and I am about to mask the very chip that would deliver
      * them. a wait that needed either would spin here forever */
     uint64_t hz = lapic_calibrate(pit_poll_wait, 50);
+    timer_rate = hz;
     if (hz < 1000 || hz > 100000000000ull) {
         /* an answer that absurd means the measurement failed, and a
          * timer started from it would be worse than the pit */

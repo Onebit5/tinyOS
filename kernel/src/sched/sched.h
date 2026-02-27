@@ -58,6 +58,19 @@ void waitq_sleep(void);
  * holding a lock whose release is on a stack it will never return to */
 void sched_first_run(void);
 
+/* a core other than the first, joining the scheduler. called on the core
+ * that will run it, after it has its own descriptor tables */
+bool sched_join(unsigned cpu, const char *idle_name);
+
+/* which core a thread is on, or -1 if it is not running anywhere */
+int sched_thread_cpu(const struct thread *t);
+
+/* how many cores are actually taking work */
+size_t sched_cores_scheduling(void);
+
+/* the name of whatever a given core is running this instant, for `cpus` */
+const char *sched_cpu_running(unsigned cpu);
+
 /* wake everyone parked on the queue. safe to call from an irq */
 void waitq_wake_all(struct waitq *q);
 

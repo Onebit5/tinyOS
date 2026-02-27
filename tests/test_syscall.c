@@ -87,6 +87,9 @@ int input_getchar_blocking(void) { return next_key; }
 /* syscall_init installs this in an msr; I never call it here */
 void syscall_entry(void) { }
 
+/* one core, on a host that has no such thing */
+uint32_t smp_this_cpu(void) { return 0; }
+
 #include "sched/process.h"
 #include "fs/ramdisk.h"
 

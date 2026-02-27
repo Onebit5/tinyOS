@@ -8,6 +8,13 @@
 #define MSR_EFER      0xc0000080
 #define EFER_NXE      (1ull << 11)   /* honour the no-execute bit */
 
+/* where gs points. the pair exists so a kernel can keep one base for
+ * ring 3 and another for ring 0 and swap between them -- this one keeps
+ * the same value in both, so gs simply names the current core wherever
+ * it is read from. see the note at the top of syscall.asm for why */
+#define MSR_GS_BASE        0xc0000101
+#define MSR_KERNEL_GS_BASE 0xc0000102
+
 static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t lo, hi;
     asm volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));

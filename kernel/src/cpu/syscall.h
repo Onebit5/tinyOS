@@ -36,6 +36,9 @@ const char *syscall_name(unsigned nr);
 
 /* which kernel stack `syscall` should land on. the scheduler keeps this
  * pointed at the running thread, exactly like the tss rsp0 */
-extern uint64_t syscall_kernel_rsp;
+/* where this core's kernel stack is, for the entry stub to stand on.
+ * per core, not global: the scheduler on one core must not be able to
+ * rewrite the stack another core is about to use */
+void syscall_set_kernel_rsp(uint64_t rsp);
 
 #endif

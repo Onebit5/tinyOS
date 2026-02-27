@@ -164,6 +164,11 @@ bool lapic_send_init(uint32_t apic_id) {
     return send(apic_id, ICR_DELIVERY_INIT | ICR_LEVEL_ASSERT);
 }
 
+bool lapic_send_ipi(uint32_t apic_id, uint8_t vector) {
+    /* delivery mode 0 -- a plain interrupt at the given vector */
+    return send(apic_id, ICR_LEVEL_ASSERT | vector);
+}
+
 bool lapic_send_startup(uint32_t apic_id, uint8_t vector) {
     /* the vector is a page number, not an address: the core begins at
      * vector * 0x1000, in real mode, knowing nothing */

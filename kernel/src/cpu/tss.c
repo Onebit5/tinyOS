@@ -21,7 +21,10 @@ struct __attribute__((packed)) tss {
 
 _Static_assert(sizeof(struct tss) == 104, "the tss is a fixed shape, check the packing");
 
-static struct tss tss;
+/* one per core, and every field in them is that core's alone. two cores
+ * trapping in from ring 3 at the same instant have to land on different
+ * stacks, and this is where the cpu reads which */
+static struct tss tables[GDT_MAX_TSS];
 
 static uint64_t alloc_stack(const char *what) {
     uint64_t phys = pmm_alloc_pages(IST_STACK_PAGES);
@@ -32,26 +35,61 @@ static uint64_t alloc_stack(const char *what) {
     return (uint64_t)pmm_phys_to_virt(phys) + IST_STACK_PAGES * PAGE_SIZE;
 }
 
-void tss_set_rsp0(uint64_t rsp0) {
-    tss.rsp[0] = rsp0;
+/* which core is asking, read from the cpu itself.
+ *
+ * every core loads a different tss selector, so the task register *is* a
+ * core's name -- and asking the processor which one it loaded costs a
+ * couple of cycles and needs no per-core memory to have been reachable
+ * first. that last part is why it is done this way: everything else that
+ * could answer this question has to be found before it can be asked, and
+ * this does not. */
+unsigned tss_current_cpu(void) {
+    uint16_t tr;
+    asm volatile ("str %0" : "=r"(tr));
+
+    if (tr < GDT_TSS) {
+        return 0;       /* nothing loaded yet: only the boot core exists */
+    }
+    unsigned cpu = (unsigned)((tr - GDT_TSS) / GDT_TSS_STRIDE);
+    return cpu < GDT_MAX_TSS ? cpu : 0;
 }
 
-void tss_init(void) {
-    memset(&tss, 0, sizeof tss);
+void tss_set_rsp0(uint64_t rsp0) {
+    tables[tss_current_cpu()].rsp[0] = rsp0;
+}
 
-    tss.ist[IST_DOUBLE_FAULT - 1] = alloc_stack("double fault");
+static bool setup(unsigned cpu) {
+    if (cpu >= GDT_MAX_TSS) {
+        return false;
+    }
+    struct tss *t = &tables[cpu];
+    memset(t, 0, sizeof *t);
 
-    /* where the cpu lands on a trap from ring 3. I have no ring 3 yet,
-     * so this is one stack for the whole system -- when usermode
-     * arrives it has to become per-thread, or two threads trapping at
-     * once would land on the same stack and eat each other */
-    tss_set_rsp0(alloc_stack("ring 0 entry"));
+    t->ist[IST_DOUBLE_FAULT - 1] = alloc_stack("double fault");
+
+    /* where the cpu lands on a trap from ring 3. it follows whichever
+     * thread is on this core and is rewritten on every switch, or two
+     * user threads trapping at once would land on the same stack */
+    t->rsp[0] = alloc_stack("ring 0 entry");
 
     /* an iomap base past the end of the segment means "no io bitmap",
      * which is how you say "ring 3 may not touch ports" */
-    tss.iomap_base = sizeof tss;
+    t->iomap_base = sizeof *t;
 
-    gdt_set_tss((uint64_t)&tss, sizeof(tss) - 1);
+    gdt_set_tss(cpu, (uint64_t)t, sizeof *t - 1);
 
-    asm volatile ("ltr %w0" : : "r"((uint16_t)GDT_TSS) : "memory");
+    /* loading it is also what tells this core its own name */
+    uint16_t selector = (uint16_t)GDT_TSS_FOR(cpu);
+    asm volatile ("ltr %w0" :: "r"(selector) : "memory");
+    return true;
+}
+
+void tss_init(void) {
+    if (!setup(0)) {
+        panic("tss: the boot core could not be given a task segment");
+    }
+}
+
+bool tss_init_cpu(unsigned cpu) {
+    return setup(cpu);
 }

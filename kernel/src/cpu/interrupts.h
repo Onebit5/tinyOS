@@ -30,6 +30,12 @@ bool interrupts_use_apic(void);
  * tables twice */
 const struct acpi_info *interrupts_acpi(void);
 
+/* what the first core measured the local apic timer at, in its own ticks
+ * per second. every core has one of these timers and they all run off
+ * the same clock, so the other cores are told rather than each taking
+ * the pit in turn to find out */
+uint64_t interrupts_timer_rate(void);
+
 /* move the external interrupts to the io apic as well. deliberately not
  * done at boot -- see the note in interrupts.c. returns false without
  * changing anything if the routing cannot be verified */

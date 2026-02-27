@@ -1,4 +1,5 @@
 #include "drivers/pit.h"
+#include "cpu/smp.h"
 #include "cpu/io.h"
 #include "cpu/pic.h"
 #include "cpu/interrupts.h"
@@ -24,9 +25,16 @@
 static volatile uint64_t ticks;
 
 void pit_tick(void) {
-    ticks++;
-    /* hand the tick to the scheduler, which decides if the running
-     * thread has had enough of the cpu */
+    /* every core has its own timer and every one of them arrives here,
+     * but there is only one clock. if all four counted, an hour would
+     * pass in fifteen minutes and every sleep in the system would end
+     * early -- so the boot core keeps time and the rest just schedule */
+    if (smp_this_cpu() == 0) {
+        ticks++;
+    }
+
+    /* the scheduler, though, is every core's business: this is the
+     * interrupt that tells whichever thread is here that its turn is up */
     sched_tick();
 }
 

@@ -49,6 +49,12 @@ struct thread {
     int  id;
     char name[THREAD_NAME_MAX];
 
+    /* which core this is on, or -1 for none. a thread in the ring marked
+     * RUNNING is on somebody's cpu right now, and no other core may pick
+     * it up -- two cores running the same thread would be two cores on
+     * one stack, which ends exactly as badly as it sounds */
+    int  on_cpu;
+
     /* the boot thread is a static, everything else came from kmalloc.
      * the reaper needs to know which, or it tries to free a global */
     bool from_heap;
@@ -78,6 +84,13 @@ void thread_set_name(struct thread *t, const char *name);
 /* build a thread that will start life inside entry(arg). it lands in the
  * run queue ready to go. returns NULL if memory says no */
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg);
+
+/* the same, but parked: it goes into the ring already blocked, so no
+ * other core can pick it up before its own has claimed it. a core
+ * building its idle thread needs exactly this -- between creating one
+ * and saying "this is mine", a ready thread is fair game to anybody */
+struct thread *thread_create_parked(const char *name, void (*entry)(void *),
+                                    void *arg);
 
 /* give a dead thread's struct back. does nothing for the boot thread,
  * which was never allocated in the first place */

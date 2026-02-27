@@ -6,30 +6,57 @@
 ; rsp -- I arrive on the *user's* stack, in ring 0, which is as
 ; alarming as it sounds. the first job is to get off it.
 ;
-; the swap uses two globals. that is only safe because SFMASK clears IF,
-; so I arrive with interrupts off and nothing can preempt me in the
-; three instructions before the user's rsp is safely on a kernel stack.
-; the moment it is, I can let interrupts back in.
+; the swap used to use two globals, which was safe because SFMASK clears
+; IF -- I arrive with interrupts off, and nothing could preempt me in the
+; three instructions before the user's rsp was on a kernel stack.
 ;
-; syscall_kernel_rsp is kept pointing at the running thread's kernel
-; stack by the scheduler, the same way the tss rsp0 is.
+; that reasoning was airtight and is now wrong. it says nothing about
+; another core, and with four of them a global kernel rsp means a thread
+; can `syscall` its way onto some other core's stack.
+;
+; so the two words are per core, found through gs -- which can be read
+; without clobbering a single register, and that matters here more than
+; anywhere: rax holds the call number, rcx and r11 hold the return
+; address and flags sysret needs, everything else holds arguments, and
+; there is no stack yet to save anything on.
+;
+;   gs:0   this core's kernel stack, kept current by the scheduler
+;   gs:8   somewhere to park the user's stack for two instructions
+;
+; there is no swapgs here, and that is deliberate. the usual arrangement
+; is one gs base for ring 3 and another for ring 0, exchanged on the way
+; in and out -- but the *parity* of those exchanges is then per thread,
+; while the bases are per core. a thread preempted inside a syscall and
+; resumed on another core does its exit swap on a core that never did
+; the entry one, which leaves that core's two bases the wrong way round
+; and the next syscall on it reading through a base of zero. that is not
+; a hypothetical: it is what this stub did on its second call.
+;
+; so gs simply names the current core, in both rings, always. nothing to
+; keep in step and nothing to get wrong across a migration.
+;
+; the price is that anything loading a real selector into gs zeroes the
+; base, and the next system call then writes through zero and faults in
+; the kernel. that is not hypothetical either: the trip into ring 3 used
+; to do exactly that, one instruction at a time, on every program that
+; ever ran. see usermode.asm. every program here is one I compiled and
+; none of them touch gs, so what is left is a program able to crash the
+; machine rather than escape it -- a real edge, worth naming.
 
 bits 64
 section .text
 
 extern syscall_dispatch
-extern syscall_kernel_rsp
 
 global syscall_entry
-global syscall_scratch_rsp
 
 syscall_entry:
-    mov [rel syscall_scratch_rsp], rsp      ; park the user stack briefly
-    mov rsp, [rel syscall_kernel_rsp]       ; and stand on my own
+    mov [gs:8], rsp                         ; park the user stack briefly
+    mov rsp, [gs:0]                         ; and stand on my own
 
-    push qword [rel syscall_scratch_rsp]    ; now it is per-thread, on
-                                            ; my stack, and the global
-                                            ; is free for the next caller
+    push qword [gs:8]                       ; now it is per-thread, on my
+                                            ; own stack, and the per-core
+                                            ; word is free again
     push rcx                                ; user rip, courtesy of syscall
     push r11                                ; user rflags, likewise
 
@@ -89,10 +116,5 @@ syscall_entry:
     pop rsp                                 ; back onto the user's stack
 
     o64 sysret                              ; and back to ring 3
-
-section .bss
-    align 8
-syscall_scratch_rsp:
-    resq 1
 
 section .note.GNU-stack noalloc noexec nowrite progbits

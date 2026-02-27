@@ -116,15 +116,19 @@ uint64_t ahci_sectors(void) { return 131072; }
 #include "cpu/smp.h"
 static struct cpu fake_cpus[2] = {
     { .index = 0, .apic_id = 0, .reported_id = 0, .online = true,
-      .bootstrap = true },
+      .bootstrap = true, .scheduling = true },
     { .index = 1, .apic_id = 1, .reported_id = 1, .online = true,
-      .bootstrap = false },
+      .bootstrap = false, .scheduling = true },
 };
 size_t smp_cpu_count(void) { return 2; }
 size_t smp_online_count(void) { return 2; }
 const struct cpu *smp_cpu_at(size_t i) {
     return (i < 2) ? &fake_cpus[i] : NULL;
 }
+const char *sched_cpu_running(unsigned cpu) {
+    return cpu == 0 ? "shell" : "idle1";
+}
+size_t sched_cores_scheduling(void) { return 2; }
 uint64_t syscall_times_called(unsigned n) { (void)n; return 0; }
 const char *syscall_name(unsigned n) { (void)n; return "x"; }
 bool input_haskey(void) { return true; }

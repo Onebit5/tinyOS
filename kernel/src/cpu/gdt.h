@@ -11,12 +11,22 @@
 /* what ring 3 actually loads: the same selectors with RPL 3 */
 #define GDT_USER_DATA3  (GDT_USER_DATA | 3)
 #define GDT_USER_CODE3  (GDT_USER_CODE | 3)
-#define GDT_TSS         0x28    /* takes two slots, being 16 bytes wide */
+/* one tss per core, each sixteen bytes wide, starting here. every core
+ * loads a different one -- which is what lets a core work out which
+ * core it is, by asking the cpu which task register it loaded */
+#define GDT_TSS         0x28
+#define GDT_TSS_STRIDE  16
+#define GDT_MAX_TSS     8
+
+#define GDT_TSS_FOR(cpu) (GDT_TSS + (cpu) * GDT_TSS_STRIDE)
 
 void gdt_init(void);
 
-/* fill in the tss descriptor. called by tss_init once it knows where
- * the tss actually lives */
-void gdt_set_tss(uint64_t base, uint32_t limit);
+/* load the shared table on whichever core is asking */
+void gdt_load_here(void);
+
+/* fill in one core's tss descriptor. called by tss_init_cpu once it
+ * knows where that core's tss actually lives */
+void gdt_set_tss(unsigned cpu, uint64_t base, uint32_t limit);
 
 #endif

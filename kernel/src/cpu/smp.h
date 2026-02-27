@@ -31,6 +31,11 @@
 
 #define SMP_MAX_CPUS 32
 
+/* how often each core's own timer fires. the same rate the first core
+ * has always used, so a thread's slice means the same thing wherever it
+ * runs */
+#define SMP_TICK_HZ 100
+
 /* the page a woken core starts executing at, in real mode. the startup
  * message carries a vector, and the vector is a page number: 8 means
  * 0x8000. it has to be below a megabyte because that is all real mode
@@ -59,19 +64,44 @@ struct cpu {
 
     uint64_t stack_top;
     bool     bootstrap;
+
+    /* has this core entered the scheduler and started taking work */
+    volatile bool scheduling;
+
+    /* what the first core measured the local apic timer at. the clock is
+     * the same piece of silicon on every core, so measuring once and
+     * telling the others is honest -- and measuring again on each would
+     * need the pit, which only one core can be using at a time */
+    uint64_t timer_ticks_per_second;
 };
 
 /* wake everything the firmware listed. safe to call on a machine with
  * one core, or no usable local apic, or firmware that will not say --
  * it does nothing and reports one cpu, which is what was true before */
-bool smp_init(const struct acpi_info *info);
+bool smp_init(const struct acpi_info *info, uint64_t timer_ticks_per_second);
 
 size_t smp_cpu_count(void);      /* how many the firmware described */
 size_t smp_online_count(void);   /* how many actually answered */
 const struct cpu *smp_cpu_at(size_t index);
 
-/* which core is asking. by apic id, since nothing has been set up yet
- * that would make it cheaper, and there are never many to look through */
+/* which core is asking */
 uint32_t smp_this_cpu(void);
+
+/* the vector one core interrupts another on, to make it throw away what
+ * it remembers about the page tables */
+#define SMP_IPI_TLB 0x41
+
+/* every other core has its own cached translations, and nothing in the
+ * hardware tells it when this one changes a page table. so it has to be
+ * told: an interrupt to each, and a wait until every one has answered.
+ *
+ * the wait is the part that matters. returning before they have all
+ * flushed would mean carrying on while another core is still using a
+ * mapping I have already taken away, which is a use-after-free with the
+ * page table as the thing freed */
+void smp_tlb_shootdown(void);
+
+/* the handler, called from the interrupt dispatcher */
+void smp_tlb_ipi(void);
 
 #endif

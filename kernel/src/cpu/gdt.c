@@ -1,5 +1,6 @@
 #include "cpu/gdt.h"
 #include <stdint.h>
+#include <stddef.h>
 
 /* segmentation is basically dead in long mode but the cpu still demands
  * a gdt, so here is the flattest one possible. limine gave me a perfectly
@@ -18,19 +19,38 @@ static uint64_t gdt[] = {
      * eight bytes below code or returning to ring 3 lands nowhere */
     0x00aff2000000ffff,     /* 0x18 user data: present, rw, dpl 3 */
     0x00affa000000ffff,     /* 0x20 user code: present, exec, long mode, dpl 3 */
-    0, 0,                   /* 0x28 tss descriptor, filled in by gdt_set_tss */
+    /* 0x28 onwards: one sixteen-byte tss descriptor per core, filled in
+     * by tss_init_cpu as each one comes up. a core with no tss loaded
+     * has none of these, which is why the boot core must take slot 0
+     * before anybody asks which core they are */
+    0, 0,  0, 0,  0, 0,  0, 0,
+    0, 0,  0, 0,  0, 0,  0, 0,
 };
 
 /* a 64-bit tss descriptor is twice the width of a normal one and its
  * fields are scattered across it in the least convenient order the
  * 1980s could devise. type 9 is "available 64-bit tss" */
-void gdt_set_tss(uint64_t base, uint32_t limit) {
-    gdt[GDT_TSS / 8] = (uint64_t)(limit & 0xffff)
-                     | ((base & 0xffffff) << 16)
-                     | (0x89ull << 40)                      /* present, type 9 */
-                     | ((uint64_t)((limit >> 16) & 0xf) << 48)
-                     | (((base >> 24) & 0xff) << 56);
-    gdt[GDT_TSS / 8 + 1] = base >> 32;
+void gdt_set_tss(unsigned cpu, uint64_t base, uint32_t limit) {
+    if (cpu >= GDT_MAX_TSS) {
+        return;
+    }
+    size_t at = GDT_TSS_FOR(cpu) / 8;
+    gdt[at] = (uint64_t)(limit & 0xffff)
+            | ((base & 0xffffff) << 16)
+            | (0x89ull << 40)                      /* present, type 9 */
+            | ((uint64_t)((limit >> 16) & 0xf) << 48)
+            | (((base >> 24) & 0xff) << 56);
+    gdt[at + 1] = base >> 32;
+}
+
+/* the gdt itself is shared -- it is the same table for every core, and
+ * only the tss entries differ. so a core coming up just loads it */
+void gdt_load_here(void) {
+    struct __attribute__((packed)) { uint16_t limit; uint64_t base; } gdtr = {
+        .limit = sizeof(gdt) - 1,
+        .base  = (uint64_t)gdt,
+    };
+    asm volatile ("lgdt %0" :: "m"(gdtr));
 }
 
 struct __attribute__((packed)) gdtr {
