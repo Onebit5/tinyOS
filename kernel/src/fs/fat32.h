@@ -109,6 +109,14 @@ int64_t fat32_write(struct fat32 *fs, struct fat32_file *f,
  * quietly mangled */
 bool fat32_create(struct fat32 *fs, const char *path, struct fat32_file *out);
 
+/* make a directory. the same 8.3 rule as fat32_create, and the new
+ * directory is born with the two entries every directory has */
+bool fat32_mkdir(struct fat32 *fs, const char *path);
+
+/* remove an empty one. a directory with anything in it is refused --
+ * unlinking a tree is a different operation and should look like one */
+bool fat32_rmdir(struct fat32 *fs, const char *path);
+
 /* how much of the disk is spoken for, in clusters */
 bool fat32_usage(struct fat32 *fs, uint32_t *used, uint32_t *total);
 

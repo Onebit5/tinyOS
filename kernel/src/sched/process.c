@@ -27,6 +27,25 @@ static struct process *slot_for(int pid) {
     return NULL;
 }
 
+const char *process_cwd(int pid) {
+    struct process *p = slot_for(pid);
+    return (p != NULL && p->cwd[0] != '\0') ? p->cwd : "/";
+}
+
+void process_set_cwd(int pid, const char *path) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    if (p != NULL) {
+        size_t i = 0;
+        while (path[i] != '\0' && i < PATH_MAX - 1) {
+            p->cwd[i] = path[i];
+            i++;
+        }
+        p->cwd[i] = '\0';
+    }
+    spin_unlock_irq(&process_lock, flags);
+}
+
 int process_create(const char *name, int parent, int uid, bool announce,
                    uint64_t now_ms) {
     uint64_t flags = spin_lock_irq(&process_lock);
@@ -48,6 +67,17 @@ int process_create(const char *name, int parent, int uid, bool announce,
         p->interrupted = false;
         p->started_ms = now_ms;
         p->ended_ms   = 0;
+
+        /* wherever the parent was standing. a process started from a
+         * directory should be in that directory, which is the whole
+         * reason `cd` then running something behaves as anyone expects */
+        const char *from = process_cwd(parent);
+        size_t c = 0;
+        while (from[c] != '\0' && c < PATH_MAX - 1) {
+            p->cwd[c] = from[c];
+            c++;
+        }
+        p->cwd[c] = '\0';
         for (size_t f = 0; f < MAX_FDS; f++) {
             p->fds[f].open = false;
         }

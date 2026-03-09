@@ -124,6 +124,9 @@ int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
     return (int64_t)len;
 }
 const char *disk_model(void) { return "STUB DISK"; }
+static int mkdirs, rmdirs;
+bool disk_mkdir(const char *path) { (void)path; mkdirs++; return have_disk; }
+bool disk_rmdir(const char *path) { (void)path; rmdirs++; return have_disk; }
 
 /* ---- a ramdisk, built as a real tar so the parser is the real one ---- */
 
@@ -202,6 +205,15 @@ int main(void) {
     CHECK(vfs_open("/deep/x.txt", &f) && f.kind == VFS_DISK,
           "a nested disk path resolves");
 
+    /* ---- the mount points themselves ----
+     *
+     * neither of these is on any filesystem: `/` is where the mounts
+     * hang from and `/boot` *is* the ramdisk. something still has to be
+     * able to say they are directories, or nobody can stand in one */
+    CHECK(vfs_open("/", &f) && f.is_dir, "the root is a directory");
+    CHECK(vfs_open("/boot", &f) && f.is_dir, "and so is the mount point");
+    CHECK(vfs_open("/boot/", &f) && f.is_dir, "however it is spelled");
+
     /* ---- listing ---- */
 
     int saw_boot = 0, saw_welcome = 0, count = 0;
@@ -274,6 +286,10 @@ int main(void) {
     CHECK(vfs_write(&f, 0, "x", 1) == -1, "and refuses one");
     CHECK(!vfs_create("/boot/new.txt", &f),
           "nothing can be made under /boot -- it is read-only memory");
+    CHECK(!vfs_mkdir("/boot/somedir"), "nor a directory under it");
+    CHECK(!vfs_rmdir("/boot"), "and it is not removable either");
+    CHECK(vfs_mkdir("/somedir"), "but the disk takes one");
+    CHECK(vfs_rmdir("/somedir"), "and gives it back");
     CHECK(vfs_create("/new.txt", &f), "but the disk will make a file");
 
     /* ---- whole files ---- */
@@ -303,8 +319,15 @@ int main(void) {
           "a bare name falls all the way through to the ramdisk");
     CHECK(vfs_open("/boot/welcome.txt", &f), "and /boot is where it always was");
 
-    CHECK(!vfs_open("/welcome.txt", &f),
-          "the disk's own names are gone, since the disk is");
+    /* an absolute name still finds the ramdisk's copy. that is the
+     * fallback doing its job rather than a leak: every path arrives here
+     * absolute now, resolved against wherever the caller was standing,
+     * so if `/x` did not fall through then a machine with no disk could
+     * reach no program, no passwd and no file at all */
+    CHECK(vfs_open("/welcome.txt", &f) && f.kind == VFS_RAMDISK,
+          "an absolute name falls through to the ramdisk with no disk");
+    CHECK(!vfs_open("/notes.txt", &f),
+          "but a name on neither is still on neither");
     CHECK(!vfs_create("/anything.txt", &f), "and nothing can be made");
 
     count = 0;

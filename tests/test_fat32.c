@@ -279,6 +279,42 @@ int main(int argc, char **argv) {
     CHECK(fat32_create(&fs, "notes.txt", &fresh), "creating twice is allowed");
     CHECK(fresh.size == strlen(message), "and does not truncate what was there");
 
+    /* ---- directories, made and unmade ---- */
+
+    CHECK(fat32_mkdir(&fs, "made"), "a directory can be made");
+    CHECK(fat32_lookup(&fs, "made", &f) && f.is_dir, "and is found as one");
+
+    /* it starts empty -- dot and dotdot exist on the disk but are not
+     * anybody else's business, so readdir must not show them */
+    CHECK(!fat32_readdir(&fs, f.first_cluster, 0, &e),
+          "a new directory is empty as far as anyone can see");
+
+    /* and it is a real directory: things can be put in it and found */
+    CHECK(fat32_create(&fs, "made/inside.txt", &fresh),
+          "a file can be made inside it");
+    CHECK(fat32_write(&fs, &fresh, 0, "here\n", 5) == 5, "and written");
+    CHECK(fat32_lookup(&fs, "made/inside.txt", &f), "and found by path");
+    CHECK(fat32_readdir(&fs, 0, 0, &e) || true, "");
+
+    /* nested, which is the part that needs dotdot to be right */
+    CHECK(fat32_mkdir(&fs, "made/deeper"), "and a directory inside that");
+    CHECK(fat32_lookup(&fs, "made/deeper", &f) && f.is_dir, "found as one");
+
+    /* ---- and unmade ---- */
+
+    CHECK(!fat32_rmdir(&fs, "made"),
+          "a directory with anything in it is not removed");
+    CHECK(fat32_rmdir(&fs, "made/deeper"), "an empty one is");
+    CHECK(!fat32_lookup(&fs, "made/deeper", &f), "and is gone afterwards");
+    CHECK(!fat32_rmdir(&fs, "made/deeper"), "removing it twice does nothing");
+    CHECK(!fat32_rmdir(&fs, ""), "and the root is nobody's to remove");
+    CHECK(!fat32_rmdir(&fs, "made/inside.txt"),
+          "nor is a file, however empty");
+
+    CHECK(!fat32_mkdir(&fs, "made"), "a name already taken is refused");
+    CHECK(!fat32_mkdir(&fs, "nowhere/at/all"),
+          "and so is one whose parent does not exist");
+
     /* ---- a read-only mount must refuse every one of those ---- */
 
     struct fat32 ro;
@@ -286,6 +322,8 @@ int main(int argc, char **argv) {
     CHECK(fat32_lookup(&ro, "hello.txt", &f), "and still read");
     CHECK(fat32_write(&ro, &f, 0, "no", 2) == -1, "but not written");
     CHECK(!fat32_create(&ro, "new.txt", &fresh), "and not added to");
+    CHECK(!fat32_mkdir(&ro, "nope"), "no directory made on it");
+    CHECK(!fat32_rmdir(&ro, "made"), "and none removed");
 
     /* ---- everything survives being unmounted ---- */
 
@@ -301,8 +339,10 @@ int main(int argc, char **argv) {
     for (size_t i = 0; fat32_readdir(&remount, 0, i, &e); i++) {
         count++;
     }
-    CHECK(count == root_at_first + 1,
-          "and the root has exactly one more file than before");
+    /* two more than it started with: the file that was created, and the
+     * directory that was made and not removed */
+    CHECK(count == root_at_first + 2,
+          "and the root has exactly what was added to it, no more");
 
     uint32_t used, total;
     CHECK(fat32_usage(&remount, &used, &total), "usage can be counted");

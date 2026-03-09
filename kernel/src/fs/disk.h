@@ -60,6 +60,10 @@ bool disk_create(const char *path, struct disk_entry *out);
 int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
                       uint64_t len);
 
+/* directories, made and unmade. the same 8.3 rule as disk_create */
+bool disk_mkdir(const char *path);
+bool disk_rmdir(const char *path);
+
 /* what to tell the user about it */
 const char *disk_label(void);
 const char *disk_model(void);

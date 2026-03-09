@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.2** (**a scheduler on every core.** every processor takes work out of the same ring, with its own descriptor tables, its own timer and its own idle thread -- and a way to tell the others to forget what they remember)
+**version: 0.2.3** (**somewhere to stand.** a working directory per process, every name read from it, and `..` finally meaning something)
 
 ## what it does
 
@@ -39,6 +39,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] the other processors, woken and accounted for
 - [x] real locks, in ranked order, and a test that can see a race
 - [x] every core running threads, and tlb shootdown between them
+- [x] a working directory, `cd`, `pwd`, and directories that can be made
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -204,6 +205,48 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### somewhere to stand
+
+until now nothing in this kernel knew where it was. every name was
+absolute or nearly so, and `..` was thrown away by the resolver without
+comment -- there was nowhere to go back *to*.
+
+a process has a working directory now. a name is read relative to it
+unless it begins with a slash, and the whole thing is flattened into one
+absolute path before anybody goes looking on a disk: `.` means here,
+`..` means back one, repeated slashes mean nothing, and **`..` from the
+root stays at the root**. that last rule is the one that has to be
+right, because a path able to climb above `/` is a path that can name
+anything at all. it has a test of its own, and so does refusing a path
+that will not fit rather than truncating it -- a truncated path is a
+different path, and quietly acting on one is how you delete the wrong
+thing.
+
+resolution happens at the syscall boundary, once, so that no filesystem
+below ever sees a name that means different things to different callers.
+a process inherits the directory of whoever started it, which is what
+makes `cd` somewhere and then running something behave the way anybody
+would expect.
+
+`cd` and `pwd` are shell builtins and have to be: a program runs as its
+own process with its own working directory, so a `cd` that was a program
+would change where *it* was standing and then exit.
+
+two things fell out of it that were quietly missing before. **the mount
+points could not describe themselves** -- `/` is where the mounts hang
+from and `/boot` *is* the ramdisk, so neither is on any filesystem, and
+nothing could say they were directories. you cannot stand somewhere that
+nothing will admit exists. and **the ramdisk fallback had to grow**: it
+used to apply only to names typed without a slash, but now every name
+arrives absolute, so without extending it a machine with no disk could
+reach no program, no passwd and no file at all.
+
+`mkdir` and `rmdir` go with it, down to the filesystem: a new directory
+is born with the two entries every directory has, and an empty one is
+unmade by striking out its record and letting its clusters go. only an
+empty one -- taking a whole tree away is a different operation and ought
+to look like one at the point of asking.
 
 ### a scheduler on every core
 
@@ -790,6 +833,7 @@ $ make test
   vfs        ok        resolution, shadowing, and all of it with no disk
   philemon   ok        the loader's elf parsing and its memory map
   locks      ok        eight threads through the allocators, and a control
+  path       ok        `..`, and every way of trying to climb out of /
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -885,6 +929,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.3** — a working directory per process, and every path resolved against it at the syscall boundary so no filesystem below ever sees a name that means two things. `.`, `..` and repeated slashes are flattened, a path that will not fit is refused rather than truncated, and `..` from the root stays at the root -- that last one having its own tests, since a path that can climb above `/` can name anything. `cd` and `pwd` are builtins because a `cd` that was a program would change where it was standing and then exit. `mkdir` and `rmdir` down to fat32: a directory is born with the two entries every directory has, and only an empty one can be unmade. two gaps surfaced on the way: the mount points could not describe themselves -- `/` is where mounts hang from and `/boot` *is* the ramdisk, so neither is on any filesystem -- and the ramdisk fallback had to widen to absolute paths, or a machine with no disk could suddenly reach nothing at all.
 - **0.2.2** — every core runs threads now. one shared ring rather than a queue each, which is a deliberate departure from the roadmap: at four cores the lock is not the bottleneck and an idle core taking whatever is ready is already load balancing, without the migration machinery per-core queues then need. each core gets its own descriptor tables, its own timer and its own idle thread, and learns its own name from the task register -- every core loads a different tss selector, so the register the cpu already holds is its identity, which costs two cycles and needs nothing in memory to have been reached first. tlb shootdown by inter-processor interrupt with a bounded wait for every core to answer. the syscall path turned out to be per-machine where it had to be per core -- the entry stub swapped stacks through two globals, and `star`/`lstar`/`sfmask` were set only on the boot core, so a program scheduled anywhere else executed `syscall` and jumped to address zero in ring 0; it uses per-core words reached through `gs` now -- and deliberately *without* `swapgs`, because the parity of those swaps is per thread while the bases are per core, so a thread preempted inside a syscall and resumed elsewhere leaves a core's bases reversed. three bugs that are not about scheduling had to be fixed first: all four cores were counting the same clock, so an hour would have passed in fifteen minutes; the reaper freed the stacks of threads that another core might still be standing on; and a core's idle thread was visible in the ring before that core had claimed it. `ps` gained a core column, `cpus` says what each is running.
 - **0.2.1** — locks, at last. thirty-nine `irq_save` pairs across twelve files were correct mutual exclusion for one core and were quietly reclassified as wrong by 0.2.0; every one is now a real lock. the primitive is deliberately the same shape as what it replaces, so the audit reads as one change repeated thirty-nine times and anything that is not stands out. lock order is checked against a rank read off the call graph rather than assumed -- and it warns rather than panics, because with one core a wrong rank cannot deadlock and should not cost a working machine. `test_locks` is the first suite in this project that can see a race: eight threads through the real allocators, with a deliberately unguarded counter as a control, asserted to come out *wrong* so that the guarded one means something. `locks` shows the ranks and the contention. a lock declared where it is defined never called `spin_init`, so none of the twelve were on the list the shell shows -- they register themselves on first use now. and the recursion check paid for the whole version on its first boot, catching four bugs of one shape: a lock is a property of the machine and must never be held across a context switch, where `cli` was a property of the thread and rode through one harmlessly. a new thread began holding the scheduler's lock with its release on a stack it would never return to; the blocking reader slept holding the keyboard's lock, so the interrupt meant to wake it spun on that lock forever; the timer tick walked the run queue holding nothing; and waking a thread took the scheduler's lock twice. all four were correct on one core.
 - **0.2.0** — the other processors wake up. a core that has never run holds itself in reset until another core's local apic tells it otherwise, and when it starts it starts in real mode at a page below a megabyte, so there is a trampoline sitting there to walk it back into long mode -- on page tables that are a copy of the kernel's with low memory identity-mapped, because the kernel maps none of where that code lives. each woken core reports its own apic id, which is the one thing it cannot fake, and then halts. `cpus` lists them. they are given nothing to do on purpose: there are 39 `irq_save` pairs in this kernel that call turning interrupts off mutual exclusion, and every one is false on a second core -- so 0.2.1 is an audit before 0.2.2 is a scheduler. also fixed: `all: $(BOOTIMG)` was written above the line defining `BOOTIMG`, so a bare `make` had been quietly building nothing at all.

@@ -135,10 +135,10 @@ without the machinery that per-core queues then need in order to undo
 what they took apart. worth revisiting when there is evidence the lock
 is the thing in the way.
 
-**0.2.3 somewhere to stand.** the shell has no idea where it is. `cd`,
+**0.2.3 somewhere to stand.** ~~the shell has no idea where it is. `cd`,
 `pwd`, a working directory per process, and paths resolved relative to
 it -- `..` included, which the vfs currently throws away. `mkdir` and
-`rmdir` to go with it.
+`rmdir` to go with it.~~ **done in 0.2.3.**
 
 **0.2.4 commands that are just commands.** `run bin/cat` is an
 embarrassment left over from when running a program was the

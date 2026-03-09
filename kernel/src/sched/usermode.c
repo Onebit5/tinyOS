@@ -125,6 +125,7 @@ static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
 }
 
 int user_spawn(const char *path, int argc, const char *const argv[],
+               const char *cwd,
                int parent, int uid, bool announce, const char **error) {
     reap_abandoned();
 
@@ -210,6 +211,14 @@ int user_spawn(const char *path, int argc, const char *const argv[],
     /* a program cannot ask to be somebody else: it runs as whoever
      * started it, and only the shell decides what that is */
     int pid = process_create(path, parent, uid, announce, pit_uptime_ms());
+
+    /* wherever whoever started it was standing. process_create already
+     * copies the parent's, which is right for a program spawning
+     * another -- but the shell is a kernel thread with no process entry
+     * of its own, so it says where it is explicitly */
+    if (pid != 0 && cwd != NULL) {
+        process_set_cwd(pid, cwd);
+    }
     if (pid == 0) {
         kfree(start);
         addrspace_destroy(space);
@@ -256,8 +265,9 @@ bool user_wait(int pid, int *code) {
 }
 
 bool user_run(const char *path, int argc, const char *const argv[],
+              const char *cwd,
               int uid, bool background, bool announce, const char **error) {
-    int pid = user_spawn(path, argc, argv, 0, uid, announce, error);
+    int pid = user_spawn(path, argc, argv, cwd, 0, uid, announce, error);
     if (pid == 0) {
         return false;
     }

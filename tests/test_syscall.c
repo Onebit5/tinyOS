@@ -172,6 +172,8 @@ bool disk_create(const char *path, struct disk_entry *out) {
     out->entry_sector = 200;
     return true;
 }
+bool disk_mkdir(const char *path) { (void)path; return disk_is_ready; }
+bool disk_rmdir(const char *path) { (void)path; return disk_is_ready; }
 int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
                       uint64_t len) {
     (void)buf;
@@ -198,10 +200,13 @@ int64_t tty_read_line(int pid, char *buf, uint64_t len) {
 static int spawned_parent = -1;
 static const char *spawned_path;
 static int spawned_uid = -1;
+static const char *spawned_cwd;
 int user_spawn(const char *path, int argc, const char *const argv[],
-               int parent, int uid, const char **error) {
-    (void)argc; (void)argv; (void)error;
+               const char *cwd, int parent, int uid, bool announce,
+               const char **error) {
+    (void)argc; (void)argv; (void)error; (void)announce;
     spawned_path = path; spawned_parent = parent; spawned_uid = uid;
+    spawned_cwd = cwd;
     return 77;
 }
 static int wait_code = 5;
@@ -493,6 +498,49 @@ int main(void) {
     CHECK(call5(SYS_READDIR, 0, (uint64_t)sink, 4, (uint64_t)page, 5) == 3,
           "a short buffer takes what fits");
     CHECK(strcmp(sink, "mot") == 0, "terminated, with nothing beyond it");
+    strcpy(page, "motd.txt");
+
+    /* ---- somewhere to stand ----
+     *
+     * every path that crosses this boundary is now read from wherever
+     * the caller happens to be, so the same six characters typed by two
+     * processes can mean two different files */
+    user_extra = (uint64_t)sink;
+    memset(sink, 0, sizeof sink);
+    CHECK(call3(SYS_GETCWD, (uint64_t)sink, sizeof sink, 0) == 1,
+          "a process starts at the root");
+    CHECK(strcmp(sink, "/") == 0, "which is spelled with one slash");
+
+    /* moving somewhere that is not there must fail rather than leaving
+     * the process standing nowhere -- every later name would resolve
+     * against a place that does not exist, and fail nowhere near here */
+    strcpy(page, "/nowhere");
+    CHECK(call3(SYS_CHDIR, (uint64_t)page, 8, 0) == -1,
+          "moving somewhere that is not there is refused");
+    memset(sink, 0, sizeof sink);
+    call3(SYS_GETCWD, (uint64_t)sink, sizeof sink, 0);
+    CHECK(strcmp(sink, "/") == 0, "and leaves me where I was");
+
+    strcpy(page, "/boot");
+    CHECK(call3(SYS_CHDIR, (uint64_t)page, 5, 0) == 0,
+          "and moving somewhere real is allowed");
+    memset(sink, 0, sizeof sink);
+    call3(SYS_GETCWD, (uint64_t)sink, sizeof sink, 0);
+    CHECK(strcmp(sink, "/boot") == 0, "which is then where I am");
+
+    /* and now a bare name means something different than it did */
+    strcpy(page, "motd.txt");
+    CHECK(call3(SYS_OPEN, (uint64_t)page, 8, 0) >= 0,
+          "a bare name is read from where I am standing");
+
+    /* back up, and out of the tree entirely: `..` from the root is the
+     * root, so this cannot name anything outside it */
+    strcpy(page, "../../..");
+    CHECK(call3(SYS_CHDIR, (uint64_t)page, 8, 0) == 0, "climbing out is fine");
+    memset(sink, 0, sizeof sink);
+    call3(SYS_GETCWD, (uint64_t)sink, sizeof sink, 0);
+    CHECK(strcmp(sink, "/") == 0, "and lands at the root, not above it");
+
     strcpy(page, "motd.txt");
 
     /* ---- exit ---- */

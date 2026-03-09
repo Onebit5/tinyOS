@@ -873,6 +873,151 @@ bool fat32_create(struct fat32 *fs, const char *path, struct fat32_file *out) {
     return true;
 }
 
+/* ---- directories ---------------------------------------------------- */
+
+/* a fresh cluster with nothing in it, which for a directory means every
+ * byte zero -- the first zero byte is what says "no more entries" */
+static bool blank_cluster(struct fat32 *fs, uint32_t cluster) {
+    memset(fs->scratch, 0, FAT32_SECTOR);
+    for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
+        if (!write_sector(fs, cluster_lba(fs, cluster) + s, fs->scratch)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool fat32_mkdir(struct fat32 *fs, const char *path) {
+    if (!fs->mounted || fs->write == NULL) {
+        return false;
+    }
+
+    /* where it goes, and what it is called */
+    const char *name = path;
+    for (const char *p = path; *p != '\0'; p++) {
+        if (*p == '/') {
+            name = p + 1;
+        }
+    }
+    if (*name == '\0') {
+        return false;
+    }
+
+    char parent[FAT32_NAME_MAX];
+    size_t plen = (size_t)(name - path);
+    if (plen >= sizeof parent) {
+        return false;
+    }
+    memcpy(parent, path, plen);
+    parent[plen] = '\0';
+
+    struct fat32_file dir;
+    if (!fat32_lookup(fs, parent, &dir) || !dir.is_dir) {
+        return false;
+    }
+
+    struct fat32_file existing;
+    if (find_in(fs, dir.first_cluster, name, &existing)) {
+        return false;       /* something is already called that */
+    }
+
+    uint8_t short11[11];
+    uint8_t case_bits;
+    if (!to_short(name, short11, &case_bits)) {
+        return false;
+    }
+
+    uint32_t cluster = alloc_cluster(fs);
+    if (cluster == 0 || !blank_cluster(fs, cluster)) {
+        return false;
+    }
+
+    /* every directory but the root begins with two entries: itself, and
+     * whatever it hangs from. the root is written as cluster 0 in the
+     * second one -- a convention rather than a real cluster number,
+     * which is why looking one up has to translate it back */
+    memset(fs->scratch, 0, FAT32_SECTOR);
+    uint8_t *dot = fs->scratch;
+    memcpy(dot, ".          ", 11);
+    dot[11] = FAT32_ATTR_DIRECTORY;
+    wr16(&dot[20], (uint16_t)(cluster >> 16));
+    wr16(&dot[26], (uint16_t)(cluster & 0xffff));
+
+    uint8_t *dotdot = fs->scratch + 32;
+    memcpy(dotdot, "..         ", 11);
+    dotdot[11] = FAT32_ATTR_DIRECTORY;
+    uint32_t up = (dir.first_cluster == fs->root_cluster) ? 0 : dir.first_cluster;
+    wr16(&dotdot[20], (uint16_t)(up >> 16));
+    wr16(&dotdot[26], (uint16_t)(up & 0xffff));
+
+    if (!write_sector(fs, cluster_lba(fs, cluster), fs->scratch)) {
+        return false;
+    }
+
+    /* and the entry in the parent that makes it findable */
+    uint64_t lba;
+    uint32_t off;
+    if (!free_slot(fs, dir.first_cluster, &lba, &off)) {
+        return false;
+    }
+    if (!read_sector(fs, lba, fs->scratch)) {
+        return false;
+    }
+    uint8_t *entry = &fs->scratch[off];
+    memset(entry, 0, 32);
+    memcpy(entry, short11, 11);
+    entry[11] = FAT32_ATTR_DIRECTORY;
+    entry[12] = case_bits;
+    wr16(&entry[20], (uint16_t)(cluster >> 16));
+    wr16(&entry[26], (uint16_t)(cluster & 0xffff));
+    return write_sector(fs, lba, fs->scratch);
+}
+
+bool fat32_rmdir(struct fat32 *fs, const char *path) {
+    if (!fs->mounted || fs->write == NULL) {
+        return false;
+    }
+
+    struct fat32_file d;
+    if (!fat32_lookup(fs, path, &d) || !d.is_dir) {
+        return false;
+    }
+    if (d.first_cluster == fs->root_cluster || d.entry_sector == 0) {
+        return false;       /* the root is nobody's to remove */
+    }
+
+    /* it has to be empty. dot and dotdot are skipped by readdir, which
+     * is exactly the question being asked here */
+    struct fat32_file ignored;
+    if (fat32_readdir(fs, d.first_cluster, 0, &ignored)) {
+        return false;
+    }
+
+    /* let the clusters go, following the chain rather than assuming one */
+    uint32_t cluster = d.first_cluster;
+    while (cluster_ok(fs, cluster)) {
+        uint32_t next;
+        if (!fat_get(fs, cluster, &next)) {
+            break;
+        }
+        if (!fat_set(fs, cluster, 0)) {
+            return false;
+        }
+        if (next >= EOC) {
+            break;
+        }
+        cluster = next;
+    }
+
+    /* and strike the entry out. 0xe5 is how fat has always said "this
+     * one is gone" without moving everything after it up */
+    if (!read_sector(fs, d.entry_sector, fs->scratch)) {
+        return false;
+    }
+    fs->scratch[d.entry_offset] = 0xe5;
+    return write_sector(fs, d.entry_sector, fs->scratch);
+}
+
 /* ---- how full it is ------------------------------------------------ */
 
 bool fat32_usage(struct fat32 *fs, uint32_t *used, uint32_t *total) {

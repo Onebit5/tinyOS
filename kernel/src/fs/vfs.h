@@ -67,6 +67,11 @@ bool vfs_readdir(const char *path, size_t index, struct vfs_file *out);
 /* make a file. only the disk can, and it says so when it cannot */
 bool vfs_create(const char *path, struct vfs_file *out);
 
+/* and directories. the ramdisk is a tar in read-only memory, so `/boot`
+ * refuses both -- there is nowhere for a new name to go */
+bool vfs_mkdir(const char *path);
+bool vfs_rmdir(const char *path);
+
 int64_t vfs_read(const struct vfs_file *f, uint64_t offset, void *buf,
                  uint64_t len);
 int64_t vfs_write(struct vfs_file *f, uint64_t offset, const void *buf,

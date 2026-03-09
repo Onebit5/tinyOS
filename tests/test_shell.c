@@ -86,6 +86,8 @@ int64_t disk_read(uint32_t c, uint64_t s, uint64_t o, void *b, uint64_t l) {
 bool disk_create(const char *path, struct disk_entry *out) {
     (void)path; (void)out; return false;
 }
+bool disk_mkdir(const char *path) { (void)path; return true; }
+bool disk_rmdir(const char *path) { (void)path; return true; }
 int64_t disk_write_at(struct disk_entry *e, uint64_t o, const void *b,
                       uint64_t l) {
     (void)e; (void)o; (void)b; (void)l; return -1;
@@ -155,7 +157,9 @@ static const char *ran_arg1;
 static int ran_uid = -1;
 static bool ran_announce;
 bool user_run(const char *path, int argc, const char *const argv[],
+              const char *cwd,
               int uid, bool background, bool announce, const char **error) {
+    (void)cwd;
     ran_uid = uid;
     ran_announce = announce;
     ran_path = path;

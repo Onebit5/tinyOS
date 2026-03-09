@@ -21,6 +21,10 @@
 #define SYS_READDIR 11
 #define SYS_GETUID 12
 #define SYS_CREATE 13
+#define SYS_CHDIR  14
+#define SYS_GETCWD 15
+#define SYS_MKDIR  16
+#define SYS_RMDIR  17
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -98,6 +102,21 @@ static inline long readdir_at(long n, char *buf, long len, const char *path) {
  * can do this -- the ramdisk is a tar file in read-only memory */
 static inline long create(const char *path) {
     return syscall2(SYS_CREATE, (long)path, (long)ustrlen(path));
+}
+
+/* where I am, and moving. every relative name a program uses is read
+ * from here, and it starts wherever whoever launched it was standing */
+static inline long chdir(const char *path) {
+    return syscall2(SYS_CHDIR, (long)path, (long)ustrlen(path));
+}
+static inline long getcwd(char *buf, long len) {
+    return syscall2(SYS_GETCWD, (long)buf, len);
+}
+static inline long mkdir(const char *path) {
+    return syscall2(SYS_MKDIR, (long)path, (long)ustrlen(path));
+}
+static inline long rmdir(const char *path) {
+    return syscall2(SYS_RMDIR, (long)path, (long)ustrlen(path));
 }
 
 /* ---- other programs ----------------------------------------------- */

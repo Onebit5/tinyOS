@@ -168,6 +168,26 @@ int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
     return n;
 }
 
+bool disk_mkdir(const char *path) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok = fat32_mkdir(&fs, below(path));
+    leave(flags);
+    return ok;
+}
+
+bool disk_rmdir(const char *path) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok = fat32_rmdir(&fs, below(path));
+    leave(flags);
+    return ok;
+}
+
 /* ---- what to say about it ------------------------------------------ */
 
 const char *disk_label(void) { return ready ? fs.label : ""; }

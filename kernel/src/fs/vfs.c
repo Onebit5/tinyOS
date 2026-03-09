@@ -97,18 +97,48 @@ bool vfs_open(const char *path, struct vfs_file *out) {
         return false;
     }
 
+    /* the root belongs to no filesystem either -- it is the place the
+     * mounts hang from, and something has to be able to say it is a
+     * directory or nobody can stand in it */
+    if (path[0] == '/' && path[1] == '\0') {
+        memset(out, 0, sizeof *out);
+        out->kind = VFS_DISK;
+        copy_name(out->name, "/");
+        out->is_dir = true;
+        out->mode = DISK_MODE;
+        return true;
+    }
+
     const char *rest;
     if (under_boot(path, &rest)) {
+        /* the mount point itself. it is on no filesystem: the ramdisk
+         * knows nothing called "boot", because /boot *is* the ramdisk */
+        if (rest[0] == '\0') {
+            memset(out, 0, sizeof *out);
+            out->kind = VFS_RAMDISK;
+            copy_name(out->name, VFS_BOOT + 1);
+            out->is_dir = true;
+            out->mode = 0555;
+            return true;
+        }
         return try_ramdisk(rest, out);
     }
 
     if (path[0] == '/') {
-        return try_disk(path, out);
+        /* the disk first, then the ramdisk with the leading slash taken
+         * off. that fallback used to apply only to names typed without
+         * a slash -- but every name arrives here absolute now, resolved
+         * against wherever the caller was standing, so it has to apply
+         * to all of them or nothing on the ramdisk is reachable at all */
+        if (try_disk(path, out)) {
+            return true;
+        }
+        return try_ramdisk(path + 1, out);
     }
 
-    /* a bare name: the disk first, so a disk can supply a newer copy of
-     * something, then the ramdisk, so a machine without one still finds
-     * everything it booted with */
+    /* a bare name from inside the kernel, which has no working
+     * directory of its own: the disk first, so a disk can supply a
+     * newer copy of something, then the ramdisk */
     char absolute[VFS_NAME_MAX + 1];
     absolute[0] = '/';
     copy_name(absolute + 1, path);
@@ -233,6 +263,22 @@ bool vfs_create(const char *path, struct vfs_file *out) {
     }
     from_disk(out, &e);
     return true;
+}
+
+bool vfs_mkdir(const char *path) {
+    const char *rest;
+    if (path == NULL || path[0] == '\0' || under_boot(path, &rest)) {
+        return false;       /* read-only memory has no room for a new name */
+    }
+    return disk_ready() && disk_mkdir(path);
+}
+
+bool vfs_rmdir(const char *path) {
+    const char *rest;
+    if (path == NULL || path[0] == '\0' || under_boot(path, &rest)) {
+        return false;
+    }
+    return disk_ready() && disk_rmdir(path);
 }
 
 int64_t vfs_read(const struct vfs_file *f, uint64_t offset, void *buf,

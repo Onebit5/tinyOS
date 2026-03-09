@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "fs/path.h"
 
 /* a process is a program someone started, and it outlives the thread
  * that ran it.
@@ -85,9 +86,21 @@ struct process {
     uint64_t started_ms;
     uint64_t ended_ms;
     struct fd fds[MAX_FDS];
+
+    /* where this process is standing. every relative name it uses is
+     * read from here, and it inherits whatever its parent was in --
+     * which is what makes `cd` somewhere and then running something
+     * mean what anybody would expect */
+    char cwd[PATH_MAX];
 };
 
 /* claim a slot. returns the new pid, or 0 if the table is full */
+/* where a process is standing, and moving it. an unknown pid is at the
+ * root, which is what the shell's own lookups want before anybody has
+ * said otherwise */
+const char *process_cwd(int pid);
+void        process_set_cwd(int pid, const char *path);
+
 int  process_create(const char *name, int parent, int uid, bool announce,
                     uint64_t now_ms);
 

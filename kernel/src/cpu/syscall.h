@@ -21,8 +21,12 @@
 #define SYS_READDIR 11  /* (n,buf,len,path,plen) -> name length, or -1 */
 #define SYS_GETUID 12   /* ()                 -> who this runs as      */
 #define SYS_CREATE 13   /* (path, len)        -> fd, for writing        */
+#define SYS_CHDIR  14   /* (path, len)        -> 0, or -1                */
+#define SYS_GETCWD 15   /* (buf, len)         -> length written          */
+#define SYS_MKDIR  16   /* (path, len)        -> 0, or -1                */
+#define SYS_RMDIR  17   /* (path, len)        -> 0, or -1                */
 
-#define SYSCALL_COUNT 14
+#define SYSCALL_COUNT 18
 
 /* wire up STAR/LSTAR/SFMASK and turn on EFER.SCE */
 void syscall_init(void);

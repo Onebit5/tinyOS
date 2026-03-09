@@ -14,6 +14,7 @@
 #include "sched/usermode.h"
 #include "mm/addrspace.h"
 #include "fs/vfs.h"
+#include "fs/path.h"
 #include "drivers/tty.h"
 #include "sched/auth.h"
 #include "lib/string.h"
@@ -33,7 +34,7 @@ static uint64_t call_counts[SYSCALL_COUNT];
 static const char *const call_names[SYSCALL_COUNT] = {
     "exit", "write", "read", "uptime", "yield", "sleep",
     "open", "close", "getpid", "spawn", "wait", "readdir", "getuid",
-    "create",
+    "create", "chdir", "getcwd", "mkdir", "rmdir",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -118,6 +119,19 @@ static bool copy_path(uint64_t ptr, uint64_t len, char *out, size_t max) {
     }
     out[len] = '\0';
     return true;
+}
+
+/* a path, as the caller wrote it, flattened against where the caller is
+ * standing. every name that crosses this boundary goes through here --
+ * relative or absolute, `..` and all -- so that no filesystem below ever
+ * sees a path that means something different depending on who asked */
+static bool copy_path_resolved(uint64_t ptr, uint64_t len,
+                               char *out, size_t size) {
+    char raw[PATH_MAX];
+    if (!copy_path(ptr, len, raw, sizeof raw)) {
+        return false;
+    }
+    return path_resolve(process_cwd(caller_pid()), raw, out, size);
 }
 
 static int64_t sys_write_console(uint64_t ptr, uint64_t len);
@@ -232,8 +246,8 @@ static int64_t sys_read(uint64_t fd, uint64_t ptr, uint64_t len) {
 }
 
 static int64_t sys_open(uint64_t ptr, uint64_t len) {
-    char path[64];
-    if (!copy_path(ptr, len, path, sizeof path)) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
         return -1;
     }
 
@@ -264,8 +278,8 @@ static int64_t sys_open(uint64_t ptr, uint64_t len) {
  * ramdisk cannot do this and says so -- it is a tar file in read-only
  * memory, and there is nowhere for a new file to go */
 static int64_t sys_create(uint64_t ptr, uint64_t len) {
-    char path[64];
-    if (!copy_path(ptr, len, path, sizeof path)) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
         return -1;
     }
     if (process_uid(caller_pid()) != 0) {
@@ -282,6 +296,68 @@ static int64_t sys_create(uint64_t ptr, uint64_t len) {
                                 f.entry_sector, f.entry_offset);
 }
 
+/* ---- where a process is standing ---- */
+
+static int64_t sys_chdir(uint64_t ptr, uint64_t len) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+
+    /* it has to exist and it has to be a directory -- otherwise every
+     * name used afterwards would resolve against somewhere that is not
+     * there, and fail for a reason nowhere near the mistake */
+    struct vfs_file f;
+    if (!path_is_root(path)) {
+        if (!vfs_open(path, &f) || !f.is_dir) {
+            return -1;
+        }
+    }
+
+    process_set_cwd(caller_pid(), path);
+    return 0;
+}
+
+static int64_t sys_getcwd(uint64_t ptr, uint64_t len) {
+    if (len == 0 || !user_range_ok(ptr, len)) {
+        return -1;
+    }
+    const char *here = process_cwd(caller_pid());
+    uint64_t n = strlen(here);
+    if (n >= len) {
+        n = len - 1;
+    }
+    memcpy((void *)ptr, here, n);
+    ((char *)ptr)[n] = '\0';
+    return (int64_t)n;
+}
+
+static int64_t sys_mkdir(uint64_t ptr, uint64_t len) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    if (process_uid(caller_pid()) != 0) {
+        kprintf("[kernel] pid %d (uid %d) may not make directories\n",
+                caller_pid(), process_uid(caller_pid()));
+        return -1;
+    }
+    return vfs_mkdir(path) ? 0 : -1;
+}
+
+static int64_t sys_rmdir(uint64_t ptr, uint64_t len) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    if (process_uid(caller_pid()) != 0) {
+        kprintf("[kernel] pid %d (uid %d) may not remove directories\n",
+                caller_pid(), process_uid(caller_pid()));
+        return -1;
+    }
+    return vfs_rmdir(path) ? 0 : -1;
+}
+
 /* the nth file in the ramdisk, by name. this is the whole of readdir:
  * there are no directories to descend into, so an index and a name is
  * the entire interface. `ls` needed exactly this and nothing else --
@@ -295,9 +371,20 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr, uint64_t len,
     /* no path means the root, which is where anyone looking around
      * would start. there is only one namespace now, so this needs no
      * idea of which filesystem it is walking */
-    char path[64] = "/";
-    if (path_len > 0 && !copy_path(path_ptr, path_len, path, sizeof path)) {
+    char path[PATH_MAX] = "/";
+    if (path_len > 0
+        && !copy_path_resolved(path_ptr, path_len, path, sizeof path)) {
         return -1;
+    }
+    if (path_len == 0) {
+        /* no path means "where I am", which is now a real answer */
+        const char *here = process_cwd(caller_pid());
+        size_t i = 0;
+        while (here[i] != '\0' && i < sizeof path - 1) {
+            path[i] = here[i];
+            i++;
+        }
+        path[i] = '\0';
     }
 
     struct vfs_file f;
@@ -325,8 +412,8 @@ static int64_t sys_readdir(uint64_t index, uint64_t ptr, uint64_t len,
 }
 
 static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
-    char path[64];
-    if (!copy_path(ptr, len, path, sizeof path)) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
         return -1;
     }
     /* a spawned program gets its own path as argv[0], the way a shell
@@ -337,7 +424,7 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
      * could pick its own user would make the whole idea decorative */
     const char *why = NULL;
     const char *argv[1] = { path };
-    int pid = user_spawn(path, 1, argv, caller_pid(),
+    int pid = user_spawn(path, 1, argv, process_cwd(caller_pid()), caller_pid(),
                          process_uid(caller_pid()), false, &why);
     return (pid == 0) ? -1 : pid;
 }
@@ -394,6 +481,14 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_readdir(a0, a1, a2, a3, a4);
     case SYS_CREATE:
         return sys_create(a0, a1);
+    case SYS_CHDIR:
+        return sys_chdir(a0, a1);
+    case SYS_GETCWD:
+        return sys_getcwd(a0, a1);
+    case SYS_MKDIR:
+        return sys_mkdir(a0, a1);
+    case SYS_RMDIR:
+        return sys_rmdir(a0, a1);
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

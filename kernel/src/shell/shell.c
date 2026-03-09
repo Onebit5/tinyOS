@@ -15,6 +15,7 @@
 #include "fs/ramdisk.h"
 #include "fs/disk.h"
 #include "fs/vfs.h"
+#include "fs/path.h"
 #include "drivers/ahci.h"
 #include "cpu/smp.h"
 #include "sched/usermode.h"
@@ -54,6 +55,12 @@ static void launch(const char *path, int argc, char **argv, bool announce);
  * and nothing in ring 3 can reach in and change it */
 static int current_uid;
 static char current_user[AUTH_NAME_MAX] = "nobody";
+
+/* where the shell is standing. it is a kernel thread rather than a
+ * process, so it keeps its own -- and hands it to everything it starts,
+ * which is what makes `cd` somewhere and then running something mean
+ * what anybody would expect it to */
+static char shell_cwd[PATH_MAX] = "/";
 static size_t common_prefix(const char *a, const char *b);
 
 /* ---- the personas one may summon ---------------------------------- */
@@ -202,6 +209,43 @@ static void cmd_disk(int argc, char **argv) {
 
     kprintf("\ntry: ls, cat welcome.txt, write /notes.txt "
             "something worth keeping\n");
+}
+
+static void cmd_cd(int argc, char **argv) {
+    /* a builtin, and it has to be: a program runs as its own process
+     * with its own working directory, so a `cd` that was a program
+     * would change where *it* was standing and then exit */
+    const char *want = (argc > 1) ? argv[1] : "/";
+
+    char resolved[PATH_MAX];
+    if (!path_resolve(shell_cwd, want, resolved, sizeof resolved)) {
+        kprintf("that path is longer than I can hold\n");
+        return;
+    }
+
+    if (!path_is_root(resolved)) {
+        struct vfs_file f;
+        if (!vfs_open(resolved, &f)) {
+            kprintf("%s: no such place\n", resolved);
+            return;
+        }
+        if (!f.is_dir) {
+            kprintf("%s is a file, not somewhere to stand\n", resolved);
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < sizeof shell_cwd; i++) {
+        shell_cwd[i] = resolved[i];
+        if (resolved[i] == '\0') {
+            break;
+        }
+    }
+}
+
+static void cmd_pwd(int argc, char **argv) {
+    (void)argc; (void)argv;
+    kprintf("%s\n", shell_cwd);
 }
 
 static void cmd_locks(int argc, char **argv) {
@@ -474,7 +518,7 @@ static void launch(const char *path, int argc, char **argv, bool announce) {
     }
 
     const char *why = NULL;
-    if (!user_run(path, argc, (const char *const *)argv,
+    if (!user_run(path, argc, (const char *const *)argv, shell_cwd,
                   current_uid, background, announce, &why)) {
         if (why == USER_RUN_NO_SUCH_FILE) {
             missing("run", path);
@@ -859,6 +903,8 @@ static const struct command commands[] = {
     { "mount",  "which filesystem is where",            cmd_mount, false },
     { "cpus",   "the processors, and which are awake",  cmd_cpus, false },
     { "locks",  "what guards what, and what waits",     cmd_locks, false },
+    { "cd",     "go somewhere; no argument means the root", cmd_cd, true },
+    { "pwd",    "where I am standing",                  cmd_pwd, false },
     { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
     { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
     { "vmm",    "what the page tables say about an address", cmd_vmm, false },
@@ -990,7 +1036,8 @@ static void run_line(char *line) {
 
 static void prompt(void) {
     console_set_colors(COLOR_PROMPT, 0x101018);
-    kprintf("%s@velvet%s ", current_user, current_uid == 0 ? "#" : "$");
+    kprintf("%s@velvet:%s%s ", current_user, shell_cwd,
+            current_uid == 0 ? "#" : "$");
     console_set_colors(COLOR_TEXT, 0x101018);
 }
 
