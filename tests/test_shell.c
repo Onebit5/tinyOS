@@ -292,14 +292,47 @@ int main(void) {
      * should look no different, but it launches something in ring 3 */
     ran_path = NULL;
     run("echo thou art I");
-    CHECK(ran_path && strcmp(ran_path, "bin/echo") == 0,
-          "echo is a program now, found in bin/");
+    CHECK(ran_path && strcmp(ran_path, "/bin/echo") == 0,
+          "echo is a program now, found on the search path");
     CHECK(ran_argc == 4, "and gets all its words");
 
     ran_path = NULL;
     run("uptime");
-    CHECK(ran_path && strcmp(ran_path, "bin/uptime") == 0,
+    CHECK(ran_path && strcmp(ran_path, "/bin/uptime") == 0,
           "and so is uptime");
+
+    /* help is one list now: builtins and programs together, because
+     * from where anybody is sitting there is one kind of thing here --
+     * a word you type */
+    out_reset();
+    run("help");
+    CHECK(strstr(out, "cd") != NULL, "help lists a builtin");
+    CHECK(strstr(out, ". echo") != NULL,
+          "and a program, marked as one rather than filed separately");
+    CHECK(strstr(out, "/bin") != NULL && strstr(out, "/boot/bin") != NULL,
+          "and says where it looked, in order");
+    CHECK(strstr(out, "built into the kernel") == NULL,
+          "with no separate heading to look under any more");
+
+    /* a word with a slash in it is a path, taken exactly as written and
+     * not searched for anywhere. `./x` is how you say "the one here" */
+    ran_path = NULL;
+    run("/boot/bin/echo hello");
+    CHECK(ran_path && strcmp(ran_path, "/boot/bin/echo") == 0,
+          "a full path runs exactly what it names");
+
+    ran_path = NULL;
+    run("bin/echo hello");
+    CHECK(ran_path && strcmp(ran_path, "/bin/echo") == 0,
+          "and a relative one is read from where I am standing");
+
+    /* a name that is on no search path is not a command, however much
+     * it looks like a file. the working directory is deliberately not
+     * searched: a program left lying about must not become a verb */
+    ran_path = NULL;
+    out_reset();
+    run("motd.txt");
+    CHECK(ran_path == NULL, "a file that is not on the path is not a command");
 
     run("");
     CHECK(out_len == 0, "empty line does nothing at all");
@@ -462,6 +495,13 @@ int main(void) {
         out_reset();
         complete(line, &len, &pos);
         CHECK(out_len > 0, "and so does run<tab>");
+
+        /* a program completes in the command position, the same as a
+         * builtin does -- they are the same kind of thing to type */
+        strcpy(line, "upt"); len = 3; pos = 3;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "uptime") == 0, "a program name completes");
 
         /* ---- completing onto the disk ----
          * the ramdisk is flat and has no leading slash on anything, so
@@ -675,11 +715,11 @@ int main(void) {
      * is their own business, and tested where they live */
     ran_path = NULL;
     run("ls");
-    CHECK(ran_path && strcmp(ran_path, "bin/ls") == 0, "ls is a program now");
+    CHECK(ran_path && strcmp(ran_path, "/bin/ls") == 0, "ls is a program now");
 
     ran_path = NULL;
     run("cat motd.txt");
-    CHECK(ran_path && strcmp(ran_path, "bin/cat") == 0, "and so is cat");
+    CHECK(ran_path && strcmp(ran_path, "/bin/cat") == 0, "and so is cat");
 
     /* typing a program by name wants its output, not a commentary on
      * it. running one deliberately is a demonstration, and the
@@ -750,11 +790,12 @@ int main(void) {
     CHECK(ran_background && ran_argc == 2,
           "and the & is taken off rather than passed along as one");
 
-    /* an unknown command is looked for in bin/, which is how a moved
-     * command keeps working without the shell knowing it moved */
+    /* an unknown command is looked for on the search path, which is how
+     * a command that moved keeps working without the shell knowing it
+     * moved -- and how one on the disk becomes a command at all */
     ran_path = NULL;
     run("cat motd.txt");
-    CHECK(ran_path && strcmp(ran_path, "bin/cat") == 0,
+    CHECK(ran_path && strcmp(ran_path, "/bin/cat") == 0,
           "an unknown command is looked for as a program");
     CHECK(ran_argc == 2 && ran_arg1 && strcmp(ran_arg1, "motd.txt") == 0,
           "with its arguments");

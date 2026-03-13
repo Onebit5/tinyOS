@@ -182,11 +182,17 @@ bool vfs_readdir(const char *path, size_t index, struct vfs_file *out) {
 
     const char *rest;
     if (under_boot(path, &rest)) {
-        /* the ramdisk is flat: an index and a name is the whole of it,
-         * and there is nothing to descend into */
-        if (rest[0] != '\0') {
-            return false;
+        /* the ramdisk is flat -- its names contain slashes rather than
+         * living in directories. listing its root shows them whole, the
+         * way it always has. listing a directory *inside* it means
+         * picking the names that begin with that prefix and showing
+         * only what follows, so that /boot/bin is a real place even
+         * though nothing on the archive says it is one */
+        size_t prefix = 0;
+        while (rest[prefix] != '\0') {
+            prefix++;
         }
+
         struct ramdisk_file f;
         size_t seen = 0;
         for (size_t i = 0; ramdisk_stat(i, &f); i++) {
@@ -195,6 +201,26 @@ bool vfs_readdir(const char *path, size_t index, struct vfs_file *out) {
             if (v.name[0] == '\0' || v.is_dir) {
                 continue;       /* tar's directory records lead nowhere */
             }
+
+            if (prefix > 0) {
+                size_t k = 0;
+                while (k < prefix && v.name[k] == rest[k]) {
+                    k++;
+                }
+                if (k != prefix || v.name[prefix] != '/') {
+                    continue;   /* somewhere else entirely */
+                }
+                /* shift the name down to what it is called *here* */
+                size_t w = 0;
+                for (size_t r = prefix + 1; v.name[r] != '\0'; r++) {
+                    v.name[w++] = v.name[r];
+                }
+                v.name[w] = '\0';
+                if (w == 0) {
+                    continue;
+                }
+            }
+
             if (seen++ == index) {
                 *out = v;
                 return true;

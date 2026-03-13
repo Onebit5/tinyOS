@@ -264,6 +264,27 @@ int main(void) {
 
     CHECK(!vfs_readdir("bootleg", 0, &f), "but bootleg is still not boot");
 
+    /* ---- a directory inside the ramdisk ----
+     *
+     * the archive is flat: it holds a name like "bin/hello", not a
+     * directory called bin with a hello in it. but /boot/bin/hello can
+     * be opened, so /boot/bin has to be listable too, or the namespace
+     * says two different things depending on which question is asked */
+    count = 0;
+    int saw_bare_hello = 0;
+    for (size_t i = 0; vfs_readdir("/boot/bin", i, &f); i++) {
+        if (strcmp(f.name, "hello") == 0) saw_bare_hello = 1;
+        count++;
+    }
+    CHECK(count == 1, "a directory inside the ramdisk lists what is in it");
+    CHECK(saw_bare_hello,
+          "under the name it has there, not the one the archive stores");
+    CHECK(vfs_open("/boot/bin/hello", &f),
+          "and the same name opens, which is the point");
+
+    CHECK(!vfs_readdir("/boot/nothing", 0, &f),
+          "a directory that is in no name lists nothing");
+
     /* ---- permissions still come off the file ---- */
 
     CHECK(vfs_open("/boot/secret.txt", &f), "a private file is found");

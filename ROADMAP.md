@@ -140,11 +140,11 @@ is the thing in the way.
 it -- `..` included, which the vfs currently throws away. `mkdir` and
 `rmdir` to go with it.~~ **done in 0.2.3.**
 
-**0.2.4 commands that are just commands.** `run bin/cat` is an
+**0.2.4 commands that are just commands.** ~~`run bin/cat` is an
 embarrassment left over from when running a program was the
 demonstration. a program should be typed by its name. the shell learns
 where to look, `run` survives only for saying explicitly what to run,
-and the two lists in `help` become one.
+and the two lists in `help` become one.~~ **done in 0.2.4.**
 
 **0.2.5 arguments worth parsing.** every program parses argv by hand
 and none of them agree. a small getopt in the user library: `-v`,

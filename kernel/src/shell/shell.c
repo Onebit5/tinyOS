@@ -49,6 +49,65 @@ struct command {
 
 static const struct command commands[];    /* defined below, after the handlers */
 static void run_argv(int argc, char **argv);
+
+/* where the shell is standing. declared here because looking a command
+ * up has to read it, and that happens before the editing code that owns
+ * the rest of the shell's state */
+static char shell_cwd[PATH_MAX];
+
+/* where a bare command name is looked for, in order.
+ *
+ * the working directory is deliberately not on this list. a name typed
+ * on its own should mean the same thing wherever you happen to be
+ * standing, and a program left lying in a directory should not quietly
+ * become a command there. say `./name` if that is what you mean -- and
+ * anything with a slash in it is taken as a path and looked for exactly
+ * where it says. */
+static const char *const command_path[] = { "/bin", "/boot/bin", NULL };
+
+/* turn a typed word into a program to run. `out` comes back holding an
+ * absolute path. false means there is no such program anywhere I look */
+static bool find_program(const char *word, char *out, size_t size) {
+    bool has_slash = false;
+    for (const char *p = word; *p != '\0'; p++) {
+        if (*p == '/') {
+            has_slash = true;
+            break;
+        }
+    }
+
+    struct vfs_file f;
+
+    /* a path is a path: taken literally, read from where I am standing,
+     * and not searched for anywhere else */
+    if (has_slash) {
+        if (!path_resolve(shell_cwd, word, out, size)) {
+            return false;
+        }
+        return vfs_open(out, &f) && !f.is_dir;
+    }
+
+    for (int i = 0; command_path[i] != NULL; i++) {
+        char joined[PATH_MAX];
+        size_t n = 0;
+        for (const char *p = command_path[i]; *p != '\0' && n < sizeof joined - 2; p++) {
+            joined[n++] = *p;
+        }
+        joined[n++] = '/';
+        for (const char *p = word; *p != '\0' && n < sizeof joined - 1; p++) {
+            joined[n++] = *p;
+        }
+        joined[n] = '\0';
+
+        if (!path_resolve("/", joined, out, size)) {
+            continue;
+        }
+        if (vfs_open(out, &f) && !f.is_dir) {
+            return true;
+        }
+    }
+    return false;
+}
 static void launch(const char *path, int argc, char **argv, bool announce);
 
 /* who is at the keyboard. every program the shell starts inherits it,
@@ -56,11 +115,13 @@ static void launch(const char *path, int argc, char **argv, bool announce);
 static int current_uid;
 static char current_user[AUTH_NAME_MAX] = "nobody";
 
-/* where the shell is standing. it is a kernel thread rather than a
- * process, so it keeps its own -- and hands it to everything it starts,
- * which is what makes `cd` somewhere and then running something mean
- * what anybody would expect it to */
-static char shell_cwd[PATH_MAX] = "/";
+/* it is a kernel thread rather than a process, so it keeps its own --
+ * and hands it to everything it starts, which is what makes `cd`
+ * somewhere and then running something mean what anybody would expect */
+static void shell_cwd_init(void) {
+    shell_cwd[0] = '/';
+    shell_cwd[1] = '\0';
+}
 static size_t common_prefix(const char *a, const char *b);
 
 /* ---- the personas one may summon ---------------------------------- */
@@ -109,34 +170,67 @@ static void persona_thread(void *arg) {
 static void cmd_help(int argc, char **argv) {
     (void)argc; (void)argv;
 
-    kprintf("built into the kernel, because they need to be:\n");
+    /* one list, because from where anybody is sitting there is one kind
+     * of thing here: a word you type. whether it runs inside the kernel
+     * or out in ring 3 with an address space of its own is a fact about
+     * how it is built, not about how it is used -- so it is a mark in
+     * the margin rather than a heading to look under */
+    kprintf("everything you can type. a dot is a program: it runs in\n");
+    kprintf("ring 3, in memory of its own, and can touch nothing it was\n");
+    kprintf("not given.\n\n");
+
     for (const struct command *c = commands; c->name; c++) {
-        kprintf("  %s", c->name);
-        for (size_t i = strlen(c->name); i < 9; i++) {
+        kprintf("   %s", c->name);
+        for (size_t i = strlen(c->name); i < 10; i++) {
             kprintf(" ");
         }
         kprintf("%s\n", c->help);
     }
 
-    /* and everything that did not need to be. typing one of these
-     * looks no different, but it runs in ring 3 with an address space
-     * of its own and can touch nothing it was not given */
-    struct ramdisk_file f;
-    bool any = false;
-    for (size_t i = 0; ramdisk_stat(i, &f); i++) {
-        const char *n = f.name;
-        if (n[0] == '.' && n[1] == '/') n += 2;
-        if (n[0] != 'b' || n[1] != 'i' || n[2] != 'n' || n[3] != '/') continue;
-        if (n[4] == '\0') continue;
-        if (!any) {
-            kprintf("\nprograms in ring 3, run by name:\n ");
-            any = true;
+    /* the path in order, and a name seen once is not shown again: a
+     * program earlier on the path hides one later, exactly as running
+     * it would, and saying it twice would suggest otherwise */
+    char shown[32][24];
+    size_t count = 0;
+
+    for (int d = 0; command_path[d] != NULL; d++) {
+        struct vfs_file f;
+        for (size_t i = 0; vfs_readdir(command_path[d], i, &f); i++) {
+            if (f.is_dir || f.name[0] == '\0') {
+                continue;
+            }
+            bool already = false;
+            for (size_t k = 0; k < count; k++) {
+                if (strcmp(shown[k], f.name) == 0) {
+                    already = true;
+                    break;
+                }
+            }
+            if (already) {
+                continue;
+            }
+            if (count < 32) {
+                size_t w = 0;
+                while (f.name[w] != '\0' && w < sizeof shown[0] - 1) {
+                    shown[count][w] = f.name[w];
+                    w++;
+                }
+                shown[count][w] = '\0';
+                count++;
+            }
+            kprintf(" . %s\n", f.name);
         }
-        kprintf(" %s", n + 4);
     }
-    if (any) {
-        kprintf("\n");
+
+    kprintf("\nlooked for in");
+    for (int d = 0; command_path[d] != NULL; d++) {
+        kprintf(" %s", command_path[d]);
     }
+    kprintf(", in that order. a name with a slash\n");
+    kprintf("in it is a path instead, taken exactly as written -- so "
+            "`./thing`\n");
+    kprintf("runs the one here, and nothing here is a command by "
+            "accident.\n");
 }
 
 static void cmd_clear(int argc, char **argv) {
@@ -959,23 +1053,16 @@ static void run_argv(int argc, char **argv) {
             return;
         }
     }
-    /* not a builtin. before deciding it is nothing, look for a program
-     * of that name -- which is how `cat` and `echo` keep working after
-     * moving out of the kernel and into ramdisk/bin */
+    /* not a builtin. before deciding it is nothing, go and look for a
+     * program of that name -- on the search path if it is a bare word,
+     * or exactly where it says if it has a slash in it */
     {
-        char path[64] = "bin/";
-        size_t n = strlen(argv[0]);
-        if (n + 4 < sizeof path) {
-            for (size_t i = 0; i <= n; i++) {
-                path[4 + i] = argv[0][i];
-            }
-            struct ramdisk_file f;
-            if (ramdisk_open(path, &f)) {
-                /* typed by name rather than through `run`: they want
-                 * the program's output, not a commentary on it */
-                launch(path, argc, argv, false);
-                return;
-            }
+        char path[PATH_MAX];
+        if (find_program(argv[0], path, sizeof path)) {
+            /* typed by name rather than through `run`: they want the
+             * program's output, not a commentary on it */
+            launch(path, argc, argv, false);
+            return;
         }
     }
 
@@ -1189,25 +1276,28 @@ static void replace_word(char *line, size_t *len, size_t *pos,
     move_left((*len > was ? *len : was) - *pos);
 }
 
-/* does the line start with the name of a program in bin/? */
+/* does the line start with the name of a program? the same question
+ * run_argv asks, answered the same way, so completion offers filenames
+ * after exactly the words that will actually run something */
 static bool first_word_is_program(const char *line) {
     size_t i = 0;
     while (line[i] == ' ') i++;
     size_t start = i;
     while (line[i] != '\0' && line[i] != ' ') i++;
 
-    char path[64] = "bin/";
     size_t n = i - start;
-    if (n == 0 || n + 4 >= sizeof path) {
+    if (n == 0 || n >= PATH_MAX) {
         return false;
     }
-    for (size_t k = 0; k < n; k++) {
-        path[4 + k] = line[start + k];
-    }
-    path[4 + n] = '\0';
 
-    struct ramdisk_file f;
-    return ramdisk_open(path, &f);
+    char word[PATH_MAX];
+    for (size_t k = 0; k < n; k++) {
+        word[k] = line[start + k];
+    }
+    word[n] = '\0';
+
+    char path[PATH_MAX];
+    return find_program(word, path, sizeof path);
 }
 
 /* which command the line begins with, or NULL if it is not one I know.
@@ -1330,6 +1420,32 @@ static void gather(struct candidates *c, const char *line, size_t start,
             if (strlen(cmd->name) >= plen
                 && common_prefix(cmd->name, prefix) >= plen) {
                 add_candidate(c, cmd->name, NULL, false);
+            }
+        }
+
+        /* and the programs, because they are commands too now -- a
+         * completion that offered only the builtins would be drawing a
+         * line the rest of this version just spent its time rubbing out */
+        for (int d = 0; command_path[d] != NULL; d++) {
+            struct vfs_file f;
+            for (size_t i = 0; vfs_readdir(command_path[d], i, &f); i++) {
+                if (f.is_dir || f.name[0] == '\0') {
+                    continue;
+                }
+                size_t n = strlen(f.name);
+                if (n < plen || common_prefix(f.name, prefix) < plen) {
+                    continue;
+                }
+                bool already = false;
+                for (int k = 0; k < c->count; k++) {
+                    if (strcmp(c->items[k], f.name) == 0) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already) {
+                    add_candidate(c, f.name, NULL, false);
+                }
             }
         }
         return;
@@ -1540,6 +1656,8 @@ static void cmd_logout(int argc, char **argv) {
 }
 
 void shell_run(void) {
+    shell_cwd_init();
+
     char line[LINE_MAX];
 
     console_set_colors(COLOR_TEXT, 0x101018);

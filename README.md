@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.3** (**somewhere to stand.** a working directory per process, every name read from it, and `..` finally meaning something)
+**version: 0.2.4** (**commands that are just commands.** a search path, so a program is typed by its name from anywhere -- and one list in `help`, because there is one kind of thing to type)
 
 ## what it does
 
@@ -40,6 +40,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] real locks, in ranked order, and a test that can see a race
 - [x] every core running threads, and tlb shootdown between them
 - [x] a working directory, `cd`, `pwd`, and directories that can be made
+- [x] a search path, and `help` that stopped dividing the world in two
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -205,6 +206,36 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### commands that are just commands
+
+typing a program by its name has worked since 0.1.4, but only by a trick:
+the shell stuck `bin/` on the front and asked the *ramdisk* directly,
+going around the vfs entirely. so a program on the disk could never be a
+command, and `./thing` meant nothing at all.
+
+there is a search path now -- `/bin`, then `/boot/bin` -- looked up
+through the vfs like everything else, so a disk can supply a command and
+a name earlier on the path hides one later. **the working directory is
+deliberately not on it.** a name typed on its own should mean the same
+thing wherever you happen to be standing, and a program left lying in a
+directory should not quietly become a verb there. say `./thing` if that
+is what you mean: anything with a slash in it is a path, read from where
+you are and taken exactly as written.
+
+`help` is one list now. whether something runs inside the kernel or out
+in ring 3 with an address space of its own is a fact about how it was
+built, not about how it is used -- so it is a dot in the margin rather
+than a heading to look under. completion offers both, for the same
+reason: a completion that knew only the builtins would be redrawing the
+line the rest of this version spent its time rubbing out.
+
+one asymmetry had to go to make it work. the ramdisk is a flat archive
+-- it holds a name like `bin/hello`, not a directory called `bin` with a
+`hello` in it -- so `/boot/bin/hello` could be *opened* while `/boot/bin`
+could not be *listed*. a namespace that answers two different questions
+two different ways is one you cannot build on, so listing a directory
+inside it now picks the names that begin with it and shows what follows.
 
 ### somewhere to stand
 
@@ -929,6 +960,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.4** — a real search path. typing a program by name had worked since 0.1.4, but by sticking `bin/` on the front and asking the ramdisk directly, around the vfs -- so a program on the disk could never be a command and `./thing` meant nothing. now `/bin` then `/boot/bin`, through the vfs, with a name earlier on the path hiding one later; the working directory is deliberately *not* on it, because a name typed alone should mean the same thing wherever you stand and a program left lying about should not become a verb. anything with a slash is a path, read from where you are. `help` is one list with a dot in the margin for the ring 3 ones, and completion offers both. one asymmetry had to go for any of it to work: the ramdisk is a flat archive, so `/boot/bin/hello` could be opened while `/boot/bin` could not be listed.
 - **0.2.3** — a working directory per process, and every path resolved against it at the syscall boundary so no filesystem below ever sees a name that means two things. `.`, `..` and repeated slashes are flattened, a path that will not fit is refused rather than truncated, and `..` from the root stays at the root -- that last one having its own tests, since a path that can climb above `/` can name anything. `cd` and `pwd` are builtins because a `cd` that was a program would change where it was standing and then exit. `mkdir` and `rmdir` down to fat32: a directory is born with the two entries every directory has, and only an empty one can be unmade. two gaps surfaced on the way: the mount points could not describe themselves -- `/` is where mounts hang from and `/boot` *is* the ramdisk, so neither is on any filesystem -- and the ramdisk fallback had to widen to absolute paths, or a machine with no disk could suddenly reach nothing at all.
 - **0.2.2** — every core runs threads now. one shared ring rather than a queue each, which is a deliberate departure from the roadmap: at four cores the lock is not the bottleneck and an idle core taking whatever is ready is already load balancing, without the migration machinery per-core queues then need. each core gets its own descriptor tables, its own timer and its own idle thread, and learns its own name from the task register -- every core loads a different tss selector, so the register the cpu already holds is its identity, which costs two cycles and needs nothing in memory to have been reached first. tlb shootdown by inter-processor interrupt with a bounded wait for every core to answer. the syscall path turned out to be per-machine where it had to be per core -- the entry stub swapped stacks through two globals, and `star`/`lstar`/`sfmask` were set only on the boot core, so a program scheduled anywhere else executed `syscall` and jumped to address zero in ring 0; it uses per-core words reached through `gs` now -- and deliberately *without* `swapgs`, because the parity of those swaps is per thread while the bases are per core, so a thread preempted inside a syscall and resumed elsewhere leaves a core's bases reversed. three bugs that are not about scheduling had to be fixed first: all four cores were counting the same clock, so an hour would have passed in fifteen minutes; the reaper freed the stacks of threads that another core might still be standing on; and a core's idle thread was visible in the ring before that core had claimed it. `ps` gained a core column, `cpus` says what each is running.
 - **0.2.1** — locks, at last. thirty-nine `irq_save` pairs across twelve files were correct mutual exclusion for one core and were quietly reclassified as wrong by 0.2.0; every one is now a real lock. the primitive is deliberately the same shape as what it replaces, so the audit reads as one change repeated thirty-nine times and anything that is not stands out. lock order is checked against a rank read off the call graph rather than assumed -- and it warns rather than panics, because with one core a wrong rank cannot deadlock and should not cost a working machine. `test_locks` is the first suite in this project that can see a race: eight threads through the real allocators, with a deliberately unguarded counter as a control, asserted to come out *wrong* so that the guarded one means something. `locks` shows the ranks and the contention. a lock declared where it is defined never called `spin_init`, so none of the twelve were on the list the shell shows -- they register themselves on first use now. and the recursion check paid for the whole version on its first boot, catching four bugs of one shape: a lock is a property of the machine and must never be held across a context switch, where `cli` was a property of the thread and rode through one harmlessly. a new thread began holding the scheduler's lock with its release on a stack it would never return to; the blocking reader slept holding the keyboard's lock, so the interrupt meant to wake it spun on that lock forever; the timer tick walked the run queue holding nothing; and waking a thread took the scheduler's lock twice. all four were correct on one core.
