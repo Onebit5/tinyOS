@@ -5,20 +5,45 @@
  * something this quietly turns out to have done. */
 
 #include "syscall.h"
+#include "args.h"
+
+static const struct opt rmdir_opts[] = {
+    { 'v', "verbose", false, "name each one as it is removed" },
+};
+
+static const struct program rmdir_prog = {
+    .name = "rmdir",
+    .usage = "rmdir [-v] <directory>...",
+    .summary = "remove an empty directory",
+    .opts = rmdir_opts,
+    .opt_count = sizeof rmdir_opts / sizeof rmdir_opts[0],
+};
 
 void _start(int argc, char **argv) {
-    if (argc < 2) {
-        write("rmdir <directory>...\n");
+    struct args a;
+    const char *error;
+    if (!args_parse(&rmdir_prog, argc, argv, &a, &error)) {
+        write("rmdir: ");
+        write(error);
+        write("\n");
         exit(1);
+    }
+    if (a.wants_help || a.count == 0) {
+        write(rmdir_prog.usage);
+        write("\n");
+        exit(a.wants_help ? 0 : 1);
     }
 
     long bad = 0;
-    for (int i = 1; i < argc; i++) {
-        if (rmdir(argv[i]) < 0) {
+    for (int i = 0; i < a.count; i++) {
+        if (rmdir(a.rest[i]) < 0) {
             write("cannot remove ");
-            write(argv[i]);
-            write(" -- is it empty, and is it a directory?\n");
+            write(a.rest[i]);
+            write("\n");
             bad++;
+        } else if (args_has(&a, &rmdir_prog, 'v')) {
+            write(a.rest[i]);
+            write("\n");
         }
     }
     exit(bad == 0 ? 0 : 1);

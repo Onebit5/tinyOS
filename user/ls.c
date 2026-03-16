@@ -10,6 +10,20 @@
  * this. */
 
 #include "syscall.h"
+#include "args.h"
+
+static const struct opt ls_opts[] = {
+    { 'a', "all",  false, "count the directories too, not just the files" },
+    { '1', "one",  false, "one name per line and nothing else" },
+};
+
+static const struct program ls = {
+    .name = "ls",
+    .usage = "ls [-a] [-1] [directory]",
+    .summary = "what is in a directory",
+    .opts = ls_opts,
+    .opt_count = sizeof ls_opts / sizeof ls_opts[0],
+};
 
 static long ends_with_slash(const char *s) {
     long n = 0;
@@ -18,7 +32,22 @@ static long ends_with_slash(const char *s) {
 }
 
 void _start(int argc, char **argv) {
-    const char *path = (argc > 1) ? argv[1] : "/";
+    struct args a;
+    const char *error;
+    if (!args_parse(&ls, argc, argv, &a, &error)) {
+        write("ls: ");
+        write(error);
+        write("\n");
+        exit(1);
+    }
+    if (a.wants_help) {
+        write(ls.usage);
+        write("\n");
+        exit(0);
+    }
+
+    const char *path = (a.count > 0) ? a.rest[0] : "/";
+    bool plain = args_has(&a, &ls, '1');
 
     char name[128];
     long files = 0;
@@ -38,7 +67,9 @@ void _start(int argc, char **argv) {
             files++;
         }
 
-        write("  ");
+        if (!plain) {
+            write("  ");
+        }
         write(name);
         write("\n");
     }
@@ -46,6 +77,10 @@ void _start(int argc, char **argv) {
     if (files == 0 && dirs == 0) {
         write("nothing there, or no such directory\n");
         exit(1);
+    }
+
+    if (plain) {
+        exit(0);
     }
 
     write_num(files);

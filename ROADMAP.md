@@ -146,10 +146,10 @@ demonstration. a program should be typed by its name. the shell learns
 where to look, `run` survives only for saying explicitly what to run,
 and the two lists in `help` become one.~~ **done in 0.2.4.**
 
-**0.2.5 arguments worth parsing.** every program parses argv by hand
+**0.2.5 arguments worth parsing.** ~~every program parses argv by hand
 and none of them agree. a small getopt in the user library: `-v`,
 `--verbose`, clustering, `--` to stop parsing, and a usage string each
-program declares once and never writes out twice.
+program declares once and never writes out twice.~~ **done in 0.2.5.**
 
 **0.2.6 help that knows what it is describing.** because 0.2.5 makes
 each program declare its arguments, `help cat` can print them without

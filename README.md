@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.4** (**commands that are just commands.** a search path, so a program is typed by its name from anywhere -- and one list in `help`, because there is one kind of thing to type)
+**version: 0.2.5** (**arguments worth parsing.** each program declares once what it takes, and that declaration is the only description of it there is)
 
 ## what it does
 
@@ -41,6 +41,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] every core running threads, and tlb shootdown between them
 - [x] a working directory, `cd`, `pwd`, and directories that can be made
 - [x] a search path, and `help` that stopped dividing the world in two
+- [x] arguments parsed in one place, declared once per program
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -206,6 +207,44 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### arguments worth parsing
+
+every program used to read `argv` by hand and no two of them agreed.
+some took a flag anywhere, some only first, most took none at all and
+silently treated `-v` as a filename. that is the kind of inconsistency
+nobody notices until they trust it.
+
+there is one parser now, and a program **declares what it takes**:
+
+```c
+static const struct opt cat_opts[] = {
+    { 'v', "verbose", false, "name each file and its size before its contents" },
+    { 'n', "number",  false, "number the lines" },
+};
+```
+
+that declaration is the only description of the program there is. the
+parser reads it, and so does anything that has to explain the program to
+somebody -- which is what stops usage text from drifting away from what
+the code actually does, the usual fate of usage text. 0.2.6 is that
+second reader.
+
+what is understood is what everybody already expects: `-v`, `--verbose`,
+`-abc` for three at once, a value as the next word or stuck on or after
+an `=`, and `--` to say that everything after it is a filename however
+much it looks like an option. that last one is not a nicety: it is the
+only way to open a file whose name begins with a dash, and there is a
+test that says so.
+
+`--help` and `-h` are noticed by the parser and *not acted on*. what to
+print is the next version's business, and a parser should not decide to
+write things.
+
+`cat -v` names each file before its contents, `cat -n` numbers the
+lines, `ls -1` prints one name per line and nothing else, `echo -n`
+leaves the newline off, and `write -t` replaces a file rather than
+adding to it.
 
 ### commands that are just commands
 
@@ -865,6 +904,7 @@ $ make test
   philemon   ok        the loader's elf parsing and its memory map
   locks      ok        eight threads through the allocators, and a control
   path       ok        `..`, and every way of trying to climb out of /
+  args       ok        clustering, values, and `--` meaning what it must
   gdt        ok        the tss descriptor, decoded back apart
   ksyms      ok        symbol lookup, incl. a sweep across boundaries
   rtc        ok        bcd, 12/24 hour, and midnight
@@ -960,6 +1000,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.5** — one argument parser, and a program declares what it takes rather than reading `argv` by hand. that declaration is the only description of the program there is: the parser reads it, and so will whatever has to explain it, which is what keeps usage text from drifting away from the code. short and long forms, clustering, values as the next word or stuck on or after an `=`, and `--` to stop parsing -- the last being the only way to name a file that begins with a dash. `--help` is noticed and deliberately not acted on, because deciding what to print is 0.2.6's job and a parser should not write things. `cat -v` and `cat -n`, `ls -1`, `echo -n`, `write -t`.
 - **0.2.4** — a real search path. typing a program by name had worked since 0.1.4, but by sticking `bin/` on the front and asking the ramdisk directly, around the vfs -- so a program on the disk could never be a command and `./thing` meant nothing. now `/bin` then `/boot/bin`, through the vfs, with a name earlier on the path hiding one later; the working directory is deliberately *not* on it, because a name typed alone should mean the same thing wherever you stand and a program left lying about should not become a verb. anything with a slash is a path, read from where you are. `help` is one list with a dot in the margin for the ring 3 ones, and completion offers both. one asymmetry had to go for any of it to work: the ramdisk is a flat archive, so `/boot/bin/hello` could be opened while `/boot/bin` could not be listed.
 - **0.2.3** — a working directory per process, and every path resolved against it at the syscall boundary so no filesystem below ever sees a name that means two things. `.`, `..` and repeated slashes are flattened, a path that will not fit is refused rather than truncated, and `..` from the root stays at the root -- that last one having its own tests, since a path that can climb above `/` can name anything. `cd` and `pwd` are builtins because a `cd` that was a program would change where it was standing and then exit. `mkdir` and `rmdir` down to fat32: a directory is born with the two entries every directory has, and only an empty one can be unmade. two gaps surfaced on the way: the mount points could not describe themselves -- `/` is where mounts hang from and `/boot` *is* the ramdisk, so neither is on any filesystem -- and the ramdisk fallback had to widen to absolute paths, or a machine with no disk could suddenly reach nothing at all.
 - **0.2.2** — every core runs threads now. one shared ring rather than a queue each, which is a deliberate departure from the roadmap: at four cores the lock is not the bottleneck and an idle core taking whatever is ready is already load balancing, without the migration machinery per-core queues then need. each core gets its own descriptor tables, its own timer and its own idle thread, and learns its own name from the task register -- every core loads a different tss selector, so the register the cpu already holds is its identity, which costs two cycles and needs nothing in memory to have been reached first. tlb shootdown by inter-processor interrupt with a bounded wait for every core to answer. the syscall path turned out to be per-machine where it had to be per core -- the entry stub swapped stacks through two globals, and `star`/`lstar`/`sfmask` were set only on the boot core, so a program scheduled anywhere else executed `syscall` and jumped to address zero in ring 0; it uses per-core words reached through `gs` now -- and deliberately *without* `swapgs`, because the parity of those swaps is per thread while the bases are per core, so a thread preempted inside a syscall and resumed elsewhere leaves a core's bases reversed. three bugs that are not about scheduling had to be fixed first: all four cores were counting the same clock, so an hour would have passed in fifteen minutes; the reaper freed the stacks of threads that another core might still be standing on; and a core's idle thread was visible in the ring before that core had claimed it. `ps` gained a core column, `cpus` says what each is running.

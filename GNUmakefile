@@ -108,10 +108,14 @@ USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail \
               ramdisk/bin/whoami ramdisk/bin/write \
               ramdisk/bin/mkdir ramdisk/bin/rmdir
 
-ramdisk/bin/%: user/%.c user/syscall.h user/linker.ld
+# every program links the argument parser, so that what a program takes
+# is declared once and read by both the parser and whatever has to
+# explain the program to somebody
+ramdisk/bin/%: user/%.c user/syscall.h user/args.h user/args.c user/linker.ld
 	@mkdir -p $(@D)
 	$(CC) $(UCFLAGS) -c $< -o obj/user_$*.o
-	$(LD) $(ULDFLAGS) obj/user_$*.o -o $@
+	$(CC) $(UCFLAGS) -c user/args.c -o obj/user_args.o
+	$(LD) $(ULDFLAGS) obj/user_$*.o obj/user_args.o -o $@
 
 # the ramdisk is a plain tar. --format=ustar because thats the one the
 # kernel knows how to read, and the flags after it keep the archive
@@ -217,7 +221,7 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/syscall bin/tests/tty bin/tests/auth bin/tests/acpi bin/tests/pci \
              bin/tests/keyboard bin/tests/serial \
              bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
-             bin/tests/locks bin/tests/path \
+             bin/tests/locks bin/tests/path bin/tests/args \
              bin/tests/shell bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
@@ -271,6 +275,7 @@ bin/tests/locks:    tests/test_locks.c    kernel/src/sched/spinlock.c \
 bin/tests/locks:    LDLIBS = -pthread
 
 bin/tests/path:     tests/test_path.c     kernel/src/fs/path.c
+bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c
 bin/tests/philemon:  tests/test_philemon.c boot/philemon.c boot/philemon.h
