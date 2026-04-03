@@ -41,8 +41,7 @@ void _start(int argc, char **argv) {
         exit(1);
     }
     if (a.wants_help) {
-        write(ls.usage);
-        write("\n");
+        args_usage(&ls);
         exit(0);
     }
 

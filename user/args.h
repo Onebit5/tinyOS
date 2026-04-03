@@ -62,6 +62,13 @@ struct args {
     bool        wants_help;
 };
 
+/* print what this program is and what it takes, built entirely out of
+ * the declaration above. this is the only place any of it is written
+ * down, so `--help` and the shell's `help` cannot disagree about it --
+ * the shell's answer *is* this, because asking a program what it takes
+ * is done by running it with --help and letting it say */
+void args_usage(const struct program *p);
+
 /* returns false and sets `error` to something worth printing */
 bool args_parse(const struct program *p, int argc, char **argv,
                 struct args *out, const char **error);

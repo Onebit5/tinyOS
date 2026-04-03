@@ -83,8 +83,7 @@ void _start(int argc, char **argv) {
         exit(1);
     }
     if (a.wants_help || a.count == 0) {
-        write(cat.usage);
-        write("\n");
+        args_usage(&cat);
         exit(a.wants_help ? 0 : 1);
     }
 

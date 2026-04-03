@@ -307,12 +307,38 @@ int main(void) {
     out_reset();
     run("help");
     CHECK(strstr(out, "cd") != NULL, "help lists a builtin");
-    CHECK(strstr(out, ". echo") != NULL,
-          "and a program, marked as one rather than filed separately");
+    CHECK(strstr(out, "echo") != NULL, "and a program");
     CHECK(strstr(out, "/bin") != NULL && strstr(out, "/boot/bin") != NULL,
           "and says where it looked, in order");
-    CHECK(strstr(out, "built into the kernel") == NULL,
-          "with no separate heading to look under any more");
+    CHECK(strstr(out, "help <name>") != NULL,
+          "and points at where one thing is actually explained");
+    /* the list is names only. what one of them means is `help <name>`,
+     * and for a program that answer comes from the program */
+    CHECK(strstr(out, "go somewhere; no argument") == NULL,
+          "without a description beside every single one");
+
+    /* ---- help for one thing ---- */
+
+    out_reset();
+    run("help cd");
+    CHECK(strstr(out, "cd [directory]") != NULL,
+          "a builtin explains itself out of the table");
+    CHECK(strstr(out, "go somewhere") != NULL, "with what it is for");
+
+    /* a program is asked rather than described: the shell runs it with
+     * --help, because what it takes is declared inside it */
+    ran_path = NULL;
+    ran_arg1 = NULL;
+    run("help echo");
+    CHECK(ran_path && strcmp(ran_path, "/bin/echo") == 0,
+          "a program is asked rather than described");
+    CHECK(ran_arg1 && strcmp(ran_arg1, "--help") == 0,
+          "by running it with --help, so the answer is its own");
+
+    out_reset();
+    run("help nonsense");
+    CHECK(strstr(out, "not something you can type") != NULL,
+          "and a name that is neither says so");
 
     /* a word with a slash in it is a path, taken exactly as written and
      * not searched for anywhere. `./x` is how you say "the one here" */

@@ -45,6 +45,10 @@ struct command {
     const char *help;
     void (*fn)(int argc, char **argv);
     bool takes_file;    /* tab should offer ramdisk names after it */
+
+    /* the shape of the command line, for `help <name>`. NULL when the
+     * name alone is the whole of it */
+    const char *usage;
 };
 
 static const struct command commands[];    /* defined below, after the handlers */
@@ -133,7 +137,7 @@ struct persona {
 };
 
 static const struct persona personas[] = {
-    { "pixie",      "count",   700  },
+    { "pixie",      "count",   700 },
     { "jack-frost", "hee-ho!", 1300 },
 };
 #define PERSONA_COUNT (sizeof(personas) / sizeof(personas[0]))
@@ -167,25 +171,69 @@ static void persona_thread(void *arg) {
 
 /* ---- commands ------------------------------------------------------ */
 
-static void cmd_help(int argc, char **argv) {
-    (void)argc; (void)argv;
-
-    /* one list, because from where anybody is sitting there is one kind
-     * of thing here: a word you type. whether it runs inside the kernel
-     * or out in ring 3 with an address space of its own is a fact about
-     * how it is built, not about how it is used -- so it is a mark in
-     * the margin rather than a heading to look under */
-    kprintf("everything you can type. a dot is a program: it runs in\n");
-    kprintf("ring 3, in memory of its own, and can touch nothing it was\n");
-    kprintf("not given.\n\n");
-
+/* `help <name>`.
+ *
+ * for a builtin, out of the table. for a program, by *running it* with
+ * --help and letting it answer -- which is the only way to get the
+ * truth: what a program takes is declared inside the program, and any
+ * copy the shell kept would be a second copy, free to drift. */
+static void help_one(const char *name) {
     for (const struct command *c = commands; c->name; c++) {
-        kprintf("   %s", c->name);
-        for (size_t i = strlen(c->name); i < 10; i++) {
+        if (strcmp(name, c->name) != 0) {
+            continue;
+        }
+        kprintf("%s\n", c->usage != NULL ? c->usage : c->name);
+        kprintf("  %s\n", c->help);
+        kprintf("\n  built into the kernel, so it can change the shell "
+                "itself -- which is\n  why `cd` is one and `cat` is not\n");
+        return;
+    }
+
+    char path[PATH_MAX];
+    if (find_program(name, path, sizeof path)) {
+        char *args[2];
+        args[0] = (char *)name;
+        args[1] = (char *)"--help";
+        launch(path, 2, args, false);
+        return;
+    }
+
+    kprintf("'%s' is not something you can type. `help` lists what is\n", name);
+}
+
+static void cmd_help(int argc, char **argv) {
+    if (argc > 1) {
+        help_one(argv[1]);
+        return;
+    }
+
+    /* names, in columns, and nothing else.
+     *
+     * this used to print a description beside every one of them, which
+     * was a wall of text you had to read all of to find the line you
+     * wanted. what somebody scanning this needs is the vocabulary; what
+     * one thing means is `help <name>`, and that answer is better than
+     * anything that would fit on a shared line anyway */
+    size_t columns = 0;
+    console_size(&columns, NULL, NULL, NULL);
+    size_t per_row = (columns > 20) ? (columns - 4) / 12 : 4;
+    if (per_row < 2) {
+        per_row = 2;
+    }
+
+    kprintf("built in\n ");
+    size_t n = 0;
+    for (const struct command *c = commands; c->name; c++) {
+        kprintf(" %s", c->name);
+        for (size_t i = strlen(c->name); i < 11; i++) {
             kprintf(" ");
         }
-        kprintf("%s\n", c->help);
+        if (++n % per_row == 0) {
+            kprintf("\n ");
+        }
     }
+    kprintf("\n\nprograms, in ring 3 with memory of their own\n ");
+    n = 0;
 
     /* the path in order, and a name seen once is not shown again: a
      * program earlier on the path hides one later, exactly as running
@@ -218,19 +266,24 @@ static void cmd_help(int argc, char **argv) {
                 shown[count][w] = '\0';
                 count++;
             }
-            kprintf(" . %s\n", f.name);
+            kprintf(" %s", f.name);
+            for (size_t i = strlen(f.name); i < 11; i++) {
+                kprintf(" ");
+            }
+            if (++n % per_row == 0) {
+                kprintf("\n ");
+            }
         }
     }
 
-    kprintf("\nlooked for in");
+    kprintf("\n\n`help <name>` for what one takes -- and for a program "
+            "that answer\ncomes from the program itself, so it cannot be "
+            "out of date.\n");
+    kprintf("looked for in");
     for (int d = 0; command_path[d] != NULL; d++) {
         kprintf(" %s", command_path[d]);
     }
-    kprintf(", in that order. a name with a slash\n");
-    kprintf("in it is a path instead, taken exactly as written -- so "
-            "`./thing`\n");
-    kprintf("runs the one here, and nothing here is a command by "
-            "accident.\n");
+    kprintf(", in that order; a name with a slash is a path.\n");
 }
 
 static void cmd_clear(int argc, char **argv) {
@@ -980,39 +1033,39 @@ static void cmd_reboot(int argc, char **argv) {
 }
 
 static const struct command commands[] = {
-    { "help",   "list what thou may command",           cmd_help, false },
-    { "clear",  "wipe the screen clean",                cmd_clear, false },
-    { "run",    "give a program the outer ring; & for background", cmd_run, true },
-    { "whoami", "who thou art, and what that permits",  cmd_whoami, false },
-    { "logout", "leave, and let somebody else in",      cmd_logout, false },
-    { "dmesg",  "everything boot said while you werent looking", cmd_dmesg, false },
-    { "arcana", "the rank of this bond, and its making", cmd_arcana, false },
-    { "persona","the face this machine wears",          cmd_persona, false },
-    { "mem",    "frames and heap, honestly counted",    cmd_mem, false },
-    { "ps",     "the threads that walk this realm",     cmd_ps, false },
-    { "top",    "the same, but watched rather than asked", cmd_top, false },
-    { "lspci",  "what is plugged into this machine",    cmd_lspci, false },
-    { "slabs",  "the object caches, and what they hold", cmd_slabs, false },
-    { "disk",   "the drive, and the filesystem on it",  cmd_disk, false },
-    { "mount",  "which filesystem is where",            cmd_mount, false },
-    { "cpus",   "the processors, and which are awake",  cmd_cpus, false },
-    { "locks",  "what guards what, and what waits",     cmd_locks, false },
-    { "cd",     "go somewhere; no argument means the root", cmd_cd, true },
-    { "pwd",    "where I am standing",                  cmd_pwd, false },
-    { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false },
-    { "summon", "call forth a persona thread (in the background)", cmd_summon, false },
-    { "vmm",    "what the page tables say about an address", cmd_vmm, false },
-    { "bt",     "who called whom to get here",          cmd_bt, false },
-    { "date",   "what the battery-backed clock believes", cmd_date, false },
-    { "hexdump","look at memory, safely",                cmd_hexdump, false },
-    { "kill",   "end a thread by id",                    cmd_kill, false },
-    { "history","what thou hast said before",            cmd_history, false },
-    { "time",   "how long a command takes",              cmd_time, false },
-    { "crash",  "tempt fate with a wild pointer",       cmd_crash, false },
-    { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow, false },
-    { "reboot", "sever the bond and begin anew",        cmd_reboot, false },
-    { "poweroff","let the velvet room fade",             cmd_poweroff, false },
-    { NULL, NULL, NULL, false },
+    { "help",   "list what thou may command",           cmd_help, false, "help [name]" },
+    { "clear",  "wipe the screen clean",                cmd_clear, false, NULL },
+    { "run",    "give a program the outer ring; & for background", cmd_run, true, "run <program> [args...] [&]" },
+    { "whoami", "who thou art, and what that permits",  cmd_whoami, false, NULL },
+    { "logout", "leave, and let somebody else in",      cmd_logout, false, NULL },
+    { "dmesg",  "everything boot said while you werent looking", cmd_dmesg, false, NULL },
+    { "arcana", "the rank of this bond, and its making", cmd_arcana, false, NULL },
+    { "persona","the face this machine wears",          cmd_persona, false, NULL },
+    { "mem",    "frames and heap, honestly counted",    cmd_mem, false, NULL },
+    { "ps",     "the threads that walk this realm",     cmd_ps, false, NULL },
+    { "top",    "the same, but watched rather than asked", cmd_top, false, NULL },
+    { "lspci",  "what is plugged into this machine",    cmd_lspci, false, NULL },
+    { "slabs",  "the object caches, and what they hold", cmd_slabs, false, NULL },
+    { "disk",   "the drive, and the filesystem on it",  cmd_disk, false, NULL },
+    { "mount",  "which filesystem is where",            cmd_mount, false, NULL },
+    { "cpus",   "the processors, and which are awake",  cmd_cpus, false, NULL },
+    { "locks",  "what guards what, and what waits",     cmd_locks, false, NULL },
+    { "cd",     "go somewhere; no argument means the root", cmd_cd, true, "cd [directory]" },
+    { "pwd",    "where I am standing",                  cmd_pwd, false, NULL },
+    { "ioapic", "move external interrupts off the 8259 (risky)", cmd_ioapic, false, NULL },
+    { "summon", "call forth a persona thread (in the background)", cmd_summon, false, "summon <name>" },
+    { "vmm",    "what the page tables say about an address", cmd_vmm, false, "vmm <address>" },
+    { "bt",     "who called whom to get here",          cmd_bt, false, NULL },
+    { "date",   "what the battery-backed clock believes", cmd_date, false, NULL },
+    { "hexdump","look at memory, safely",                cmd_hexdump, false, "hexdump <address>" },
+    { "kill",   "end a thread by id",                    cmd_kill, false, "kill <id>" },
+    { "history","what thou hast said before",            cmd_history, false, NULL },
+    { "time",   "how long a command takes",              cmd_time, false, "time <command...>" },
+    { "crash",  "tempt fate with a wild pointer",       cmd_crash, false, NULL },
+    { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow, false, NULL },
+    { "reboot", "sever the bond and begin anew",        cmd_reboot, false, NULL },
+    { "poweroff","let the velvet room fade",             cmd_poweroff, false, NULL },
+    { NULL, NULL, NULL, false, NULL },
 };
 
 /* ---- the line editor ----------------------------------------------- */

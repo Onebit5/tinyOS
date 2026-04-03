@@ -30,8 +30,7 @@ void _start(int argc, char **argv) {
         exit(1);
     }
     if (a.wants_help || a.count == 0) {
-        write(mkdir_prog.usage);
-        write("\n");
+        args_usage(&mkdir_prog);
         exit(a.wants_help ? 0 : 1);
     }
 

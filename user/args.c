@@ -1,4 +1,5 @@
 #include "args.h"
+#include "syscall.h"
 
 static bool same(const char *a, const char *b) {
     if (a == NULL || b == NULL) {
@@ -174,4 +175,71 @@ const char *args_value(const struct args *a, const struct program *p,
                        char brief) {
     int at = find_brief(p, brief);
     return at >= 0 ? a->values[at] : NULL;
+}
+
+
+/* ---- explaining itself ---- */
+
+static void pad_to(size_t from, size_t to) {
+    for (size_t i = from; i < to; i++) {
+        write(" ");
+    }
+}
+
+static size_t len_of(const char *s) {
+    size_t n = 0;
+    while (s != NULL && s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+void args_usage(const struct program *p) {
+    write(p->usage);
+    write("\n");
+    if (p->summary != NULL) {
+        write("  ");
+        write(p->summary);
+        write("\n");
+    }
+
+    if (p->opt_count == 0) {
+        return;
+    }
+
+    write("\n");
+    for (size_t i = 0; i < p->opt_count; i++) {
+        const struct opt *o = &p->opts[i];
+        size_t w = 0;
+
+        write("  ");
+        if (o->brief != 0) {
+            char two[3] = { '-', o->brief, '\0' };
+            write(two);
+            w += 2;
+            if (o->name != NULL) {
+                write(", ");
+                w += 2;
+            }
+        } else {
+            write("    ");
+            w += 4;
+        }
+        if (o->name != NULL) {
+            write("--");
+            write(o->name);
+            w += 2 + len_of(o->name);
+        }
+        if (o->takes_value) {
+            write(" <value>");
+            w += 8;
+        }
+
+        pad_to(w, 22);
+        write("  ");
+        write(o->help);
+        write("\n");
+    }
+
+    write("  -h, --help            this\n");
 }

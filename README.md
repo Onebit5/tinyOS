@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.5** (**arguments worth parsing.** each program declares once what it takes, and that declaration is the only description of it there is)
+**version: 0.2.6** (**help that knows what it is describing.** `help cat` runs cat and asks it, because what a program takes is declared inside the program)
 
 ## what it does
 
@@ -42,6 +42,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a working directory, `cd`, `pwd`, and directories that can be made
 - [x] a search path, and `help` that stopped dividing the world in two
 - [x] arguments parsed in one place, declared once per program
+- [x] help that asks a program what it takes rather than keeping a copy
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
@@ -207,6 +208,30 @@ every pointer a program hands over is checked against **that program's** page ta
 `spawn` and `wait` are the pair that matters. up to 0.1.1 only the kernel shell could start a program; now a program can, and can be told how its child went -- which is what makes a shell in ring 3 possible, and what 0.1.4 is for. a process may only wait for its own children, or one could collect another's and send the exit code to the wrong place.
 
 `bin/reader` opens `motd.txt` and reads it in 32-byte bites to show the descriptor keeping its place; `bin/parent` spawns `bin/fail`, waits, and passes on the 42 it gets back -- a number that crossed two address spaces and outlived the thread that produced it.
+
+### help that knows what it is describing
+
+0.2.5 made each program declare what it takes. this is the version that
+reads it back -- and the interesting question is *where from*.
+
+what `cat` takes is declared inside `cat`. the shell could keep a copy,
+and then there would be two descriptions of one thing, free to drift the
+moment either changed. so it does not keep one: **`help cat` runs cat
+with `--help`** and lets it answer. the same declaration produces both,
+because there is only the one, and `cat --help` typed directly is the
+identical text by construction rather than by discipline.
+
+builtins are described out of the shell's own table, which is right for
+the same reason -- that is where they are declared. `help cd` also says
+*why* it is a builtin, because that is the question somebody asking has
+probably got.
+
+**the plain `help` was reworked**, and it needed it. it used to print a
+description beside every single name, which is a wall you have to read
+all of to find the line you want. it prints names in columns now, sized
+to the terminal: what somebody scanning it needs is the vocabulary, and
+what any one word means is `help <name>` -- an answer that is better
+than anything which would have fitted on a shared line anyway.
 
 ### arguments worth parsing
 
@@ -1000,6 +1025,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.6** — `help cat` runs cat with `--help` and lets it answer. what a program takes is declared inside the program, so any copy the shell kept would be a second description free to drift; there is no copy. `cat --help` typed directly gives identical text by construction rather than by discipline, and both are built from the declaration 0.2.5 introduced. builtins come out of the shell's table, which is where *they* are declared, and `help cd` says why it is a builtin at all. the plain `help` stopped printing a description beside every name -- that was a wall you had to read all of to find one line -- and prints names in columns sized to the terminal instead, with `help <name>` for the one you actually wanted.
 - **0.2.5** — one argument parser, and a program declares what it takes rather than reading `argv` by hand. that declaration is the only description of the program there is: the parser reads it, and so will whatever has to explain it, which is what keeps usage text from drifting away from the code. short and long forms, clustering, values as the next word or stuck on or after an `=`, and `--` to stop parsing -- the last being the only way to name a file that begins with a dash. `--help` is noticed and deliberately not acted on, because deciding what to print is 0.2.6's job and a parser should not write things. `cat -v` and `cat -n`, `ls -1`, `echo -n`, `write -t`.
 - **0.2.4** — a real search path. typing a program by name had worked since 0.1.4, but by sticking `bin/` on the front and asking the ramdisk directly, around the vfs -- so a program on the disk could never be a command and `./thing` meant nothing. now `/bin` then `/boot/bin`, through the vfs, with a name earlier on the path hiding one later; the working directory is deliberately *not* on it, because a name typed alone should mean the same thing wherever you stand and a program left lying about should not become a verb. anything with a slash is a path, read from where you are. `help` is one list with a dot in the margin for the ring 3 ones, and completion offers both. one asymmetry had to go for any of it to work: the ramdisk is a flat archive, so `/boot/bin/hello` could be opened while `/boot/bin` could not be listed.
 - **0.2.3** — a working directory per process, and every path resolved against it at the syscall boundary so no filesystem below ever sees a name that means two things. `.`, `..` and repeated slashes are flattened, a path that will not fit is refused rather than truncated, and `..` from the root stays at the root -- that last one having its own tests, since a path that can climb above `/` can name anything. `cd` and `pwd` are builtins because a `cd` that was a program would change where it was standing and then exit. `mkdir` and `rmdir` down to fat32: a directory is born with the two entries every directory has, and only an empty one can be unmade. two gaps surfaced on the way: the mount points could not describe themselves -- `/` is where mounts hang from and `/boot` *is* the ramdisk, so neither is on any filesystem -- and the ramdisk fallback had to widen to absolute paths, or a machine with no disk could suddenly reach nothing at all.

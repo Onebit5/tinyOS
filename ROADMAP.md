@@ -151,10 +151,14 @@ and none of them agree. a small getopt in the user library: `-v`,
 `--verbose`, clustering, `--` to stop parsing, and a usage string each
 program declares once and never writes out twice.~~ **done in 0.2.5.**
 
-**0.2.6 help that knows what it is describing.** because 0.2.5 makes
+**0.2.6 help that knows what it is describing.** ~~because 0.2.5 makes
 each program declare its arguments, `help cat` can print them without
 anybody writing that twice. `--help` on any program prints the same
-thing, from the same place.
+thing, from the same place.~~ **done in 0.2.6**, and the shape of the
+answer settles the question: `help cat` *runs* cat with `--help`, so
+there is no second copy anywhere that could drift. the plain `help`
+became names in columns, since a description beside every one of them
+was a wall you had to read all of to find the line you wanted.
 
 **0.2.7 making and unmaking.** `rm`, `cp`, `mv`, `touch`, and files
 that remember when they were written. fat has fields for all of that

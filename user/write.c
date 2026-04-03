@@ -34,8 +34,7 @@ void _start(int argc, char **argv) {
         exit(1);
     }
     if (a.wants_help || a.count < 2) {
-        write(write_prog.usage);
-        write("\n");
+        args_usage(&write_prog);
         write("try: write /notes.txt the bond endures\n");
         exit(a.wants_help ? 0 : 1);
     }
