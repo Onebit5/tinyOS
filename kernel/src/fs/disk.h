@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "fs/fat32.h"
+
 /* the disk, mounted.
  *
  * one place that owns the sata controller and the filesystem on it, so
@@ -30,6 +32,12 @@ struct disk_entry {
      * number does on a filesystem that has them */
     uint64_t entry_sector;
     uint32_t entry_offset;
+
+    /* when it was last written. this is fat's struct rather than one of
+     * my own on purpose: the fields are identical, and a second copy of
+     * six integers would only mean writing a function that converts
+     * between two things that are the same */
+    struct fat32_time written;
 };
 
 /* find a controller, mount what is on it. safe to call when there is
@@ -63,6 +71,14 @@ int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
 /* directories, made and unmade. the same 8.3 rule as disk_create */
 bool disk_mkdir(const char *path);
 bool disk_rmdir(const char *path);
+
+/* remove a file, and give its clusters back. directories go through
+ * disk_rmdir instead, which checks that they are empty first */
+bool disk_unlink(const char *path);
+
+/* give a file another name, possibly in another directory. nothing is
+ * copied -- a rename moves a name, not a file */
+bool disk_rename(const char *from, const char *to);
 
 /* what to tell the user about it */
 const char *disk_label(void);

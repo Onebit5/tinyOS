@@ -25,8 +25,26 @@
 #define SYS_GETCWD 15   /* (buf, len)         -> length written          */
 #define SYS_MKDIR  16   /* (path, len)        -> 0, or -1                */
 #define SYS_RMDIR  17   /* (path, len)        -> 0, or -1                */
+#define SYS_UNLINK 18   /* (path, len)        -> 0, or -1                */
+#define SYS_RENAME 19   /* (from,flen,to,tlen)-> 0, or -1                */
+#define SYS_STAT   20   /* (path, len, struct user_stat *) -> 0, or -1   */
 
-#define SYSCALL_COUNT 18
+/* what a file is, for anyone who wants to know without reading it.
+ *
+ * this layout is duplicated in user/syscall.h, which is what an abi is:
+ * two sides agreeing on where the fields sit, with nothing to enforce
+ * it but the fact that they were written together. the padding is
+ * explicit so that neither side's compiler gets to decide it */
+struct user_stat {
+    uint64_t size;
+    uint32_t mode;
+    uint32_t is_dir;
+    uint16_t year;
+    uint8_t  month, day, hour, minute, second;
+    uint8_t  pad;
+};
+
+#define SYSCALL_COUNT 21
 
 /* wire up STAR/LSTAR/SFMASK and turn on EFER.SCE */
 void syscall_init(void);

@@ -4,6 +4,7 @@
 #include "lib/string.h"
 #include "cpu/interrupts.h"
 #include "sched/spinlock.h"
+#include "drivers/rtc.h"
 
 /* the filesystem keeps one sector of scratch and every path through
  * it assumes nobody else is halfway through another. that was a
@@ -18,6 +19,21 @@ static bool ready;
  * at once would hand each other the wrong sector, so they do not */
 static uint64_t enter(void) { return spin_lock_irq(&disk_lock); }
 static void leave(uint64_t flags) { spin_unlock_irq(&disk_lock, flags); }
+
+/* what the filesystem asks when it needs to stamp something. the cmos
+ * clock is the only thing on this machine that knows the date, and the
+ * filesystem is not allowed to know that it exists -- so it gets handed
+ * this instead */
+static void disk_now(struct fat32_time *out) {
+    struct rtc_time t;
+    rtc_read(&t);
+    out->year = t.year;
+    out->month = t.month;
+    out->day = t.day;
+    out->hour = t.hour;
+    out->minute = t.minute;
+    out->second = t.second;
+}
 
 bool disk_ready(void) { return ready; }
 
@@ -37,6 +53,7 @@ bool disk_mount(void) {
             continue;
         }
         if (fat32_mount(&fs, ahci_read, ahci_write, NULL)) {
+            fat32_set_clock(&fs, disk_now);
             ready = true;
             return true;
         }
@@ -67,7 +84,9 @@ static void fill(struct disk_entry *out, const struct fat32_file *f) {
     out->is_dir = f->is_dir;
     out->entry_sector = f->entry_sector;
     out->entry_offset = f->entry_offset;
+    out->written = f->written;
 }
+
 
 /* ---- the calls above me make --------------------------------------- */
 
@@ -184,6 +203,26 @@ bool disk_rmdir(const char *path) {
     }
     uint64_t flags = enter();
     bool ok = fat32_rmdir(&fs, below(path));
+    leave(flags);
+    return ok;
+}
+
+bool disk_unlink(const char *path) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok = fat32_unlink(&fs, below(path));
+    leave(flags);
+    return ok;
+}
+
+bool disk_rename(const char *from, const char *to) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok = fat32_rename(&fs, below(from), below(to));
     leave(flags);
     return ok;
 }

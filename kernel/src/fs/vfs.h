@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "fs/disk.h"
+
 /* one namespace, two filesystems underneath it.
  *
  * until now the ramdisk was the whole world and the disk was bolted on
@@ -54,6 +56,13 @@ struct vfs_file {
     uint32_t    cluster;
     uint64_t    entry_sector;
     uint32_t    entry_offset;
+
+    /* when it was last written. files in the ramdisk have no answer to
+     * that -- the tar has one, but every file in it was written by the
+     * build, at once, which is a fact about the build and not about the
+     * file -- so they come back as zero, which is fat's way of saying
+     * nobody knows */
+    struct fat32_time written;
 };
 
 /* resolve a path. absolute names go where they point; relative ones are
@@ -71,6 +80,16 @@ bool vfs_create(const char *path, struct vfs_file *out);
  * refuses both -- there is nowhere for a new name to go */
 bool vfs_mkdir(const char *path);
 bool vfs_rmdir(const char *path);
+
+/* remove a file. directories go through vfs_rmdir, which will not
+ * remove one that still has anything in it */
+bool vfs_unlink(const char *path);
+
+/* rename, which is also how a file is moved: both are one name being
+ * replaced by another, and neither copies a byte. within one mount
+ * only -- a name cannot move from the ramdisk to the disk, because
+ * that would be a copy wearing a rename's clothes */
+bool vfs_rename(const char *from, const char *to);
 
 int64_t vfs_read(const struct vfs_file *f, uint64_t offset, void *buf,
                  uint64_t len);

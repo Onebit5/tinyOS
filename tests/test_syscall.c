@@ -174,6 +174,10 @@ bool disk_create(const char *path, struct disk_entry *out) {
 }
 bool disk_mkdir(const char *path) { (void)path; return disk_is_ready; }
 bool disk_rmdir(const char *path) { (void)path; return disk_is_ready; }
+bool disk_unlink(const char *path) { (void)path; return disk_is_ready; }
+bool disk_rename(const char *from, const char *to) {
+    (void)from; (void)to; return disk_is_ready;
+}
 int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
                       uint64_t len) {
     (void)buf;
@@ -447,6 +451,78 @@ int main(void) {
         strcpy(page, "bin/thing");
         (void)syscall_dispatch(SYS_SPAWN, (uint64_t)page, 9, 0, 0, 0);
         CHECK(spawned_uid == 1000, "a child inherits the uid it was started with");
+
+        me.pid = was;
+        foreground_pid = was;
+        process_exited(guest, 0, 0);
+        process_collect(guest, NULL);
+    }
+    strcpy(page, "motd.txt");
+
+    /* ---- what a file is, without opening it ----
+     *
+     * `ls -l` wants a size and a date for every name in a directory.
+     * doing that by opening each one would mean a descriptor apiece for
+     * something the directory entry already said */
+    {
+        struct user_stat st;
+        user_extra = (uint64_t)&st;
+        memset(&st, 0xaa, sizeof st);
+
+        strcpy(page, "motd.txt");
+        CHECK(call3(SYS_STAT, (uint64_t)page, 8, (uint64_t)&st) == 0,
+              "stat answers about a file");
+        CHECK(st.size > 0, "with a size");
+        CHECK(st.is_dir == 0, "and says it is not a directory");
+        /* the ramdisk keeps no dates worth having, so it says so rather
+         * than making one up */
+        CHECK(st.year == 0, "and no date, which is what the ramdisk knows");
+
+        strcpy(page, "nothing-at-all");
+        CHECK(call3(SYS_STAT, (uint64_t)page, 14, (uint64_t)&st) == -1,
+              "and refuses a name that is not there");
+
+        /* the struct comes back through a pointer ring 3 handed over,
+         * and a pointer into the kernel is the whole reason that check
+         * exists */
+        strcpy(page, "motd.txt");
+        CHECK(call3(SYS_STAT, (uint64_t)page, 8, kernel_page) == -1,
+              "and will not write the answer into the kernel");
+        user_extra = 0;
+    }
+
+    /* ---- unmaking, and renaming ----
+     *
+     * the disk stub says yes to both, so what is under test here is the
+     * dispatcher: that the paths are copied in safely and that a guest
+     * is stopped before either reaches a filesystem */
+    strcpy(page, "/gone.txt");
+    CHECK(call(SYS_UNLINK, (uint64_t)page, 9) == 0, "unlink reaches the disk");
+    CHECK(call(SYS_UNLINK, kernel_page, 9) == -1,
+          "but not with a path in the kernel");
+
+    {
+        char to[32];
+        strcpy(to, "/there.txt");
+        user_extra = (uint64_t)to;
+        CHECK(call5(SYS_RENAME, (uint64_t)page, 9, (uint64_t)to, 10, 0) == 0,
+              "rename takes two paths");
+        CHECK(call5(SYS_RENAME, (uint64_t)page, 9, kernel_page, 10, 0) == -1,
+              "and checks the second one as carefully as the first");
+        user_extra = 0;
+    }
+
+    {
+        int guest = process_create("guest2", 0, 1000, false, 0);
+        int was = me.pid;
+        me.pid = guest;
+        foreground_pid = guest;
+
+        out_reset();
+        strcpy(page, "/gone.txt");
+        CHECK(syscall_dispatch(SYS_UNLINK, (uint64_t)page, 9, 0, 0, 0) == -1,
+              "a guest may not remove a file");
+        CHECK(strstr(out, "may not remove") != NULL, "and is told why");
 
         me.pid = was;
         foreground_pid = was;

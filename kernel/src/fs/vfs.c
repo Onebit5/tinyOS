@@ -68,6 +68,7 @@ static void from_disk(struct vfs_file *out, const struct disk_entry *e) {
     out->cluster = e->cluster;
     out->entry_sector = e->entry_sector;
     out->entry_offset = e->entry_offset;
+    out->written = e->written;
 }
 
 /* the disk's copy of a name, if there is a disk and it has one */
@@ -305,6 +306,28 @@ bool vfs_rmdir(const char *path) {
         return false;
     }
     return disk_ready() && disk_rmdir(path);
+}
+
+bool vfs_unlink(const char *path) {
+    const char *rest;
+    if (path == NULL || path[0] == '\0' || under_boot(path, &rest)) {
+        return false;       /* the ramdisk is memory I may not write */
+    }
+    return disk_ready() && disk_unlink(path);
+}
+
+bool vfs_rename(const char *from, const char *to) {
+    const char *rest;
+    if (from == NULL || to == NULL || from[0] == '\0' || to[0] == '\0') {
+        return false;
+    }
+    /* either end under /boot makes this a copy, and a rename that
+     * quietly copies is a rename that silently costs a disk's worth of
+     * time on a big file. so: no */
+    if (under_boot(from, &rest) || under_boot(to, &rest)) {
+        return false;
+    }
+    return disk_ready() && disk_rename(from, to);
 }
 
 int64_t vfs_read(const struct vfs_file *f, uint64_t offset, void *buf,

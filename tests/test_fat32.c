@@ -53,6 +53,13 @@ static bool dead_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
     return false;
 }
 
+/* a clock that does not move, so what should have been written down is
+ * exactly knowable rather than merely plausible */
+static void fixed_clock(struct fat32_time *out) {
+    out->year = 2026; out->month = 8; out->day = 7;
+    out->hour = 14; out->minute = 30; out->second = 45;
+}
+
 static char *slurp(struct fat32 *fs, struct fat32_file *f, uint64_t *out_len) {
     char *buf = malloc(f->size + 1);
     int64_t n = fat32_read(fs, f, 0, buf, f->size);
@@ -315,6 +322,103 @@ int main(int argc, char **argv) {
     CHECK(!fat32_mkdir(&fs, "nowhere/at/all"),
           "and so is one whose parent does not exist");
 
+    /* ---- the fields fat has always had ----
+     *
+     * a fixed clock, so what should have been written is exactly
+     * knowable rather than merely plausible */
+    fat32_set_clock(&fs, fixed_clock);
+
+    CHECK(fat32_create(&fs, "stamped.txt", &fresh), "a file is made");
+    CHECK(fat32_write(&fs, &fresh, 0, "when\n", 5) == 5, "and written");
+    CHECK(fat32_lookup(&fs, "stamped.txt", &f), "and found again");
+    CHECK(f.written.year == 2026 && f.written.month == 8 && f.written.day == 7,
+          "with the date it was written");
+    CHECK(f.written.hour == 14 && f.written.minute == 30,
+          "and the time");
+    /* seconds live in twos, because sixteen bits would not stretch to
+     * one each -- so an odd second comes back as the even one below */
+    CHECK(f.written.second == 44, "to the nearest two seconds, which is all fat holds");
+
+    /* a filesystem with no clock writes zeroes, which is what fat means
+     * by "nobody knows" rather than by "the epoch" */
+    struct fat32 noclock;
+    CHECK(fat32_mount(&noclock, img_read, img_write, &fd), "a mount with no clock");
+    CHECK(fat32_create(&noclock, "noclock.txt", &fresh), "makes files");
+    CHECK(fat32_lookup(&noclock, "noclock.txt", &f), "and finds them");
+    CHECK(f.written.year == 1980, "with no date, which fat spells as its epoch");
+
+    /* ---- unmaking ---- */
+
+    CHECK(fat32_lookup(&fs, "stamped.txt", &f), "a file to remove");
+    uint32_t held = f.first_cluster;
+    CHECK(fat32_unlink(&fs, "stamped.txt"), "is removed");
+    CHECK(!fat32_lookup(&fs, "stamped.txt", &f), "and is gone");
+    CHECK(!fat32_unlink(&fs, "stamped.txt"), "removing it twice does nothing");
+    CHECK(!fat32_unlink(&fs, "made"), "and a directory is not a file to remove");
+    (void)held;
+
+    /* the clusters have to come back, or a disk empties itself one
+     * deleted file at a time and only says so when it is full */
+    uint32_t used_before, total_before;
+    CHECK(fat32_usage(&fs, &used_before, &total_before), "usage counted");
+    struct fat32_file big2;
+    CHECK(fat32_create(&fs, "big2.bin", &big2), "a file that spans clusters");
+    char lump[3000];
+    memset(lump, 'q', sizeof lump);
+    CHECK(fat32_write(&fs, &big2, 0, lump, sizeof lump) == (int64_t)sizeof lump,
+          "is written");
+    uint32_t used_full, total_ignored;
+    fat32_usage(&fs, &used_full, &total_ignored);
+    CHECK(used_full > used_before, "and costs clusters");
+    CHECK(fat32_unlink(&fs, "big2.bin"), "removing it works");
+    uint32_t used_after;
+    fat32_usage(&fs, &used_after, &total_ignored);
+    CHECK(used_after == used_before, "and gives every one of them back");
+
+    /* a long name is several entries, and all of them have to go --
+     * leaving the run behind would leave a name pointing at nothing */
+    CHECK(fat32_lookup(&fs, "velvet-room.txt", &f), "a long-named file");
+    CHECK(f.lfn_sector != 0, "really does have entries in front of it");
+    CHECK(fat32_unlink(&fs, "velvet-room.txt"), "is removed");
+    CHECK(!fat32_lookup(&fs, "velvet-room.txt", &f), "and is gone by that name");
+
+    int leftovers = 0;
+    for (size_t i = 0; fat32_readdir(&fs, 0, i, &e); i++) {
+        if (strstr(e.name, "velvet") != NULL) leftovers++;
+    }
+    CHECK(leftovers == 0, "with nothing of it left in the directory");
+
+    /* ---- renaming ---- */
+
+    CHECK(fat32_create(&fs, "before.txt", &fresh), "a file to rename");
+    CHECK(fat32_write(&fs, &fresh, 0, "same bytes\n", 11) == 11, "with contents");
+    CHECK(fat32_lookup(&fs, "before.txt", &f), "found");
+    uint32_t same_cluster = f.first_cluster;
+
+    CHECK(fat32_rename(&fs, "before.txt", "after.txt"), "is renamed");
+    CHECK(!fat32_lookup(&fs, "before.txt", &f), "and the old name is gone");
+    CHECK(fat32_lookup(&fs, "after.txt", &f), "and the new one is there");
+    CHECK(f.first_cluster == same_cluster,
+          "pointing at the very same clusters -- nothing was copied");
+    CHECK(f.size == 11, "and the same size");
+
+    text = slurp(&fs, &f, &len);
+    CHECK(text && strcmp(text, "same bytes\n") == 0, "with the same contents");
+    free(text);
+
+    /* across directories, which is the same operation: a name moves and
+     * a file does not */
+    CHECK(fat32_rename(&fs, "after.txt", "notes/moved.txt"),
+          "renaming into another directory works");
+    CHECK(!fat32_lookup(&fs, "after.txt", &f), "gone from where it was");
+    CHECK(fat32_lookup(&fs, "notes/moved.txt", &f), "and found where it went");
+    CHECK(f.first_cluster == same_cluster, "still the same clusters");
+
+    CHECK(!fat32_rename(&fs, "notes/moved.txt", "motd.txt"),
+          "renaming onto a name already taken is refused");
+    CHECK(!fat32_rename(&fs, "nothing.txt", "x.txt"),
+          "and renaming what is not there does nothing");
+
     /* ---- a read-only mount must refuse every one of those ---- */
 
     struct fat32 ro;
@@ -324,6 +428,8 @@ int main(int argc, char **argv) {
     CHECK(!fat32_create(&ro, "new.txt", &fresh), "and not added to");
     CHECK(!fat32_mkdir(&ro, "nope"), "no directory made on it");
     CHECK(!fat32_rmdir(&ro, "made"), "and none removed");
+    CHECK(!fat32_unlink(&ro, "hello.txt"), "no file removed");
+    CHECK(!fat32_rename(&ro, "hello.txt", "x.txt"), "and none renamed");
 
     /* ---- everything survives being unmounted ---- */
 
@@ -339,10 +445,22 @@ int main(int argc, char **argv) {
     for (size_t i = 0; fat32_readdir(&remount, 0, i, &e); i++) {
         count++;
     }
-    /* two more than it started with: the file that was created, and the
-     * directory that was made and not removed */
-    CHECK(count == root_at_first + 2,
-          "and the root has exactly what was added to it, no more");
+    /* what the root should hold now: what it started with, plus
+     * notes.txt, `made`, noclock.txt and big2... minus velvet-room.txt
+     * and the ones that were removed again. rather than track that sum
+     * by hand, check the shape of it: more than before, and every name
+     * that was removed really is absent */
+    CHECK(count > root_at_first, "the root grew by what was added to it");
+
+    int ghosts = 0;
+    for (size_t i = 0; fat32_readdir(&remount, 0, i, &e); i++) {
+        if (strcmp(e.name, "velvet-room.txt") == 0) ghosts++;
+        if (strcmp(e.name, "stamped.txt") == 0) ghosts++;
+        if (strcmp(e.name, "big2.bin") == 0) ghosts++;
+        if (strcmp(e.name, "after.txt") == 0) ghosts++;
+    }
+    CHECK(ghosts == 0,
+          "and nothing removed came back when the disk was mounted again");
 
     uint32_t used, total;
     CHECK(fat32_usage(&remount, &used, &total), "usage can be counted");

@@ -25,6 +25,9 @@
 #define SYS_GETCWD 15
 #define SYS_MKDIR  16
 #define SYS_RMDIR  17
+#define SYS_UNLINK 18
+#define SYS_RENAME 19
+#define SYS_STAT   20
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -117,6 +120,36 @@ static inline long mkdir(const char *path) {
 }
 static inline long rmdir(const char *path) {
     return syscall2(SYS_RMDIR, (long)path, (long)ustrlen(path));
+}
+
+/* remove a file. directories go through rmdir, which insists they are
+ * empty first -- there is no recursive delete here and there is not
+ * going to be one until something can be trusted to stop */
+static inline long unlink(const char *path) {
+    return syscall2(SYS_UNLINK, (long)path, (long)ustrlen(path));
+}
+
+/* give a file another name, which is also how it is moved: both are one
+ * name replacing another, and neither copies a single byte */
+static inline long rename(const char *from, const char *to) {
+    return syscall5(SYS_RENAME, (long)from, (long)ustrlen(from),
+                    (long)to, (long)ustrlen(to), 0);
+}
+
+/* what a file is, without opening it. the layout is the kernel's --
+ * see struct user_stat in kernel/src/cpu/syscall.h, which is the other
+ * half of this and has to be changed with it */
+struct stat {
+    uint64_t size;
+    uint32_t mode;
+    uint32_t is_dir;
+    uint16_t year;
+    uint8_t  month, day, hour, minute, second;
+    uint8_t  pad;
+};
+
+static inline long stat(const char *path, struct stat *out) {
+    return syscall3(SYS_STAT, (long)path, (long)ustrlen(path), (long)out);
 }
 
 /* ---- other programs ----------------------------------------------- */

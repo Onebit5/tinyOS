@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.6** (**help that knows what it is describing.** `help cat` runs cat and asks it, because what a program takes is declared inside the program)
+**version: 0.2.7** (**making and unmaking.** `rm`, `cp`, `mv`, `touch`, and files that remember when they were written)
 
 ## what it does
 
@@ -43,10 +43,12 @@ im building this to actually understand what happens between "power button" and 
 - [x] a search path, and `help` that stopped dividing the world in two
 - [x] arguments parsed in one place, declared once per program
 - [x] help that asks a program what it takes rather than keeping a copy
+- [x] files removed, copied, moved and stamped -- and dates fat always had room for
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
-where it goes next is [ROADMAP.md](ROADMAP.md): eleven more steps, ending in a
-filesystem on a real disk and a bootloader of my own.
+where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
+a live mode that can install this system onto a disk, and then 0.3.0 puts it
+on a wire.
 
 still a non-goal: networking, and being useful in any practical sense.
 
@@ -150,6 +152,71 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## making and unmaking
+
+until 0.2.7 a file could be made and written to and never taken away
+again. `rm`, `cp`, `mv` and `touch` fix that, and the interesting part
+is how differently two of them work.
+
+**`mv` moves a name, not a file.** a file's name lives in its
+directory; the file itself lives out in the clusters. changing the
+first does not touch the second, so moving a hundred megabytes across
+directories costs exactly what moving an empty file costs -- one sector
+written, maybe two. **`cp` really does move every byte**, through a 4k
+buffer in the program's own memory and back out again, and it says so
+in its own source rather than pretending otherwise.
+
+the order inside a rename is deliberate and it is the kind of decision
+a filesystem is made of:
+
+```c
+/* the new entry first, then strike out the old. a machine that dies
+ * between the two leaves a file with two names, which fsck can make
+ * sense of -- the other order leaves it with none */
+```
+
+there is no `rm -r`. removing a tree is a different operation to
+removing a file however much the two look alike from outside, and it
+can have its own name when something exists that can be trusted to stop
+in the right place. `rm` refuses a directory and says which it was.
+
+### dates
+
+fat has had a created date, a modified date and an accessed date in
+every directory entry since 1980, and every version of this kernel
+until now wrote zeroes into all three. it packs a date into sixteen
+bits -- seven for the year from 1980, four for the month, five for the
+day -- and the time into sixteen more, which leaves five bits for
+seconds and so **seconds are stored in twos**. an odd second comes back
+as the even one below it. that is not a bug in this kernel, it is what
+fat is.
+
+the filesystem does not know what time it is and is not allowed to:
+
+```c
+typedef void (*fat32_clock)(struct fat32_time *out);
+```
+
+it is handed a function, exactly as it is handed a way to read sectors.
+the kernel gives it the cmos clock; the tests give it a clock stuck at
+one instant, which is what lets a test say *exactly* what should have
+been written rather than merely that something plausible was. a mount
+with no clock at all writes zeroes, and `ls -l` prints dashes for those
+rather than `1980-01-01` -- a date fat spells as zero means nobody
+knows, and printing the epoch would be claiming to.
+
+```
+igor@velvet# ls -l
+       -  ----------  --:--  boot/
+      42  2026-08-07  14:30  notes.txt
+     117  2026-08-07  14:31  motd.txt
+```
+
+`stat` is the syscall behind that column. `ls -l` wants a size and a
+date for every name in a directory, and getting them by opening each
+file would mean a descriptor apiece for something the directory entry
+had already told me.
 
 ## backtraces
 
@@ -1025,6 +1092,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.7** — `rm`, `cp`, `mv` and `touch`, and the difference between two of them is the point: `mv` moves a name and not a file, so it costs the same on a hundred megabytes as on nothing, while `cp` really does carry every byte through a buffer. `fat32_rename` writes the new directory entry *before* striking out the old one on purpose — a machine that dies between the two leaves a file with two names, which is recoverable, where the other order leaves it with none. removing a file gives its clusters back and erases the whole run of long-name entries in front of it, since leaving those behind is how a directory ends up with a name pointing at nothing. fat has had date fields since 1980 and I had been writing zeroes into all of them; the filesystem now takes a clock as a function, so the kernel hands it the cmos and the tests hand it one stuck at a fixed instant — which is what makes "the right bytes were written" checkable rather than plausible. `stat`, and `ls -l`. no `rm -r`: that is a different operation and it can have its own name when something can be trusted to stop in the right place.
 - **0.2.6** — `help cat` runs cat with `--help` and lets it answer. what a program takes is declared inside the program, so any copy the shell kept would be a second description free to drift; there is no copy. `cat --help` typed directly gives identical text by construction rather than by discipline, and both are built from the declaration 0.2.5 introduced. builtins come out of the shell's table, which is where *they* are declared, and `help cd` says why it is a builtin at all. the plain `help` stopped printing a description beside every name -- that was a wall you had to read all of to find one line -- and prints names in columns sized to the terminal instead, with `help <name>` for the one you actually wanted.
 - **0.2.5** — one argument parser, and a program declares what it takes rather than reading `argv` by hand. that declaration is the only description of the program there is: the parser reads it, and so will whatever has to explain it, which is what keeps usage text from drifting away from the code. short and long forms, clustering, values as the next word or stuck on or after an `=`, and `--` to stop parsing -- the last being the only way to name a file that begins with a dash. `--help` is noticed and deliberately not acted on, because deciding what to print is 0.2.6's job and a parser should not write things. `cat -v` and `cat -n`, `ls -1`, `echo -n`, `write -t`.
 - **0.2.4** — a real search path. typing a program by name had worked since 0.1.4, but by sticking `bin/` on the front and asking the ramdisk directly, around the vfs -- so a program on the disk could never be a command and `./thing` meant nothing. now `/bin` then `/boot/bin`, through the vfs, with a name earlier on the path hiding one later; the working directory is deliberately *not* on it, because a name typed alone should mean the same thing wherever you stand and a program left lying about should not become a verb. anything with a slash is a path, read from where you are. `help` is one list with a dot in the margin for the ring 3 ones, and completion offers both. one asymmetry had to go for any of it to work: the ramdisk is a flat archive, so `/boot/bin/hello` could be opened while `/boot/bin` could not be listed.

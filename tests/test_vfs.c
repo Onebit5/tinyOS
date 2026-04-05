@@ -124,9 +124,13 @@ int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
     return (int64_t)len;
 }
 const char *disk_model(void) { return "STUB DISK"; }
-static int mkdirs, rmdirs;
+static int mkdirs, rmdirs, unlinks, renames;
 bool disk_mkdir(const char *path) { (void)path; mkdirs++; return have_disk; }
 bool disk_rmdir(const char *path) { (void)path; rmdirs++; return have_disk; }
+bool disk_unlink(const char *path) { (void)path; unlinks++; return have_disk; }
+bool disk_rename(const char *from, const char *to) {
+    (void)from; (void)to; renames++; return have_disk;
+}
 
 /* ---- a ramdisk, built as a real tar so the parser is the real one ---- */
 
@@ -311,7 +315,33 @@ int main(void) {
     CHECK(!vfs_rmdir("/boot"), "and it is not removable either");
     CHECK(vfs_mkdir("/somedir"), "but the disk takes one");
     CHECK(vfs_rmdir("/somedir"), "and gives it back");
+    CHECK(!vfs_unlink("/boot/welcome.txt"), "nor a file removed from it");
     CHECK(vfs_create("/new.txt", &f), "but the disk will make a file");
+
+    /* ---- unmaking, and moving ---- */
+
+    unlinks = renames = 0;
+    CHECK(!vfs_unlink("/boot/welcome.txt"),
+          "nothing under /boot can be removed either");
+    CHECK(unlinks == 0, "and the disk is not even asked about it");
+    CHECK(vfs_unlink("/notes.txt"), "but a file on the disk goes");
+    CHECK(unlinks == 1, "by asking the disk exactly once");
+
+    CHECK(vfs_rename("/a.txt", "/b.txt"), "a rename on the disk is passed on");
+    CHECK(renames == 1, "once");
+
+    /* a rename with either end on the ramdisk would be a copy pretending
+     * to be a rename -- and one of those quietly costs a whole file's
+     * worth of reading and writing where a rename costs none */
+    renames = 0;
+    CHECK(!vfs_rename("/boot/welcome.txt", "/moved.txt"),
+          "a rename out of /boot is refused");
+    CHECK(!vfs_rename("/notes.txt", "/boot/moved.txt"),
+          "and so is one into it");
+    CHECK(renames == 0, "with the disk never asked to attempt either");
+
+    CHECK(!vfs_unlink(""), "an empty path removes nothing");
+    CHECK(!vfs_rename("/a.txt", ""), "and renames nothing");
 
     /* ---- whole files ---- */
 
@@ -350,6 +380,9 @@ int main(void) {
     CHECK(!vfs_open("/notes.txt", &f),
           "but a name on neither is still on neither");
     CHECK(!vfs_create("/anything.txt", &f), "and nothing can be made");
+    CHECK(!vfs_unlink("/welcome.txt"),
+          "nor unmade -- the copy that is left lives in read-only memory");
+    CHECK(!vfs_rename("/welcome.txt", "/other.txt"), "nor renamed");
 
     count = 0;
     saw_boot = 0;

@@ -88,6 +88,10 @@ bool disk_create(const char *path, struct disk_entry *out) {
 }
 bool disk_mkdir(const char *path) { (void)path; return true; }
 bool disk_rmdir(const char *path) { (void)path; return true; }
+bool disk_unlink(const char *path) { (void)path; return true; }
+bool disk_rename(const char *from, const char *to) {
+    (void)from; (void)to; return true;
+}
 int64_t disk_write_at(struct disk_entry *e, uint64_t o, const void *b,
                       uint64_t l) {
     (void)e; (void)o; (void)b; (void)l; return -1;

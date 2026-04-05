@@ -106,7 +106,8 @@ USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail \
               ramdisk/bin/reader ramdisk/bin/parent ramdisk/bin/ask \
               ramdisk/bin/echo ramdisk/bin/cat ramdisk/bin/uptime ramdisk/bin/ls \
               ramdisk/bin/whoami ramdisk/bin/write \
-              ramdisk/bin/mkdir ramdisk/bin/rmdir
+              ramdisk/bin/mkdir ramdisk/bin/rmdir \
+              ramdisk/bin/rm ramdisk/bin/cp ramdisk/bin/mv ramdisk/bin/touch
 
 # every program links the argument parser, so that what a program takes
 # is declared once and read by both the parser and whatever has to

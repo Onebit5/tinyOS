@@ -35,6 +35,7 @@ static const char *const call_names[SYSCALL_COUNT] = {
     "exit", "write", "read", "uptime", "yield", "sleep",
     "open", "close", "getpid", "spawn", "wait", "readdir", "getuid",
     "create", "chdir", "getcwd", "mkdir", "rmdir",
+    "unlink", "rename", "stat",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -358,6 +359,71 @@ static int64_t sys_rmdir(uint64_t ptr, uint64_t len) {
     return vfs_rmdir(path) ? 0 : -1;
 }
 
+static int64_t sys_unlink(uint64_t ptr, uint64_t len) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    if (process_uid(caller_pid()) != 0) {
+        kprintf("[kernel] pid %d (uid %d) may not remove files\n",
+                caller_pid(), process_uid(caller_pid()));
+        return -1;
+    }
+    return vfs_unlink(path) ? 0 : -1;
+}
+
+static int64_t sys_rename(uint64_t from_ptr, uint64_t from_len,
+                          uint64_t to_ptr, uint64_t to_len) {
+    char from[PATH_MAX], to[PATH_MAX];
+    if (!copy_path_resolved(from_ptr, from_len, from, sizeof from) ||
+        !copy_path_resolved(to_ptr, to_len, to, sizeof to)) {
+        return -1;
+    }
+    if (process_uid(caller_pid()) != 0) {
+        kprintf("[kernel] pid %d (uid %d) may not rename files\n",
+                caller_pid(), process_uid(caller_pid()));
+        return -1;
+    }
+    return vfs_rename(from, to) ? 0 : -1;
+}
+
+/* what a file is, without opening it. `ls -l` wants a size and a date
+ * for every name in a directory, and opening each one to find out would
+ * mean a descriptor per file for information that is in the directory
+ * entry the readdir already read */
+static int64_t sys_stat(uint64_t ptr, uint64_t len, uint64_t out_ptr) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    if (!user_range_ok(out_ptr, sizeof(struct user_stat))) {
+        return -1;
+    }
+
+    struct vfs_file f;
+    if (!vfs_open(path, &f)) {
+        return -1;
+    }
+    if (!vfs_may_read(&f, process_uid(caller_pid()))) {
+        return -1;
+    }
+
+    struct user_stat st;
+    memset(&st, 0, sizeof st);
+    st.size = f.size;
+    st.mode = f.mode;
+    st.is_dir = f.is_dir ? 1 : 0;
+    st.year = f.written.year;
+    st.month = f.written.month;
+    st.day = f.written.day;
+    st.hour = f.written.hour;
+    st.minute = f.written.minute;
+    st.second = f.written.second;
+
+    memcpy((void *)out_ptr, &st, sizeof st);
+    return 0;
+}
+
 /* the nth file in the ramdisk, by name. this is the whole of readdir:
  * there are no directories to descend into, so an index and a name is
  * the entire interface. `ls` needed exactly this and nothing else --
@@ -489,6 +555,12 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_mkdir(a0, a1);
     case SYS_RMDIR:
         return sys_rmdir(a0, a1);
+    case SYS_UNLINK:
+        return sys_unlink(a0, a1);
+    case SYS_RENAME:
+        return sys_rename(a0, a1, a2, a3);
+    case SYS_STAT:
+        return sys_stat(a0, a1, a2);
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

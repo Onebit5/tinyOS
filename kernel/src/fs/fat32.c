@@ -5,6 +5,34 @@
 #define EOC          0x0ffffff8u     /* anything at or above ends a chain */
 #define CLUSTER_MASK 0x0fffffffu     /* the top four bits are not mine */
 
+/* ---- the two words fat keeps a date and a time in --------------------
+ *
+ * squeezed into sixteen bits each, which is why seconds go in twos and
+ * why the year cannot be earlier than 1980: there was no room for a
+ * century, so the epoch was simply declared */
+
+static uint16_t pack_date(const struct fat32_time *t) {
+    if (t->year < 1980) {
+        return 0;
+    }
+    return (uint16_t)(((t->year - 1980) << 9) | ((t->month & 0xf) << 5)
+                      | (t->day & 0x1f));
+}
+
+static uint16_t pack_time(const struct fat32_time *t) {
+    return (uint16_t)(((t->hour & 0x1f) << 11) | ((t->minute & 0x3f) << 5)
+                      | ((t->second / 2) & 0x1f));
+}
+
+static void unpack(uint16_t date, uint16_t time, struct fat32_time *out) {
+    out->year   = (uint16_t)(1980 + (date >> 9));
+    out->month  = (uint8_t)((date >> 5) & 0xf);
+    out->day    = (uint8_t)(date & 0x1f);
+    out->hour   = (uint8_t)(time >> 11);
+    out->minute = (uint8_t)((time >> 5) & 0x3f);
+    out->second = (uint8_t)((time & 0x1f) * 2);
+}
+
 /* ---- little endian, read a byte at a time -------------------------- */
 
 static uint16_t rd16(const uint8_t *p) {
@@ -190,6 +218,31 @@ bool fat32_mount(struct fat32 *fs, fat32_io read, fat32_out write, void *ctx) {
     return true;
 }
 
+void fat32_set_clock(struct fat32 *fs, fat32_clock clock) {
+    fs->clock = clock;
+}
+
+/* stamp an entry with now. a filesystem with no clock writes zeroes,
+ * which is exactly what fat means by "nobody knows" */
+static void stamp(struct fat32 *fs, uint8_t *entry, bool created) {
+    if (fs->clock == NULL) {
+        return;
+    }
+    struct fat32_time now;
+    fs->clock(&now);
+
+    uint16_t d = pack_date(&now);
+    uint16_t t = pack_time(&now);
+
+    if (created) {
+        wr16(&entry[14], t);
+        wr16(&entry[16], d);
+    }
+    wr16(&entry[18], d);        /* last access, which has no time field */
+    wr16(&entry[22], t);
+    wr16(&entry[24], d);
+}
+
 /* ---- names --------------------------------------------------------- */
 
 /* "HELLO   TXT" -> "hello.txt". the two case bits are a later addition
@@ -331,6 +384,11 @@ struct dir_walk {
     uint64_t lba;
     bool     done;
     struct lfn_state lfn;
+
+    /* where the run of long-name entries started, so that removing a
+     * file can remove them too. zero when there was no run */
+    uint64_t lfn_lba;
+    uint32_t lfn_off;
 };
 
 static void walk_start(struct dir_walk *w, uint32_t cluster) {
@@ -338,6 +396,8 @@ static void walk_start(struct dir_walk *w, uint32_t cluster) {
     w->sector_in_cluster = 0;
     w->offset_in_sector = 0;
     w->done = false;
+    w->lfn_lba = 0;
+    w->lfn_off = 0;
     lfn_reset(&w->lfn);
 }
 
@@ -367,16 +427,22 @@ static bool walk_next(struct fat32 *fs, struct dir_walk *w,
             }
             if (entry[0] == 0xe5) {
                 lfn_reset(&w->lfn);     /* deleted */
+                w->lfn_lba = 0;
                 continue;
             }
 
             uint8_t attr = entry[11];
             if ((attr & FAT32_ATTR_LFN) == FAT32_ATTR_LFN) {
+                if (w->lfn_lba == 0) {
+                    w->lfn_lba = entry_lba;
+                    w->lfn_off = entry_off;
+                }
                 lfn_take(&w->lfn, entry);
                 continue;
             }
             if (attr & FAT32_ATTR_VOLUME_ID) {
                 lfn_reset(&w->lfn);     /* the label, not a file */
+                w->lfn_lba = 0;
                 continue;
             }
 
@@ -393,6 +459,12 @@ static bool walk_next(struct fat32 *fs, struct dir_walk *w,
                                | rd16(&entry[26]);
             out->entry_sector = entry_lba;
             out->entry_offset = entry_off;
+            out->lfn_sector = w->lfn_lba;
+            out->lfn_offset = w->lfn_off;
+            unpack(rd16(&entry[24]), rd16(&entry[22]), &out->written);
+
+            w->lfn_lba = 0;
+            w->lfn_off = 0;
             return true;
         }
 
@@ -609,6 +681,7 @@ static bool update_entry(struct fat32 *fs, const struct fat32_file *f) {
         return false;
     }
     uint8_t *entry = &fs->scratch[f->entry_offset];
+    stamp(fs, entry, false);        /* written just now, whenever now is */
     wr32(&entry[28], f->size);
     wr16(&entry[20], (uint16_t)(f->first_cluster >> 16));
     wr16(&entry[26], (uint16_t)(f->first_cluster & 0xffff));
@@ -658,8 +731,12 @@ int64_t fat32_write(struct fat32 *fs, struct fat32_file *f,
     if (f->attr & FAT32_ATTR_READ_ONLY) {
         return -1;
     }
+    /* a write of nothing still says the file was written. posix leaves
+     * that up to whoever implements it, and this is the useful choice:
+     * it is what `touch` is, and it means the answer to "bring this
+     * file's date up to date" does not need a syscall of its own */
     if (len == 0) {
-        return 0;
+        return update_entry(fs, f) ? 0 : -1;
     }
 
     const uint8_t *src = buf;
@@ -858,6 +935,7 @@ bool fat32_create(struct fat32 *fs, const char *path, struct fat32_file *out) {
     memcpy(entry, short11, 11);
     entry[11] = FAT32_ATTR_ARCHIVE;
     entry[12] = case_bits;
+    stamp(fs, entry, true);
     if (!write_sector(fs, lba, fs->scratch)) {
         return false;
     }
@@ -968,6 +1046,7 @@ bool fat32_mkdir(struct fat32 *fs, const char *path) {
     memcpy(entry, short11, 11);
     entry[11] = FAT32_ATTR_DIRECTORY;
     entry[12] = case_bits;
+    stamp(fs, entry, true);
     wr16(&entry[20], (uint16_t)(cluster >> 16));
     wr16(&entry[26], (uint16_t)(cluster & 0xffff));
     return write_sector(fs, lba, fs->scratch);
@@ -1016,6 +1095,155 @@ bool fat32_rmdir(struct fat32 *fs, const char *path) {
     }
     fs->scratch[d.entry_offset] = 0xe5;
     return write_sector(fs, d.entry_sector, fs->scratch);
+}
+
+/* ---- unmaking ------------------------------------------------------- */
+
+/* let a chain of clusters go, following it rather than assuming its
+ * length. a file with no clusters at all -- one that was made and never
+ * written -- has nothing to give back */
+static bool free_chain(struct fat32 *fs, uint32_t cluster) {
+    while (cluster_ok(fs, cluster)) {
+        uint32_t next;
+        if (!fat_get(fs, cluster, &next)) {
+            return false;
+        }
+        if (!fat_set(fs, cluster, 0)) {
+            return false;
+        }
+        if (next >= EOC) {
+            break;
+        }
+        cluster = next;
+    }
+    return true;
+}
+
+/* strike out an entry and every long-name entry standing in front of
+ * it. 0xe5 is how fat has always said "gone" without moving everything
+ * after it up a slot */
+static bool strike_out(struct fat32 *fs, const struct fat32_file *f) {
+    /* the long ones first, if they are in the same sector. a run that
+     * crosses a sector boundary is rare and the leftovers are harmless
+     * -- an orphaned run fails its checksum against whatever entry ends
+     * up behind it, and is ignored */
+    if (f->lfn_sector == f->entry_sector && f->lfn_offset < f->entry_offset) {
+        if (!read_sector(fs, f->lfn_sector, fs->scratch)) {
+            return false;
+        }
+        for (uint32_t o = f->lfn_offset; o < f->entry_offset; o += 32) {
+            fs->scratch[o] = 0xe5;
+        }
+        if (!write_sector(fs, f->lfn_sector, fs->scratch)) {
+            return false;
+        }
+    }
+
+    if (!read_sector(fs, f->entry_sector, fs->scratch)) {
+        return false;
+    }
+    fs->scratch[f->entry_offset] = 0xe5;
+    return write_sector(fs, f->entry_sector, fs->scratch);
+}
+
+bool fat32_unlink(struct fat32 *fs, const char *path) {
+    if (!fs->mounted || fs->write == NULL) {
+        return false;
+    }
+
+    struct fat32_file f;
+    if (!fat32_lookup(fs, path, &f)) {
+        return false;
+    }
+    if (f.is_dir) {
+        return false;       /* rmdir is a different question, asked differently */
+    }
+    if (f.entry_sector == 0) {
+        return false;
+    }
+    if (f.attr & FAT32_ATTR_READ_ONLY) {
+        return false;
+    }
+
+    if (!free_chain(fs, f.first_cluster)) {
+        return false;
+    }
+    return strike_out(fs, &f);
+}
+
+bool fat32_rename(struct fat32 *fs, const char *from, const char *to) {
+    if (!fs->mounted || fs->write == NULL) {
+        return false;
+    }
+
+    struct fat32_file f;
+    if (!fat32_lookup(fs, from, &f) || f.entry_sector == 0) {
+        return false;
+    }
+
+    /* where the new name goes, and what it is */
+    const char *name = to;
+    for (const char *p = to; *p != '\0'; p++) {
+        if (*p == '/') {
+            name = p + 1;
+        }
+    }
+    if (*name == '\0') {
+        return false;
+    }
+
+    char parent[FAT32_NAME_MAX];
+    size_t plen = (size_t)(name - to);
+    if (plen >= sizeof parent) {
+        return false;
+    }
+    memcpy(parent, to, plen);
+    parent[plen] = '\0';
+
+    struct fat32_file dir;
+    if (!fat32_lookup(fs, parent, &dir) || !dir.is_dir) {
+        return false;
+    }
+
+    struct fat32_file clash;
+    if (find_in(fs, dir.first_cluster, name, &clash)) {
+        return false;       /* something is already called that */
+    }
+
+    uint8_t short11[11];
+    uint8_t case_bits;
+    if (!to_short(name, short11, &case_bits)) {
+        return false;
+    }
+
+    /* a new entry pointing at the same clusters. the file does not move
+     * -- not one byte of it is read or written -- because a name is not
+     * where a file is, it is only what it is called */
+    uint64_t lba;
+    uint32_t off;
+    if (!free_slot(fs, dir.first_cluster, &lba, &off)) {
+        return false;
+    }
+    if (!read_sector(fs, lba, fs->scratch)) {
+        return false;
+    }
+    uint8_t *entry = &fs->scratch[off];
+    memset(entry, 0, 32);
+    memcpy(entry, short11, 11);
+    entry[11] = f.attr ? f.attr : FAT32_ATTR_ARCHIVE;
+    entry[12] = case_bits;
+    stamp(fs, entry, true);
+    wr16(&entry[20], (uint16_t)(f.first_cluster >> 16));
+    wr16(&entry[26], (uint16_t)(f.first_cluster & 0xffff));
+    wr32(&entry[28], f.size);
+    if (!write_sector(fs, lba, fs->scratch)) {
+        return false;
+    }
+
+    /* and only now let the old name go. in that order: a machine that
+     * dies between the two leaves a file with two names, which fsck can
+     * make sense of -- the other order leaves it with none */
+    return strike_out(fs, &f);
 }
 
 /* ---- how full it is ------------------------------------------------ */

@@ -160,9 +160,17 @@ there is no second copy anywhere that could drift. the plain `help`
 became names in columns, since a description beside every one of them
 was a wall you had to read all of to find the line you wanted.
 
-**0.2.7 making and unmaking.** `rm`, `cp`, `mv`, `touch`, and files
+**0.2.7 making and unmaking.** ~~`rm`, `cp`, `mv`, `touch`, and files
 that remember when they were written. fat has fields for all of that
-and I have been writing zeroes into them.
+and I have been writing zeroes into them.~~ **done in 0.2.7.** the two
+things worth writing down: `mv` moves a name and not a file, so moving
+a hundred megabytes costs the same as moving nothing -- and `rename`
+writes the new entry before striking out the old one, deliberately, so
+that a machine dying between the two leaves a file with two names
+rather than none. `stat` came with it, because `ls -l` wanted a size
+and a date for every name in a directory and opening each one to find
+out would be a descriptor apiece for what the directory entry already
+said.
 
 **0.2.8 pipes.** `cat x | head` has been an error message since 0.1.10.
 a pipe is a descriptor with a buffer behind it, a reader that blocks
