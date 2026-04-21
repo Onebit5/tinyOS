@@ -11,6 +11,7 @@
 #include "cpu/interrupts.h"
 #include "sched/spinlock.h"
 #include "sched/process.h"
+#include "fs/pipe.h"
 #include "drivers/pit.h"
 
 static int next_id = 1;     /* 0 belongs to the boot thread */
@@ -164,6 +165,13 @@ void thread_exit(int code) {
     if (me->pid != 0) {
         narrate = process_announces(me->pid);
         process_exited(me->pid, code, pit_uptime_ms());
+
+        /* let go of both ends of whatever pipeline this was part of.
+         * this is what turns "the program finished" into "end of file"
+         * for whoever is reading from it -- without it, `cat x | head`
+         * would leave head asleep on an empty pipe forever, waiting for
+         * a cat that has already gone */
+        pipe_release_for(me->pid);
     }
 
     /* a kernel thread always says so -- `summon` exists to be watched.

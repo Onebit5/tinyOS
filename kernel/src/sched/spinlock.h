@@ -38,7 +38,11 @@
  * one of them may allocate; nothing calls back the other way. anything
  * may print, and printing calls nobody */
 enum lock_rank {
-    LOCK_RANK_DEVICE = 1,       /* tty, input, rtc, pci, the disk */
+    /* a pipe is the lowest thing there is: it wakes threads and does
+     * nothing else at all, so it may be held while reaching up to the
+     * scheduler and there is nothing beneath it to reach down to */
+    LOCK_RANK_PIPE = 1,
+    LOCK_RANK_DEVICE,           /* tty, input, rtc, pci, the disk */
     LOCK_RANK_SCHED,            /* the run queue */
     LOCK_RANK_PROCESS,          /* the process table, which sched reaches into */
     LOCK_RANK_HEAP,             /* slab, and kmalloc above it */

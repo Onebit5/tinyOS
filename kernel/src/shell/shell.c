@@ -19,6 +19,7 @@
 #include "drivers/ahci.h"
 #include "cpu/smp.h"
 #include "sched/usermode.h"
+#include "fs/pipe.h"
 #include "sched/auth.h"
 #include "cpu/syscall.h"
 #include "cpu/interrupts.h"
@@ -497,6 +498,15 @@ static void cmd_slabs(int argc, char **argv) {
 static void cmd_ps(int argc, char **argv) {
     (void)argc; (void)argv;
     sched_dump();
+
+    /* a pipe outlives neither end and is freed the moment both let go,
+     * so this number should be zero at a prompt. anything else and
+     * something died without releasing what it held, which is the one
+     * failure mode of the whole arrangement that hides */
+    size_t pipes = pipe_count();
+    if (pipes > 0) {
+        kprintf("%lu pipe%s still open\n", pipes, pipes == 1 ? "" : "s");
+    }
 }
 
 static void cmd_summon(int argc, char **argv) {
@@ -1071,8 +1081,18 @@ static const struct command commands[] = {
 /* ---- the line editor ----------------------------------------------- */
 
 /* chop a line into argv in place. spaces become terminators, runs of
- * them collapse, and I stop early rather than overflow argv */
+ * them collapse, and I stop early rather than overflow argv.
+ *
+ * a bar is its own word whether or not anybody put spaces round it, so
+ * `cat x|head` and `cat x | head` split the same way. that is one of
+ * those things nobody notices working and everybody notices missing.
+ *
+ * the bar itself cannot stay in the line -- the word before it needs a
+ * terminator, and that terminator goes exactly where the bar was. so it
+ * is replaced by a NUL and a pointer to a constant "|" is put in argv
+ * instead. having seen it is enough; nothing needs the original byte. */
 static int split(char *line, char **argv, int max) {
+    static char bar[] = "|";
     int argc = 0;
     char *p = line;
 
@@ -1083,12 +1103,24 @@ static int split(char *line, char **argv, int max) {
         if (*p == '\0' || argc == max) {
             break;
         }
+
+        if (*p == '|') {
+            argv[argc++] = bar;
+            p++;
+            continue;
+        }
+
         argv[argc++] = p;
-        while (*p != '\0' && *p != ' ') {
+        while (*p != '\0' && *p != ' ' && *p != '|') {
             p++;
         }
         if (*p == ' ') {
             *p++ = '\0';
+        } else if (*p == '|') {
+            *p++ = '\0';
+            if (argc < max) {
+                argv[argc++] = bar;
+            }
         }
     }
     return argc;
@@ -1096,12 +1128,22 @@ static int split(char *line, char **argv, int max) {
 
 /* dispatch an already-split command. separate from run_line so `time`
  * can hand me its own argv without re-parsing anything */
+static const struct command *builtin_named(const char *name) {
+    for (const struct command *c = commands; c->name; c++) {
+        if (strcmp(name, c->name) == 0) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
 static void run_argv(int argc, char **argv) {
     if (argc == 0) {
         return;
     }
-    for (const struct command *c = commands; c->name; c++) {
-        if (strcmp(argv[0], c->name) == 0) {
+    {
+        const struct command *c = builtin_named(argv[0]);
+        if (c != NULL) {
             c->fn(argc, argv);
             return;
         }
@@ -1144,21 +1186,117 @@ static void run_argv(int argc, char **argv) {
     }
 }
 
-/* there are no pipes and no redirection here. saying so is worth doing,
- * because otherwise `cat x | head` hands cat two filenames it cannot
- * find and the complaint lands on `|` rather than on the shell */
+/* redirection is still not a thing. pipes are, as of 0.2.8, so this is
+ * down to the two arrows -- and saying so is worth doing, because
+ * otherwise `cat x > y` hands cat two filenames it cannot find and the
+ * complaint lands on `>` rather than on the shell */
 static bool shell_metacharacter(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
         for (const char *p = argv[i]; *p != '\0'; p++) {
-            if (*p != '|' && *p != '<' && *p != '>') {
+            if (*p != '<' && *p != '>') {
                 continue;
             }
-            kprintf("no pipes or redirection yet -- the shell does not know "
-                    "what to do with '%c'.\n", *p);
+            kprintf("no redirection yet -- the shell does not know what to do "
+                    "with '%c'.\n", *p);
             kprintf("everything after it would be handed to %s as a filename, "
                     "which is not\n", argc > 0 ? argv[0] : "the command");
             kprintf("what you meant. to put something in a file: "
-                    "write /disk/notes.txt some words\n");
+                    "write notes.txt some words\n");
+            return true;
+        }
+    }
+    return false;
+}
+
+/* ---- pipelines ------------------------------------------------------
+ *
+ * a bar separates two commands and joins them at the same time. the
+ * shell's whole job here is the joining: resolve each name to a
+ * program, then hand the list to user_pipeline, which makes the pipes
+ * and starts everything at once.
+ *
+ * builtins cannot be in one. `ps | grep hello` would want the shell's
+ * own output to go somewhere other than the console, and the shell is a
+ * kernel thread with no stdout to redirect -- it prints with kprintf,
+ * straight at the screen. that is a real limitation and it is worth
+ * saying out loud rather than failing strangely. */
+
+/* chop an already-split argv at every bare `|`, in place. each piece
+ * comes back as its own argc/argv. returns how many pieces, or -1 if
+ * the line is malformed */
+static int split_pipeline(int argc, char **argv, struct stage *out, int max) {
+    int count = 0;
+    int start = 0;
+
+    for (int i = 0; i <= argc; i++) {
+        bool bar = (i < argc && strcmp(argv[i], "|") == 0);
+        if (i != argc && !bar) {
+            continue;
+        }
+        if (i == start) {
+            /* `| x`, `x |`, or `x || y` -- an empty command either side
+             * of a bar, which means nothing at all */
+            return -1;
+        }
+        if (count == max) {
+            return -1;
+        }
+        out[count].argc = i - start;
+        out[count].argv = &argv[start];
+        out[count].path = NULL;
+        count++;
+        start = i + 1;
+    }
+    return count;
+}
+
+/* is this word a builtin? a pipeline cannot contain one */
+static const struct command *builtin_named(const char *name);
+
+static void run_pipeline(int argc, char **argv) {
+    struct stage stages[PIPELINE_MAX];
+    int count = split_pipeline(argc, argv, stages, PIPELINE_MAX);
+
+    if (count < 0) {
+        kprintf("a bar joins two commands, so it wants one on either side "
+                "of it\n");
+        kprintf("(and I can join at most %d)\n", PIPELINE_MAX);
+        return;
+    }
+
+    /* every stage has to be a program before any of them starts.
+     * finding out halfway through would leave the earlier ones already
+     * running and writing into a pipe with nobody at the end */
+    static char paths[PIPELINE_MAX][PATH_MAX];
+    for (int i = 0; i < count; i++) {
+        const char *name = stages[i].argv[0];
+
+        const struct command *b = builtin_named(name);
+        if (b != NULL) {
+            kprintf("'%s' is a builtin, and builtins cannot go in a "
+                    "pipeline --\n", name);
+            kprintf("the shell is a kernel thread and prints straight at the "
+                    "screen, so it\n");
+            kprintf("has no output to hand anybody. only programs can be "
+                    "joined up.\n");
+            return;
+        }
+        if (!find_program(name, paths[i], sizeof paths[i])) {
+            missing("run", name);
+            return;
+        }
+        stages[i].path = paths[i];
+    }
+
+    const char *why = NULL;
+    if (!user_pipeline(stages, count, shell_cwd, current_uid, &why)) {
+        kprintf("cannot run the pipeline: %s\n", why);
+    }
+}
+
+static bool has_bar(int argc, char **argv) {
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "|") == 0) {
             return true;
         }
     }
@@ -1169,6 +1307,10 @@ static void run_line(char *line) {
     char *argv[ARGV_MAX];
     int argc = split(line, argv, ARGV_MAX);
     if (shell_metacharacter(argc, argv)) {
+        return;
+    }
+    if (has_bar(argc, argv)) {
+        run_pipeline(argc, argv);
         return;
     }
     run_argv(argc, argv);   /* argc 0 just means they pressed enter */
@@ -1278,15 +1420,25 @@ static size_t common_prefix(const char *a, const char *b) {
     return n;
 }
 
-/* the word the cursor is sitting in, and whether it is the first one.
- * returns where that word starts */
+/* the word the cursor is sitting in, and whether it is in command
+ * position -- meaning a program name is what belongs there, rather than
+ * a filename. returns where that word starts.
+ *
+ * a bar resets that, and has to: in `cat x | he` the `he` is a command,
+ * not a file, and completing it against the working directory would
+ * offer exactly the wrong list. so the search backwards stops at the
+ * most recent bar as well as at the start of the line. */
 static size_t word_start(const char *line, size_t pos, bool *first_word) {
     size_t start = pos;
-    while (start > 0 && line[start - 1] != ' ') {
+    while (start > 0 && line[start - 1] != ' ' && line[start - 1] != '|') {
         start--;
     }
+
     *first_word = true;
-    for (size_t i = 0; i < start; i++) {
+    for (size_t i = start; i-- > 0; ) {
+        if (line[i] == '|') {
+            break;              /* everything back to the bar was space */
+        }
         if (line[i] != ' ') {
             *first_word = false;
             break;

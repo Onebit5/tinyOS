@@ -16,6 +16,7 @@
 #include "fs/vfs.h"
 #include "fs/path.h"
 #include "drivers/tty.h"
+#include "fs/pipe.h"
 #include "sched/auth.h"
 #include "lib/string.h"
 
@@ -139,7 +140,37 @@ static int64_t sys_write_console(uint64_t ptr, uint64_t len);
 
 static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
     if (fd == FD_STDOUT || fd == FD_STDERR) {
-        return sys_write_console(ptr, len);
+        /* stderr never goes down a pipe. that is deliberate and it is
+         * what everybody expects: `cat missing | head` should still put
+         * its complaint on the screen rather than feeding it to head as
+         * though it were data */
+        struct pipe *out = (fd == FD_STDOUT) ? process_stdout(caller_pid())
+                                             : NULL;
+        if (out == NULL) {
+            return sys_write_console(ptr, len);
+        }
+
+        if (len > WRITE_MAX) {
+            len = WRITE_MAX;
+        }
+        if (!user_range_ok(ptr, len)) {
+            return -1;
+        }
+
+        int64_t n = pipe_write(out, caller_pid(), (const void *)ptr, len);
+        if (n < 0) {
+            /* nobody is reading and nobody ever will be. unix raises
+             * SIGPIPE here and the default disposition is to die; I
+             * have no signals, so the process is ended for it, which
+             * gets to the same place by a shorter road.
+             *
+             * this is not tidiness. it is what makes `cat huge | head`
+             * stop: head has seen enough and gone, and without this cat
+             * would sit blocked on a buffer that will never drain,
+             * holding the terminal, forever */
+            thread_exit(PROCESS_KILLED);
+        }
+        return n;
     }
 
     /* a descriptor onto the ramdisk is a bookmark into read-only
@@ -196,6 +227,14 @@ static int64_t sys_write_console(uint64_t ptr, uint64_t len) {
 /* the terminal does the echoing and the line editing, because a program
  * in ring 3 cannot -- the keys never pass through it */
 static int64_t sys_read_stdin(uint64_t ptr, uint64_t len) {
+    /* stdin is the keyboard unless somebody put a pipe there. a program
+     * cannot tell which, and that is the point of the whole
+     * arrangement: `head` reads stdin and neither knows nor cares
+     * whether a person or a `cat` is on the other end */
+    struct pipe *in = process_stdin(caller_pid());
+    if (in != NULL) {
+        return pipe_read(in, caller_pid(), (void *)ptr, len);
+    }
     return tty_read_line(caller_pid(), (char *)ptr, len);
 }
 
@@ -491,7 +530,7 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
     const char *why = NULL;
     const char *argv[1] = { path };
     int pid = user_spawn(path, 1, argv, process_cwd(caller_pid()), caller_pid(),
-                         process_uid(caller_pid()), false, &why);
+                         process_uid(caller_pid()), false, NULL, NULL, &why);
     return (pid == 0) ? -1 : pid;
 }
 

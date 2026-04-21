@@ -172,11 +172,20 @@ and a date for every name in a directory and opening each one to find
 out would be a descriptor apiece for what the directory entry already
 said.
 
-**0.2.8 pipes.** `cat x | head` has been an error message since 0.1.10.
-a pipe is a descriptor with a buffer behind it, a reader that blocks
-until there is something or the writer is gone, and two processes wired
-together at spawn. then `head`, `wc`, `grep` and `sort`, which are only
-worth having once there is something to connect them to.
+**0.2.8 pipes.** ~~`cat x | head` has been an error message since
+0.1.10. a pipe is a descriptor with a buffer behind it, a reader that
+blocks until there is something or the writer is gone, and two
+processes wired together at spawn. then `head`, `wc`, `grep` and
+`sort`, which are only worth having once there is something to connect
+them to.~~ **done in 0.2.8.** the buffer was the easy half. the two
+rules hanging off the reference counts are the whole thing: a read
+returns 0 when the last writer goes, which is the only reason a
+pipeline ever finishes, and a write fails when the last reader goes,
+which is the only reason `cat huge | head` stops instead of blocking
+forever. unix raises SIGPIPE there and the default is to die; with no
+signals I do the dying part directly. builtins cannot be in a pipeline
+and it says so -- the shell is a kernel thread printing straight at the
+screen, so it has no stdout to hand anybody.
 
 **0.2.9 an editor.** something nano-shaped, so a file on the disk can be
 changed by the machine that stores it rather than by rebuilding the

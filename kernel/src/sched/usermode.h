@@ -25,12 +25,45 @@ void enter_usermode(uint64_t entry, uint64_t stack_top,
  * message, so it is a value it can compare against rather than prose */
 extern const char *const USER_RUN_NO_SUCH_FILE;
 
+struct pipe;
+
 /* start a program and return its pid, or 0 with *error set. `parent` is
  * the pid that will be allowed to wait for it -- 0 means the kernel
- * shell, which is nobody's child */
+ * shell, which is nobody's child.
+ *
+ * `in` and `out` are where its stdin and stdout go; NULL for either
+ * means the terminal, which is what everything except a pipeline
+ * wants. the process owns whichever ends it is given and lets go of
+ * them when it dies, so the caller must not close them itself */
 int user_spawn(const char *path, int argc, const char *const argv[],
                const char *cwd,
-               int parent, int uid, bool announce, const char **error);
+               int parent, int uid, bool announce,
+               struct pipe *in, struct pipe *out, const char **error);
+
+/* one command in a pipeline: already resolved to a path, with the
+ * arguments it was typed with */
+#define PIPELINE_MAX 4
+
+struct stage {
+    const char *path;
+    int         argc;
+    char      **argv;
+};
+
+/* run `count` commands with a pipe between each neighbouring pair, and
+ * wait for all of them.
+ *
+ * they are all started before any is waited for, which is not an
+ * optimisation but a requirement: a pipeline where the first is run to
+ * completion before the second begins would deadlock the moment the
+ * first wrote more than one buffer's worth. every stage runs at once
+ * and the buffer between them is what keeps them in step.
+ *
+ * returns false with *error set if the first one could not be started
+ * at all; a failure further along is reported and the rest carry on,
+ * since they will see end of file and finish by themselves */
+bool user_pipeline(const struct stage *stages, int count, const char *cwd,
+                   int uid, const char **error);
 
 /* block until a pid has ended, then collect it. false if there is no
  * such process. whether the caller had any business waiting for it is

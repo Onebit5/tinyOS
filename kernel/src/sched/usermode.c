@@ -14,6 +14,7 @@
 #include "mm/vmm.h"
 #include "sched/process.h"
 #include "drivers/pit.h"
+#include "fs/pipe.h"
 
 const char *const USER_RUN_NO_SUCH_FILE = "no such file";
 
@@ -59,6 +60,9 @@ static void reap_abandoned(void) {
                 break;
             }
             if (p->exited) {
+                /* before the slot goes, since afterwards there is
+                 * nothing left to ask which pipes it was holding */
+                pipe_release_for(p->pid);
                 process_collect(p->pid, NULL);
                 collected_one = true;
                 break;
@@ -126,7 +130,8 @@ static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
 
 int user_spawn(const char *path, int argc, const char *const argv[],
                const char *cwd,
-               int parent, int uid, bool announce, const char **error) {
+               int parent, int uid, bool announce,
+               struct pipe *in, struct pipe *out, const char **error) {
     reap_abandoned();
 
     /* a program off the ramdisk is already in memory and is used where
@@ -219,6 +224,9 @@ int user_spawn(const char *path, int argc, const char *const argv[],
     if (pid != 0 && cwd != NULL) {
         process_set_cwd(pid, cwd);
     }
+    if (pid != 0 && (in != NULL || out != NULL)) {
+        process_set_pipes(pid, in, out);
+    }
     if (pid == 0) {
         kfree(start);
         addrspace_destroy(space);
@@ -264,10 +272,120 @@ bool user_wait(int pid, int *code) {
     return process_collect(pid, code);
 }
 
+bool user_pipeline(const struct stage *stages, int count, const char *cwd,
+                   int uid, const char **error) {
+    if (count < 1 || count > PIPELINE_MAX) {
+        *error = "that is more commands than I can join up";
+        return false;
+    }
+
+    /* one pipe between each neighbouring pair, so count-1 of them. each
+     * is born holding one reader and one writer, and those are exactly
+     * the two ends about to be handed out -- so the shell never holds a
+     * reference of its own and never has to remember to drop one */
+    struct pipe *pipes[PIPELINE_MAX - 1];
+    for (int i = 0; i < count - 1; i++) {
+        pipes[i] = pipe_create();
+        if (pipes[i] == NULL) {
+            for (int j = 0; j < i; j++) {
+                pipe_close_read(pipes[j]);
+                pipe_close_write(pipes[j]);
+            }
+            *error = "no memory for a pipe";
+            return false;
+        }
+    }
+
+    int pids[PIPELINE_MAX];
+    int started = 0;
+
+    for (int i = 0; i < count; i++) {
+        struct pipe *in  = (i > 0)         ? pipes[i - 1] : NULL;
+        struct pipe *out = (i < count - 1) ? pipes[i]     : NULL;
+
+        const char *why = NULL;
+        int pid = user_spawn(stages[i].path, stages[i].argc,
+                             (const char *const *)stages[i].argv,
+                             cwd, 0, uid, false, in, out, &why);
+        pids[i] = pid;
+        if (pid != 0) {
+            started++;
+            continue;
+        }
+
+        /* it never started, so it will never close the ends it was
+         * going to be given -- and a pipe nobody closes is a neighbour
+         * blocked forever. close them here instead, which the ones
+         * either side see as end of file and a broken pipe, and they
+         * finish by themselves */
+        if (i == 0 && count == 1) {
+            *error = why;
+            return false;
+        }
+        kprintf("cannot run %s: %s\n", stages[i].path, why);
+        pipe_close_read(in);
+        pipe_close_write(out);
+
+        if (i == 0) {
+            *error = why;
+        }
+    }
+
+    if (started == 0) {
+        return false;
+    }
+
+    /* the last one gets the terminal. it is the only stage that could
+     * sensibly want the keyboard -- everything earlier is reading from
+     * whoever is in front of it -- and it is the one still running when
+     * a person reaches for ctrl+c */
+    int last = 0;
+    for (int i = count - 1; i >= 0; i--) {
+        if (pids[i] != 0) {
+            last = pids[i];
+            break;
+        }
+    }
+    tty_set_foreground(last);
+
+    /* wait for all of them, not just the last. the shell's prompt must
+     * not come back while something in the middle is still printing --
+     * and by id rather than by pointer, because the reaper may free a
+     * thread the instant it dies and an id cannot dangle */
+    for (int i = 0; i < count; i++) {
+        if (pids[i] == 0) {
+            continue;
+        }
+        const struct process *p = process_find(pids[i]);
+        int id = (p != NULL) ? p->thread_id : 0;
+        while (sched_thread_alive(id)) {
+            sleep_ms(20);
+        }
+    }
+
+    tty_set_foreground(TTY_SHELL);
+
+    for (int i = 0; i < count; i++) {
+        int code = 0;
+        if (pids[i] != 0 && process_collect(pids[i], &code)) {
+            if (code == PROCESS_KILLED) {
+                /* the ordinary end of a pipeline whose reader stopped
+                 * early, so it is only worth saying about the last one
+                 * -- `yes | head` killing yes is the machinery working */
+                if (i == count - 1) {
+                    kprintf("[kernel] pid %d was killed\n", pids[i]);
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool user_run(const char *path, int argc, const char *const argv[],
               const char *cwd,
               int uid, bool background, bool announce, const char **error) {
-    int pid = user_spawn(path, argc, argv, cwd, 0, uid, announce, error);
+    int pid = user_spawn(path, argc, argv, cwd, 0, uid, announce,
+                         NULL, NULL, error);
     if (pid == 0) {
         return false;
     }

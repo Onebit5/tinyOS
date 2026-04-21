@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.7** (**making and unmaking.** `rm`, `cp`, `mv`, `touch`, and files that remember when they were written)
+**version: 0.2.8** (**pipes.** `cat x | head` was an error message for eight versions; now it is a buffer with a process at each end)
 
 ## what it does
 
@@ -44,6 +44,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] arguments parsed in one place, declared once per program
 - [x] help that asks a program what it takes rather than keeping a copy
 - [x] files removed, copied, moved and stamped -- and dates fat always had room for
+- [x] pipes: `cat x | grep hee | wc -l`, with end of file and broken pipes that mean it
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -152,6 +153,86 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## pipes
+
+`cat x | head` had been an error message since 0.1.10, and the reason
+was that there was nothing for the arrow to be made of. a pipe is not
+much -- a ring buffer, a count of who still holds each end, and two
+places to sleep -- but almost none of the interesting part is the
+buffer. it is the two rules hanging off those counts.
+
+**a read with nothing in it blocks, unless every writer has gone, in
+which case it returns 0.** that zero is end of file, and it is the only
+reason `head` ever stops rather than waiting forever for a `cat` that
+finished minutes ago. the ordering inside that sentence is load-bearing:
+a read that returned 0 as soon as the writer left would throw away
+everything still sitting in the buffer, and `echo hi | cat` would print
+nothing at all — *sometimes*, depending on which process happened to be
+scheduled first.
+
+**a write with no reader left fails.** nobody will ever collect it, so
+filling a buffer that can never drain is worse than useless. unix raises
+SIGPIPE here and the default disposition is to die; I have no signals,
+so the kernel ends the process directly, which reaches the same place by
+a shorter road. that one rule is the whole reason `cat huge | head`
+terminates: head sees ten lines, leaves, and cat's next write finds
+nobody there.
+
+```
+igor@velvet# cat motd.txt | grep velvet | wc -l
+igor@velvet# ls -1 | sort -r
+igor@velvet# ls -1 /boot/bin | wc -l
+```
+
+### where the ends actually attach
+
+descriptors 0, 1 and 2 have never been entries in the descriptor table
+here — the syscall layer answers them directly, because until now there
+was exactly one place they could point. a pipeline gives two of them
+somewhere else to point, and **one pointer each on the process** is the
+whole of what that took.
+
+that is deliberately not general redirection. there is no `dup2` and `>`
+still does nothing, because pointing stdout at a *file* wants 0, 1 and 2
+to become real slots — a bigger change than a pipeline needs, and one
+worth doing when something actually asks for it.
+
+stderr never goes down a pipe. `cat missing | head` should put its
+complaint on the screen rather than feeding it to head as though it were
+data.
+
+### the two ways a process stops
+
+a program that chooses to leave runs `thread_exit`. one that is *killed*
+never does — `sched_kill` marks the thread dead and it simply never
+executes again. so releasing a process's pipe ends cannot live in only
+one of those, and `pipe_release_for` is idempotent on purpose: the
+reaper calls it, `thread_exit` calls it, and the sweep that collects
+abandoned processes calls it, and whichever gets there first is the one
+that counts.
+
+that is not tidiness. a stage that dies without releasing its ends
+leaves the stage after it asleep on a pipe that will never say end of
+file, which looks exactly like a hung machine and is not. `ps` prints
+how many pipes are still open, and at a prompt that number should be
+zero.
+
+### what cannot go in one
+
+builtins. `ps | grep hello` is refused, and says why: the shell is a
+kernel thread that prints with `kprintf`, straight at the screen — it
+has no stdout to hand anybody. only programs can be joined up.
+
+### the programs that make it worth having
+
+`head`, `wc`, `grep` and `sort`, all of which read a named file or
+standard input and cannot tell which they got — that indifference *is*
+the feature. `cat` learned to do the same. `grep` is a plain substring
+search and `grep --help` says so out loud rather than implying a regex
+engine that is not there. `sort` is the one that cannot stream: it has
+to have seen the last line before it can print the first, so it has a
+limit where the others have none, and it says so when it hits it.
 
 ## making and unmaking
 
@@ -1092,6 +1173,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.8** — pipes, and the buffer turned out to be the easy half. the two rules that matter both hang off the reference counts: a read returns 0 once the last writer has gone (which is the only reason a pipeline ever finishes) and a write fails once the last reader has (which is the only reason `cat huge | head` stops rather than blocking forever on a buffer that can never drain). unix raises SIGPIPE there and the default disposition is to die; with no signals, the kernel does the dying part directly. releasing a process's ends had to be idempotent, because a program that *chooses* to leave runs `thread_exit` and one that is killed never does — three separate paths call `pipe_release_for` and whichever arrives first wins, since a stage that dies still holding an end leaves its neighbour asleep on a pipe that will never say end of file. 0, 1 and 2 were never table entries here, so a pipeline is one pointer each on the process rather than a rebuilt descriptor table; that is why `>` still does nothing and says so. stderr deliberately stays on the console. builtins are refused with a reason: the shell is a kernel thread printing straight at the screen and has no stdout to give away. `head`, `wc`, `grep` and `sort`, plus a `cat` that reads standard input — all of them indifferent to whether a file or a bar is on the other end, which is the whole point. tab completion learned that the word after a bar is a command and not a filename.
 - **0.2.7** — `rm`, `cp`, `mv` and `touch`, and the difference between two of them is the point: `mv` moves a name and not a file, so it costs the same on a hundred megabytes as on nothing, while `cp` really does carry every byte through a buffer. `fat32_rename` writes the new directory entry *before* striking out the old one on purpose — a machine that dies between the two leaves a file with two names, which is recoverable, where the other order leaves it with none. removing a file gives its clusters back and erases the whole run of long-name entries in front of it, since leaving those behind is how a directory ends up with a name pointing at nothing. fat has had date fields since 1980 and I had been writing zeroes into all of them; the filesystem now takes a clock as a function, so the kernel hands it the cmos and the tests hand it one stuck at a fixed instant — which is what makes "the right bytes were written" checkable rather than plausible. `stat`, and `ls -l`. no `rm -r`: that is a different operation and it can have its own name when something can be trusted to stop in the right place.
 - **0.2.6** — `help cat` runs cat with `--help` and lets it answer. what a program takes is declared inside the program, so any copy the shell kept would be a second description free to drift; there is no copy. `cat --help` typed directly gives identical text by construction rather than by discipline, and both are built from the declaration 0.2.5 introduced. builtins come out of the shell's table, which is where *they* are declared, and `help cd` says why it is a builtin at all. the plain `help` stopped printing a description beside every name -- that was a wall you had to read all of to find one line -- and prints names in columns sized to the terminal instead, with `help <name>` for the one you actually wanted.
 - **0.2.5** — one argument parser, and a program declares what it takes rather than reading `argv` by hand. that declaration is the only description of the program there is: the parser reads it, and so will whatever has to explain it, which is what keeps usage text from drifting away from the code. short and long forms, clustering, values as the next word or stuck on or after an `=`, and `--` to stop parsing -- the last being the only way to name a file that begins with a dash. `--help` is noticed and deliberately not acted on, because deciding what to print is 0.2.6's job and a parser should not write things. `cat -v` and `cat -n`, `ls -1`, `echo -n`, `write -t`.

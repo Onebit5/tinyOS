@@ -17,8 +17,8 @@ static const struct opt cat_opts[] = {
 
 static const struct program cat = {
     .name = "cat",
-    .usage = "cat [-v] [-n] <file>...",
-    .summary = "print files",
+    .usage = "cat [-v] [-n] [file...]",
+    .summary = "print files, or standard input if none are named",
     .opts = cat_opts,
     .opt_count = sizeof cat_opts / sizeof cat_opts[0],
 };
@@ -27,21 +27,11 @@ static bool verbose;
 static bool numbered;
 static long line_no = 1;
 
-static int show(const char *path) {
-    long fd = open(path);
-    if (fd < 0) {
-        write("cat: no such file: ");
-        write(path);
-        write("\n");
-        return 1;
-    }
-
-    if (verbose) {
-        write("==> ");
-        write(path);
-        write(" <==\n");
-    }
-
+/* the reading half, once there is a descriptor. split out because a
+ * file and standard input differ only in where the fd came from -- and
+ * a cat that could not read stdin would be a cat that cannot be the
+ * second half of a pipeline, which is most of what cat is for */
+static void pour(long fd) {
     char buf[128];
     long last = '\n';
     for (;;) {
@@ -65,11 +55,28 @@ static int show(const char *path) {
             last = buf[i];
         }
     }
-    close(fd);
-
     if (last != '\n') {
         write("\n");
     }
+}
+
+static int show(const char *path) {
+    long fd = open(path);
+    if (fd < 0) {
+        write("cat: no such file: ");
+        write(path);
+        write("\n");
+        return 1;
+    }
+
+    if (verbose) {
+        write("==> ");
+        write(path);
+        write(" <==\n");
+    }
+
+    pour(fd);
+    close(fd);
     return 0;
 }
 
@@ -82,13 +89,21 @@ void _start(int argc, char **argv) {
         write("\n");
         exit(1);
     }
-    if (a.wants_help || a.count == 0) {
+    if (a.wants_help) {
         args_usage(&cat);
-        exit(a.wants_help ? 0 : 1);
+        exit(0);
     }
 
     verbose = args_has(&a, &cat, 'v');
     numbered = args_has(&a, &cat, 'n');
+
+    /* no filenames means standard input, which is the keyboard or
+     * whoever is on the other side of a bar. `ls | cat -n` is the
+     * shortest thing that proves both halves of 0.2.8 at once */
+    if (a.count == 0) {
+        pour(STDIN);
+        exit(0);
+    }
 
     int bad = 0;
     for (int i = 0; i < a.count; i++) {

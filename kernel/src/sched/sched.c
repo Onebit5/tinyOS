@@ -16,6 +16,7 @@
 #include "mm/pmm.h"
 #include "mm/addrspace.h"
 #include "sched/process.h"
+#include "fs/pipe.h"
 
 /* how many ticks a thread gets before I take the cpu back. 5 ticks at
  * 100hz = 50ms, short enough to look instant, long enough that I am
@@ -134,6 +135,10 @@ static void reap_dead(void) {
     spin_unlock_irq(&sched_lock, flags);
 
     for (int i = 0; i < n; i++) {
+        /* a thread that was *killed* never ran thread_exit, so this is
+         * the only place its pipe ends get released. outside the lock,
+         * because closing one wakes whoever is waiting on it */
+        pipe_release_for(dead[i]->pid);
         thread_free_stack(dead[i]);
         thread_free(dead[i]);   /* a no-op for the boot thread */
     }

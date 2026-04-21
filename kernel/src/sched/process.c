@@ -331,6 +331,44 @@ void process_fd_advance(int pid, int fd, uint64_t n) {
     spin_unlock_irq(&process_lock, flags);
 }
 
+void process_set_pipes(int pid, struct pipe *in, struct pipe *out) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    if (p != NULL) {
+        p->in = in;
+        p->out = out;
+    }
+    spin_unlock_irq(&process_lock, flags);
+}
+
+struct pipe *process_stdin(int pid) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    struct pipe *r = (p != NULL) ? p->in : NULL;
+    spin_unlock_irq(&process_lock, flags);
+    return r;
+}
+
+struct pipe *process_stdout(int pid) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    struct pipe *r = (p != NULL) ? p->out : NULL;
+    spin_unlock_irq(&process_lock, flags);
+    return r;
+}
+
+void process_take_pipes(int pid, struct pipe **in, struct pipe **out) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    *in  = (p != NULL) ? p->in  : NULL;
+    *out = (p != NULL) ? p->out : NULL;
+    if (p != NULL) {
+        p->in = NULL;
+        p->out = NULL;
+    }
+    spin_unlock_irq(&process_lock, flags);
+}
+
 bool process_fd_close(int pid, int fd) {
     uint64_t flags = spin_lock_irq(&process_lock);
     bool closed = false;

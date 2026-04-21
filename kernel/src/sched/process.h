@@ -6,6 +6,8 @@
 #include <stdbool.h>
 #include "fs/path.h"
 
+struct pipe;
+
 /* a process is a program someone started, and it outlives the thread
  * that ran it.
  *
@@ -87,6 +89,19 @@ struct process {
     uint64_t ended_ms;
     struct fd fds[MAX_FDS];
 
+    /* where 0 and 1 go, when they do not go to the terminal.
+     *
+     * descriptors 0, 1 and 2 have never been entries in the table
+     * above -- the syscall layer answers them directly, because until
+     * now there was exactly one place they could point. a pipeline
+     * gives two of them somewhere else to point, and one pointer each
+     * is the whole of what that takes. it is not general redirection:
+     * there is no dup2 here and `>` still does nothing, because
+     * pointing stdout at a *file* wants 0, 1 and 2 to become real
+     * slots and that is a bigger change than a pipeline needs */
+    struct pipe *in;            /* NULL means the keyboard */
+    struct pipe *out;           /* NULL means the console */
+
     /* where this process is standing. every relative name it uses is
      * read from here, and it inherits whatever its parent was in --
      * which is what makes `cd` somewhere and then running something
@@ -161,6 +176,22 @@ bool process_fd_peek(int pid, int fd, const void **data, uint64_t *remaining);
 void process_fd_advance(int pid, int fd, uint64_t n);
 
 bool process_fd_close(int pid, int fd);
+
+/* ---- the ends of a pipeline ----------------------------------------
+ * set before the process runs, by whoever is wiring it up. the process
+ * owns the ends from then on and lets go of them when it dies */
+void process_set_pipes(int pid, struct pipe *in, struct pipe *out);
+
+/* which pipe, if any, 0 and 1 point at. NULL means the terminal */
+struct pipe *process_stdin(int pid);
+struct pipe *process_stdout(int pid);
+
+/* take them off the process and hand them back, so the caller can close
+ * them without holding the process table's lock while it does. that
+ * matters: closing a pipe wakes threads, and waking threads means
+ * reaching the scheduler, which a holder of the process lock may not
+ * do */
+void process_take_pipes(int pid, struct pipe **in, struct pipe **out);
 
 /* how many a process is holding, for `ps` and the tests */
 size_t process_fd_count(int pid);

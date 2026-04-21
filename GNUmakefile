@@ -107,12 +107,14 @@ USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail \
               ramdisk/bin/echo ramdisk/bin/cat ramdisk/bin/uptime ramdisk/bin/ls \
               ramdisk/bin/whoami ramdisk/bin/write \
               ramdisk/bin/mkdir ramdisk/bin/rmdir \
-              ramdisk/bin/rm ramdisk/bin/cp ramdisk/bin/mv ramdisk/bin/touch
+              ramdisk/bin/rm ramdisk/bin/cp ramdisk/bin/mv ramdisk/bin/touch \
+              ramdisk/bin/head ramdisk/bin/wc ramdisk/bin/grep ramdisk/bin/sort
 
 # every program links the argument parser, so that what a program takes
 # is declared once and read by both the parser and whatever has to
 # explain the program to somebody
-ramdisk/bin/%: user/%.c user/syscall.h user/args.h user/args.c user/linker.ld
+ramdisk/bin/%: user/%.c user/syscall.h user/args.h user/args.c user/lines.h \
+               user/linker.ld
 	@mkdir -p $(@D)
 	$(CC) $(UCFLAGS) -c $< -o obj/user_$*.o
 	$(CC) $(UCFLAGS) -c user/args.c -o obj/user_args.o
@@ -223,7 +225,7 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/keyboard bin/tests/serial \
              bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
              bin/tests/locks bin/tests/path bin/tests/args \
-             bin/tests/shell bin/tests/switch
+             bin/tests/shell bin/tests/pipe bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
                     kernel/src/sched/spinlock.c
@@ -257,10 +259,13 @@ bin/tests/auth:     tests/test_auth.c     kernel/src/sched/auth.c \
 bin/tests/tty:      tests/test_tty.c      kernel/src/sched/spinlock.c \
                     kernel/src/drivers/tty.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c
+# the real pipe, not a stub: what is under test here is that stdin and
+# stdout end up somewhere other than the terminal when a pipeline says
+# they should, and a stubbed pipe could only ever agree with itself
 bin/tests/syscall:  tests/test_syscall.c  kernel/src/sched/spinlock.c \
                     kernel/src/fs/path.c kernel/src/cpu/syscall.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c \
-                    kernel/src/fs/vfs.c
+                    kernel/src/fs/vfs.c kernel/src/fs/pipe.c
 bin/tests/elf:      tests/test_elf.c      kernel/src/fs/elf.c \
                     kernel/src/lib/string.c
 bin/tests/ramdisk:  tests/test_ramdisk.c  kernel/src/fs/ramdisk.c \
@@ -276,6 +281,8 @@ bin/tests/locks:    tests/test_locks.c    kernel/src/sched/spinlock.c \
 bin/tests/locks:    LDLIBS = -pthread
 
 bin/tests/path:     tests/test_path.c     kernel/src/fs/path.c
+bin/tests/pipe:     tests/test_pipe.c     kernel/src/fs/pipe.c \
+                    kernel/src/sched/spinlock.c kernel/src/lib/string.c
 bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c

@@ -79,6 +79,17 @@ static struct thread me = { .space = &my_space };
 struct thread *sched_current(void) { return &me; }
 
 uint64_t pit_uptime_ms(void) { return 1234; }
+
+/* the pipe blocks by parking on a waitq. nothing here ever fills one
+ * up, so a sleep would mean a hang -- and saying so loudly is better
+ * than a test that stops answering */
+#include "fs/pipe.h"
+void waitq_enqueue(struct waitq *q) { (void)q; }
+void waitq_wake_all(struct waitq *q) { (void)q; }
+void waitq_sleep(void) {
+    printf("FAIL: something blocked that should not have\n");
+    exit(1);
+}
 void sched_yield(void) { kprintf("<YIELD>"); }
 void sleep_ms(uint64_t ms) { kprintf("<SLEEP %lu>", ms); }
 static int next_key = 'x';
@@ -193,7 +204,9 @@ int tty_foreground(void) { return foreground_pid; }
 /* the line discipline is the tty's own business and has its own suite.
  * here it only has to behave like one, so the syscall layer can be
  * checked for handing it the right things */
+static bool tty_was_read;
 int64_t tty_read_line(int pid, char *buf, uint64_t len) {
+    tty_was_read = true;
     if (pid != foreground_pid || len == 0) return -1;
     if (process_take_interrupt(pid)) return -1;
     buf[0] = (char)next_key;
@@ -303,6 +316,86 @@ int main(void) {
     CHECK(strcmp(out, "hello from ring 3") == 0, "and writes exactly it");
 
     CHECK(write_to(FD_STDOUT, user_page, 0) == 0, "a zero-length write is fine");
+
+    /* ---- stdout, when it is not the console ----
+     *
+     * a pipeline works by 0 and 1 pointing somewhere other than the
+     * terminal, and the program not being able to tell. so: give this
+     * process a pipe and check that the same SYS_WRITE that reached the
+     * console a moment ago now reaches the buffer instead */
+    {
+        static struct pipe pout, pin;
+        static char pbuf[64];
+        pipe_reset(&pout);
+        pipe_reset(&pin);
+
+        strcpy(page, "down the pipe");
+        process_set_pipes(me.pid, &pin, &pout);
+
+        out_reset();
+        CHECK(write_to(FD_STDOUT, user_page, 13) == 13,
+              "a write to stdout with a pipe on it succeeds");
+        CHECK(out[0] == '\0', "and not one byte of it reaches the console");
+        CHECK(pipe_pending(&pout) == 13, "all of it is in the pipe");
+
+        char got[32];
+        memset(got, 0, sizeof got);
+        pipe_get(&pout, got, 13);
+        CHECK(strcmp(got, "down the pipe") == 0, "byte for byte");
+
+        /* stderr never goes down a pipe, deliberately: `cat missing |
+         * head` should put its complaint on the screen rather than
+         * feeding it to head as though it were data */
+        out_reset();
+        CHECK(write_to(FD_STDERR, user_page, 13) == 13, "stderr still writes");
+        CHECK(strcmp(out, "down the pipe") == 0,
+              "and goes to the console even with a pipe on stdout");
+        CHECK(pipe_pending(&pout) == 0, "with nothing added to the pipe");
+
+        /* reading stdin takes from the pipe rather than the keyboard,
+         * and the program has no way to know which it got */
+        pipe_put(&pin, "from upstream\n", 14);
+        user_extra = (uint64_t)pbuf;
+        memset(pbuf, 0, sizeof pbuf);
+        CHECK(call3(SYS_READ, FD_STDIN, (uint64_t)pbuf, sizeof pbuf) == 14,
+              "reading stdin takes from the pipe");
+        CHECK(memcmp(pbuf, "from upstream\n", 14) == 0, "exactly what was in it");
+        CHECK(!tty_was_read, "and the keyboard was never asked");
+        user_extra = 0;
+
+        /* end of file: the writer goes, and the read returns zero
+         * rather than waiting for somebody who has already left */
+        pin.writers = 0;
+        user_extra = (uint64_t)pbuf;
+        CHECK(call3(SYS_READ, FD_STDIN, (uint64_t)pbuf, sizeof pbuf) == 0,
+              "and reads zero once the writer has gone, which is end of file");
+        user_extra = 0;
+
+        /* a write with no reader left ends the process. unix raises
+         * SIGPIPE and the default is to die; there are no signals here,
+         * so the kernel does the dying part directly -- and that is
+         * precisely what stops `cat huge | head` blocking forever once
+         * head has seen enough */
+        pout.readers = 0;
+        exited = 0;
+        if (setjmp(jb) == 0) {
+            (void)write_to(FD_STDOUT, user_page, 13);
+            CHECK(false, "a write to a pipe nobody reads should not return");
+        }
+        CHECK(exited, "it ends the process instead");
+        CHECK(exit_code_seen == PROCESS_KILLED, "recorded as killed");
+
+        process_set_pipes(me.pid, NULL, NULL);
+        out_reset();
+        CHECK(write_to(FD_STDOUT, user_page, 13) == 13,
+              "and with the pipes gone, stdout is the console again");
+        CHECK(strcmp(out, "down the pipe") == 0, "printing there once more");
+    }
+
+    strcpy(page, "hello from ring 3");
+    out_reset();
+    (void)write_to(FD_STDOUT, user_page, 17);
+    out_reset();
 
     /* ---- and what it refuses ---- */
     CHECK(write_to(FD_STDOUT, kernel_page, 8) == -1,

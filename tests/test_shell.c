@@ -174,6 +174,27 @@ bool user_run(const char *path, int argc, const char *const argv[],
     *error = run_error;
     return false;
 }
+/* what the shell handed to the pipeline, so a test can say the line was
+ * chopped where the bars were and each piece resolved to a program */
+static int pipe_count_seen;
+static const char *pipe_paths[PIPELINE_MAX];
+static int pipe_argcs[PIPELINE_MAX];
+static bool pipeline_ok = true;
+
+bool user_pipeline(const struct stage *stages, int count, const char *cwd,
+                   int uid, const char **error) {
+    (void)cwd; (void)uid;
+    pipe_count_seen = count;
+    for (int i = 0; i < count && i < PIPELINE_MAX; i++) {
+        pipe_paths[i] = stages[i].path;
+        pipe_argcs[i] = stages[i].argc;
+    }
+    if (pipeline_ok) return true;
+    *error = "no";
+    return false;
+}
+
+size_t pipe_count(void) { return 0; }
 void vmm_dump(uint64_t v) { kprintf("<VMM %#lx>", v); }
 void kbacktrace(uint64_t rbp, uint64_t rip) { (void)rbp; (void)rip; kprintf("<BT>"); }
 void system_poweroff(void) { kprintf("<POWEROFF>"); exit(0); }
@@ -286,6 +307,81 @@ int main(void) {
     check_split("summon jack-frost", 2, "summon", "jack-frost");
     /* more words than ARGV_MAX must clamp, not scribble past the array */
     check_split("a b c d e f g h i j k l", ARGV_MAX, "a", "b");
+
+    /* a bar is its own word however it was typed. the two spellings
+     * below are the same line, and anybody who has used a shell for ten
+     * minutes expects that without ever having been told */
+    check_split("cat x | head", 4, "cat", "x");
+    check_split("cat x|head", 4, "cat", "x");
+    check_split("cat x |head", 4, "cat", "x");
+    check_split("|", 1, "|", NULL);
+    {
+        char buf[64] = "a|b";
+        char *argv[ARGV_MAX];
+        int n = split(buf, argv, ARGV_MAX);
+        CHECK(n == 3 && strcmp(argv[0], "a") == 0 && strcmp(argv[1], "|") == 0
+              && strcmp(argv[2], "b") == 0,
+              "a bar with no spaces round it still separates the two sides");
+    }
+
+    /* ---- pipelines ----
+     *
+     * what the shell owes a pipeline is the chopping and the resolving:
+     * every stage has to be a real program *before* any of them starts,
+     * because finding out halfway through leaves the earlier ones
+     * already running and writing into a pipe with nobody at the end */
+
+    pipe_count_seen = 0;
+    run("cat motd.txt | head");
+    CHECK(pipe_count_seen == 2, "a bar makes two stages");
+    CHECK(pipe_paths[0] && strcmp(pipe_paths[0], "/bin/cat") == 0,
+          "the first resolved to a program");
+    CHECK(pipe_paths[1] && strcmp(pipe_paths[1], "/bin/head") == 0,
+          "and so did the second");
+    CHECK(pipe_argcs[0] == 2 && pipe_argcs[1] == 1,
+          "with each stage keeping its own arguments and none of the "
+          "other's");
+
+    pipe_count_seen = 0;
+    run("cat motd.txt | grep hee | wc -l");
+    CHECK(pipe_count_seen == 3, "three commands make three stages");
+    CHECK(pipe_argcs[1] == 2, "and the one in the middle keeps its argument");
+
+    /* a bar joins two things, so there has to be something either side */
+    pipe_count_seen = 0;
+    run("| head");
+    CHECK(pipe_count_seen == 0, "a pipeline starting with a bar runs nothing");
+    CHECK(strstr(out, "either side") != NULL, "and says why");
+
+    pipe_count_seen = 0;
+    run("cat motd.txt |");
+    CHECK(pipe_count_seen == 0, "and neither does one ending with a bar");
+
+    pipe_count_seen = 0;
+    run("cat motd.txt | | head");
+    CHECK(pipe_count_seen == 0, "nor one with a gap in the middle");
+
+    /* a name that is not a program stops the whole thing before any of
+     * it starts */
+    pipe_count_seen = 0;
+    run("cat motd.txt | nonsuch");
+    CHECK(pipe_count_seen == 0,
+          "a stage that is not a program stops the pipeline before it "
+          "begins");
+
+    /* the shell prints with kprintf, straight at the screen -- it has
+     * no stdout to hand anybody, so a builtin in a pipeline has to be
+     * refused rather than quietly printing to the console while the
+     * next stage waits for input that is never coming */
+    pipe_count_seen = 0;
+    run("ps | grep hello");
+    CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
+    CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
+
+    /* the arrows are still not a thing, and still say so */
+    run("cat x > y");
+    CHECK(strstr(out, "no redirection") != NULL,
+          "redirection is still refused, and by name");
 
     /* ---- dispatch ---- */
     run("help");
@@ -630,11 +726,22 @@ int main(void) {
               "and settles when one more character is given");
 
         /* run completes a nested path, which is where bin/hello lives */
-        strcpy(line, "run bin/h"); len = 9; pos = 9;
+        strcpy(line, "run bin/hell"); len = 12; pos = 12;
         out_reset();
         complete(line, &len, &pos);
         CHECK(strcmp(line, "run bin/hello") == 0,
               "run completes bin/hello from a partial path");
+
+        /* `head` arrived in 0.2.8 and shares two letters with `hello`,
+         * so `bin/h` is now genuinely ambiguous. it must stop at what
+         * they agree on rather than picking whichever it found first --
+         * a completion that guesses is worse than one that waits */
+        strcpy(line, "run bin/h"); len = 9; pos = 9;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "run bin/he") == 0,
+              "two programs sharing a prefix complete only as far as they "
+              "agree");
 
         /* two programs live under bin/, so completing `bin` fills in as
          * far as they agree and stops rather than picking one */
@@ -644,7 +751,7 @@ int main(void) {
         CHECK(strcmp(line, "cat bin/") == 0,
               "an ambiguous path completes to the shared prefix");
 
-        strcpy(line, "cat bin/h"); len = 9; pos = 9;
+        strcpy(line, "cat bin/hel"); len = 11; pos = 11;
         out_reset();
         complete(line, &len, &pos);
         CHECK(strcmp(line, "cat bin/hello") == 0,
@@ -655,6 +762,28 @@ int main(void) {
         complete(line, &len, &pos);
         CHECK(strcmp(line, "run bin/counter") == 0,
               "the other program completes too");
+
+        /* the word after a bar is a command, not a file. completing it
+         * against the working directory would offer exactly the wrong
+         * list -- and this is the one place the shell has to know that
+         * a pipeline is a sequence of commands rather than one long one */
+        strcpy(line, "cat motd.txt | wc"); len = 17; pos = 17;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat motd.txt | wc") == 0,
+              "a complete command after a bar stays as it is");
+
+        strcpy(line, "cat motd.txt | so"); len = 17; pos = 17;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat motd.txt | sort") == 0,
+              "and a partial one completes as a command, not as a filename");
+
+        strcpy(line, "cat motd.txt |so"); len = 16; pos = 16;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat motd.txt |sort") == 0,
+              "with no space after the bar either");
 
         /* filenames after cat */
         strcpy(line, "cat mo"); len = 6; pos = 6;
