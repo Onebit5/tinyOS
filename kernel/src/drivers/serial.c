@@ -55,21 +55,61 @@ void serial_write(const char *s) {
 /* ---- input ---------------------------------------------------------- */
 
 /* where I am in an escape sequence: 0 = nowhere, 1 = saw ESC,
- * 2 = saw ESC[ and the next byte says which arrow */
+ * 2 = saw ESC[ and the next byte says which key, 3 = collecting the
+ * digits of a `ESC [ n ~` sequence.
+ *
+ * terminals send special keys in two different shapes and there is no
+ * getting away with knowing only one: the arrows are a single letter,
+ * while page up and page down are a number followed by a tilde. home
+ * and end are sent both ways depending on the terminal, so both are
+ * accepted */
 static int esc_state;
+static int esc_number;
 
 void serial_feed(uint8_t b) {
     if (esc_state == 1) {
         esc_state = (b == '[') ? 2 : 0;
+        esc_number = 0;
         return;
     }
-    if (esc_state == 2) {
+    if (esc_state == 2 || esc_state == 3) {
+        if (b >= '0' && b <= '9') {
+            esc_state = 3;
+            if (esc_number >= 0) {
+                esc_number = esc_number * 10 + (b - '0');
+                if (esc_number > 99) {
+                    /* nonsense, but I am still inside a sequence -- so
+                     * keep swallowing until it ends rather than letting
+                     * the rest of the digits out as text */
+                    esc_number = -1;
+                }
+            }
+            return;
+        }
+        int was = esc_state;
         esc_state = 0;
+
+        if (was == 3) {
+            if (b != '~' || esc_number < 0) {
+                return;             /* some other CSI sequence, not mine */
+            }
+            switch (esc_number) {
+            case 1: input_push(KEY_HOME);   return;
+            case 3: input_push(KEY_DELETE); return;
+            case 4: input_push(KEY_END);    return;
+            case 5: input_push(KEY_PGUP);   return;
+            case 6: input_push(KEY_PGDN);   return;
+            default: return;
+            }
+        }
+
         switch (b) {
         case 'A': input_push(KEY_UP);    return;
         case 'B': input_push(KEY_DOWN);  return;
         case 'C': input_push(KEY_RIGHT); return;
         case 'D': input_push(KEY_LEFT);  return;
+        case 'H': input_push(KEY_HOME);  return;
+        case 'F': input_push(KEY_END);   return;
         default:  return;   /* some other CSI sequence, not mine */
         }
     }

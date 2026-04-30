@@ -16,6 +16,8 @@
 #include "fs/vfs.h"
 #include "fs/path.h"
 #include "drivers/tty.h"
+#include "drivers/console.h"
+#include "drivers/input.h"
 #include "fs/pipe.h"
 #include "sched/auth.h"
 #include "lib/string.h"
@@ -37,6 +39,7 @@ static const char *const call_names[SYSCALL_COUNT] = {
     "open", "close", "getpid", "spawn", "wait", "readdir", "getuid",
     "create", "chdir", "getcwd", "mkdir", "rmdir",
     "unlink", "rename", "stat",
+    "getkey", "screen", "cursor", "clear",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -138,26 +141,44 @@ static bool copy_path_resolved(uint64_t ptr, uint64_t len,
 
 static int64_t sys_write_console(uint64_t ptr, uint64_t len);
 
+/* the whole of writing, now that a descriptor can be four things.
+ *
+ * one lookup and a switch. a program asks for descriptor 1 and gets
+ * whatever was put there before it started -- the screen, a pipe, or a
+ * file -- and cannot tell which. that is the entire reason `echo hi`,
+ * `echo hi | wc` and `echo hi > x` are the same program doing the same
+ * thing, and it is why redirection needed 0, 1 and 2 to become real
+ * slots rather than three special cases in here */
 static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
-    if (fd == FD_STDOUT || fd == FD_STDERR) {
-        /* stderr never goes down a pipe. that is deliberate and it is
-         * what everybody expects: `cat missing | head` should still put
-         * its complaint on the screen rather than feeding it to head as
-         * though it were data */
-        struct pipe *out = (fd == FD_STDOUT) ? process_stdout(caller_pid())
-                                             : NULL;
-        if (out == NULL) {
-            return sys_write_console(ptr, len);
-        }
+    /* clamp first, then check what I clamped to. a program asking to
+     * write four exabytes gets a short write rather than a refusal,
+     * which is the ordinary contract -- and the range actually checked
+     * is the one actually touched, so an absurd length can never widen
+     * what I am willing to read */
+    if (len > WRITE_MAX) {
+        len = WRITE_MAX;
+    }
+    if (!user_range_ok(ptr, len)) {
+        return -1;
+    }
 
-        if (len > WRITE_MAX) {
-            len = WRITE_MAX;
-        }
-        if (!user_range_ok(ptr, len)) {
-            return -1;
-        }
+    /* a copy rather than a pointer into the table: everything below
+     * this may block, and none of it may run while the process table's
+     * lock is held */
+    struct fd f;
+    if (!process_fd_get(caller_pid(), (int)fd, &f)) {
+        return -1;
+    }
 
-        int64_t n = pipe_write(out, caller_pid(), (const void *)ptr, len);
+    switch (f.kind) {
+    case FD_CONSOLE:
+        return sys_write_console(ptr, len);
+
+    case FD_PIPE: {
+        if (!f.writing) {
+            return -1;      /* the reading end. a descriptor goes one way */
+        }
+        int64_t n = pipe_write(f.pipe, caller_pid(), (const void *)ptr, len);
         if (n < 0) {
             /* nobody is reading and nobody ever will be. unix raises
              * SIGPIPE here and the default disposition is to die; I
@@ -173,36 +194,36 @@ static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
         return n;
     }
 
-    /* a descriptor onto the ramdisk is a bookmark into read-only
-     * memory, so it stays unwritable. one onto the disk is not */
-    struct fd_disk d;
-    if (!process_fd_disk(caller_pid(), (int)fd, &d)) {
-        return -1;
-    }
-    if (len > WRITE_MAX) {
-        len = WRITE_MAX;
-    }
-    if (!user_range_ok(ptr, len)) {
-        return -1;
+    case FD_DISK: {
+        struct fd_disk d;
+        if (!process_fd_disk(caller_pid(), (int)fd, &d)) {
+            return -1;
+        }
+
+        /* the descriptor remembered where this file's directory record
+         * is, which is what lets the new size be written back to the
+         * right place without looking the path up all over again */
+        struct vfs_file vf;
+        memset(&vf, 0, sizeof vf);
+        vf.kind = VFS_DISK;
+        vf.cluster = d.cluster;
+        vf.size = d.size;
+        vf.entry_sector = d.entry_sector;
+        vf.entry_offset = d.entry_offset;
+
+        int64_t n = vfs_write(&vf, d.pos, (const void *)ptr, len);
+        if (n > 0) {
+            process_fd_grew(caller_pid(), (int)fd, vf.cluster, vf.size);
+            process_fd_advance(caller_pid(), (int)fd, (uint64_t)n);
+        }
+        return n;
     }
 
-    /* the descriptor remembered where this file's directory record is,
-     * which is what lets the new size be written back to the right place
-     * without looking the path up all over again */
-    struct vfs_file f;
-    memset(&f, 0, sizeof f);
-    f.kind = VFS_DISK;
-    f.cluster = d.cluster;
-    f.size = d.size;
-    f.entry_sector = d.entry_sector;
-    f.entry_offset = d.entry_offset;
-
-    int64_t n = vfs_write(&f, d.pos, (const void *)ptr, len);
-    if (n > 0) {
-        process_fd_grew(caller_pid(), (int)fd, f.cluster, f.size);
-        process_fd_advance(caller_pid(), (int)fd, (uint64_t)n);
+    default:
+        /* the keyboard, and a file in read-only memory. neither takes
+         * anything, and saying so beats pretending it went somewhere */
+        return -1;
     }
-    return n;
 }
 
 static int64_t sys_write_console(uint64_t ptr, uint64_t len) {
@@ -226,63 +247,151 @@ static int64_t sys_write_console(uint64_t ptr, uint64_t len) {
 
 /* the terminal does the echoing and the line editing, because a program
  * in ring 3 cannot -- the keys never pass through it */
-static int64_t sys_read_stdin(uint64_t ptr, uint64_t len) {
-    /* stdin is the keyboard unless somebody put a pipe there. a program
-     * cannot tell which, and that is the point of the whole
-     * arrangement: `head` reads stdin and neither knows nor cares
-     * whether a person or a `cat` is on the other end */
-    struct pipe *in = process_stdin(caller_pid());
-    if (in != NULL) {
-        return pipe_read(in, caller_pid(), (void *)ptr, len);
-    }
-    return tty_read_line(caller_pid(), (char *)ptr, len);
-}
-
 static int64_t sys_read(uint64_t fd, uint64_t ptr, uint64_t len) {
     if (len == 0 || !user_range_ok(ptr, len)) {
         return -1;
     }
-    if (fd == FD_STDIN) {
-        return sys_read_stdin(ptr, len);
+
+    struct fd f;
+    if (!process_fd_get(caller_pid(), (int)fd, &f)) {
+        return -1;
     }
 
-    /* a file on the disk. the bytes are not in memory, so the
-     * descriptor's position and the file's first cluster are enough to
-     * go and get them */
-    struct fd_disk d;
-    if (process_fd_disk(caller_pid(), (int)fd, &d)) {
+    switch (f.kind) {
+    case FD_KEYBOARD:
+        /* the keyboard, unless somebody put something else there. a
+         * program reading stdin neither knows nor cares whether a
+         * person or a `cat` is on the other end */
+        return tty_read_line(caller_pid(), (char *)ptr, len);
+
+    case FD_PIPE:
+        if (f.writing) {
+            return -1;
+        }
+        return pipe_read(f.pipe, caller_pid(), (void *)ptr, len);
+
+    case FD_DISK: {
+        /* the bytes are not in memory, so the descriptor's position and
+         * the file's first cluster are enough to go and get them */
+        struct fd_disk d;
+        if (!process_fd_disk(caller_pid(), (int)fd, &d)) {
+            return -1;
+        }
         if (d.remaining == 0) {
             return 0;           /* the end, which is not an error */
         }
         if (len > d.remaining) {
             len = d.remaining;
         }
-        struct vfs_file f;
-        memset(&f, 0, sizeof f);
-        f.kind = VFS_DISK;
-        f.cluster = d.cluster;
-        f.size = d.size;
+        struct vfs_file vf;
+        memset(&vf, 0, sizeof vf);
+        vf.kind = VFS_DISK;
+        vf.cluster = d.cluster;
+        vf.size = d.size;
 
-        int64_t n = vfs_read(&f, d.pos, (void *)ptr, len);
+        int64_t n = vfs_read(&vf, d.pos, (void *)ptr, len);
         if (n > 0) {
             process_fd_advance(caller_pid(), (int)fd, (uint64_t)n);
         }
         return n;
     }
 
-    /* a file in the ramdisk. the bytes are already in memory -- the
-     * descriptor only says how far through them I had got */
-    const void *data = NULL;
-    uint64_t left = 0;
-    if (!process_fd_peek(caller_pid(), (int)fd, &data, &left)) {
+    case FD_MEMORY: {
+        /* the bytes are already in memory -- the descriptor only says
+         * how far through them I had got */
+        const void *data = NULL;
+        uint64_t left = 0;
+        if (!process_fd_peek(caller_pid(), (int)fd, &data, &left)) {
+            return -1;
+        }
+        if (left < len) {
+            len = left;         /* a short read at the end, as usual */
+        }
+        memcpy((void *)ptr, data, len);
+        process_fd_advance(caller_pid(), (int)fd, len);
+        return (int64_t)len;
+    }
+
+    default:
+        return -1;      /* the console. there is nothing to read from it */
+    }
+}
+
+/* closing a descriptor with a pipe in it lets go of one end, which
+ * wakes whoever is waiting on the other -- so the pipe comes back out
+ * of the table first and is closed here, holding nothing */
+static int64_t sys_close(int fd) {
+    struct pipe_end e;
+    if (!process_fd_close(caller_pid(), fd, &e)) {
         return -1;
     }
-    if (left < len) {
-        len = left;             /* a short read at the end, as usual */
+    if (e.p != NULL) {
+        if (e.writing) {
+            pipe_close_write(e.p);
+        } else {
+            pipe_close_read(e.p);
+        }
     }
-    memcpy((void *)ptr, data, len);
-    process_fd_advance(caller_pid(), (int)fd, len);
-    return (int64_t)len;
+    return 0;
+}
+
+/* ---- drawing on the whole screen ----------------------------------- */
+
+/* one key, unechoed and untranslated, for a program that is painting
+ * its own screen. only the foreground may have it, the same rule the
+ * line discipline follows -- keys belong to whoever is being typed at */
+static int64_t sys_getkey(void) {
+    if (caller_pid() != tty_foreground()) {
+        return -1;
+    }
+    if (process_take_interrupt(caller_pid())) {
+        return -1;
+    }
+
+    int key = input_getchar_blocking();
+
+    /* an interrupt arrives by waking the thread, so the wake has to be
+     * checked for after the sleep as well as before it */
+    if (process_take_interrupt(caller_pid())) {
+        return -1;
+    }
+    return key;
+}
+
+static int64_t sys_screen(uint64_t cols_ptr, uint64_t rows_ptr) {
+    if (!user_range_ok(cols_ptr, 4) || !user_range_ok(rows_ptr, 4)) {
+        return -1;
+    }
+    size_t c = 0, r = 0;
+    console_size(&c, &r, NULL, NULL);
+
+    /* a machine with no framebuffer answers zero, and a program that
+     * believed it would divide by it. eighty by twenty-four is what
+     * every terminal has been since the vt100 and is a better guess
+     * than nothing */
+    if (c == 0 || r == 0) {
+        c = 80;
+        r = 24;
+    }
+    *(uint32_t *)cols_ptr = (uint32_t)c;
+    *(uint32_t *)rows_ptr = (uint32_t)r;
+    return 0;
+}
+
+static int64_t sys_cursor(uint64_t col, uint64_t row) {
+    if (caller_pid() != tty_foreground()) {
+        return -1;
+    }
+    console_move((size_t)col, (size_t)row);
+    return 0;
+}
+
+static int64_t sys_clear(void) {
+    if (caller_pid() != tty_foreground()) {
+        return -1;
+    }
+    console_clear();
+    return 0;
 }
 
 static int64_t sys_open(uint64_t ptr, uint64_t len) {
@@ -530,7 +639,7 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
     const char *why = NULL;
     const char *argv[1] = { path };
     int pid = user_spawn(path, 1, argv, process_cwd(caller_pid()), caller_pid(),
-                         process_uid(caller_pid()), false, NULL, NULL, &why);
+                         process_uid(caller_pid()), false, NULL, &why);
     return (pid == 0) ? -1 : pid;
 }
 
@@ -575,7 +684,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_OPEN:
         return sys_open(a0, a1);
     case SYS_CLOSE:
-        return process_fd_close(caller_pid(), (int)a0) ? 0 : -1;
+        return sys_close((int)a0);
     case SYS_GETPID:
         return caller_pid();
     case SYS_SPAWN:
@@ -600,6 +709,14 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_rename(a0, a1, a2, a3);
     case SYS_STAT:
         return sys_stat(a0, a1, a2);
+    case SYS_GETKEY:
+        return sys_getkey();
+    case SYS_SCREEN:
+        return sys_screen(a0, a1);
+    case SYS_CURSOR:
+        return sys_cursor(a0, a1);
+    case SYS_CLEAR:
+        return sys_clear();
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

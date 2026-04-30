@@ -1083,16 +1083,31 @@ static const struct command commands[] = {
 /* chop a line into argv in place. spaces become terminators, runs of
  * them collapse, and I stop early rather than overflow argv.
  *
- * a bar is its own word whether or not anybody put spaces round it, so
- * `cat x|head` and `cat x | head` split the same way. that is one of
- * those things nobody notices working and everybody notices missing.
+ * the four that join commands together -- `|`, `<`, `>`, `>>` -- are
+ * their own words whether or not anybody put spaces round them, so
+ * `cat x|head` and `echo hi>f` split the same way as the spaced-out
+ * spellings. that is one of those things nobody notices working and
+ * everybody notices missing.
  *
- * the bar itself cannot stay in the line -- the word before it needs a
- * terminator, and that terminator goes exactly where the bar was. so it
- * is replaced by a NUL and a pointer to a constant "|" is put in argv
- * instead. having seen it is enough; nothing needs the original byte. */
+ * they cannot stay in the line: the word before one needs a terminator,
+ * and that terminator goes exactly where the character was. so each is
+ * replaced by a NUL and a pointer to a constant is put in argv instead.
+ * having seen it is enough; nothing needs the original byte. */
+static char *punctuation(char *p, size_t *eaten) {
+    static char bar[] = "|", in[] = "<", out[] = ">", app[] = ">>";
+
+    if (*p == '|') { *eaten = 1; return bar; }
+    if (*p == '<') { *eaten = 1; return in; }
+    if (*p == '>') {
+        if (p[1] == '>') { *eaten = 2; return app; }
+        *eaten = 1;
+        return out;
+    }
+    *eaten = 0;
+    return NULL;
+}
+
 static int split(char *line, char **argv, int max) {
-    static char bar[] = "|";
     int argc = 0;
     char *p = line;
 
@@ -1104,30 +1119,37 @@ static int split(char *line, char **argv, int max) {
             break;
         }
 
-        if (*p == '|') {
-            argv[argc++] = bar;
-            p++;
+        size_t eaten;
+        char *punct = punctuation(p, &eaten);
+        if (punct != NULL) {
+            argv[argc++] = punct;
+            p += eaten;
             continue;
         }
 
         argv[argc++] = p;
-        while (*p != '\0' && *p != ' ' && *p != '|') {
+        while (*p != '\0' && *p != ' ' && punctuation(p, &eaten) == NULL) {
             p++;
         }
         if (*p == ' ') {
             *p++ = '\0';
-        } else if (*p == '|') {
-            *p++ = '\0';
+        } else if (*p != '\0') {
+            /* punctuation right up against the word. it becomes the
+             * terminator, and the loop puts it in argv on the next pass
+             * -- which works because `punctuation` reads the character
+             * before this one overwrites it */
+            punct = punctuation(p, &eaten);
+            *p = '\0';
+            p += eaten;
             if (argc < max) {
-                argv[argc++] = bar;
+                argv[argc++] = punct;
             }
         }
     }
     return argc;
 }
 
-/* dispatch an already-split command. separate from run_line so `time`
- * can hand me its own argv without re-parsing anything */
+/* is this word a builtin? */
 static const struct command *builtin_named(const char *name) {
     for (const struct command *c = commands; c->name; c++) {
         if (strcmp(name, c->name) == 0) {
@@ -1137,6 +1159,8 @@ static const struct command *builtin_named(const char *name) {
     return NULL;
 }
 
+/* dispatch an already-split command. separate from run_line so `time`
+ * can hand me its own argv without re-parsing anything */
 static void run_argv(int argc, char **argv) {
     if (argc == 0) {
         return;
@@ -1186,40 +1210,62 @@ static void run_argv(int argc, char **argv) {
     }
 }
 
-/* redirection is still not a thing. pipes are, as of 0.2.8, so this is
- * down to the two arrows -- and saying so is worth doing, because
- * otherwise `cat x > y` hands cat two filenames it cannot find and the
- * complaint lands on `>` rather than on the shell */
-static bool shell_metacharacter(int argc, char **argv) {
-    for (int i = 0; i < argc; i++) {
-        for (const char *p = argv[i]; *p != '\0'; p++) {
-            if (*p != '<' && *p != '>') {
-                continue;
-            }
-            kprintf("no redirection yet -- the shell does not know what to do "
-                    "with '%c'.\n", *p);
-            kprintf("everything after it would be handed to %s as a filename, "
-                    "which is not\n", argc > 0 ? argv[0] : "the command");
-            kprintf("what you meant. to put something in a file: "
-                    "write notes.txt some words\n");
-            return true;
-        }
-    }
-    return false;
-}
+/* ---- pipelines and redirection --------------------------------------
+ *
+ * a bar separates two commands and joins them at the same time; an
+ * arrow moves one end of one command somewhere else. the shell's whole
+ * job is the wiring: resolve each name to a program, take the arrows
+ * out of the arguments, and hand the list to user_pipeline.
+ *
+ * builtins cannot be in any of it. `ps > out.txt` would want the
+ * shell's own output to go somewhere other than the console, and the
+ * shell is a kernel thread with no stdout to redirect -- it prints with
+ * kprintf, straight at the screen. that is a real limitation and it is
+ * worth saying out loud rather than failing strangely. */
 
-/* ---- pipelines ------------------------------------------------------
+/* pull `< name`, `> name` and `>> name` out of one stage's words,
+ * leaving the words that are really arguments.
  *
- * a bar separates two commands and joins them at the same time. the
- * shell's whole job here is the joining: resolve each name to a
- * program, then hand the list to user_pipeline, which makes the pipes
- * and starts everything at once.
+ * they are removed rather than passed on, because a program has no
+ * business seeing them: `sort < a.txt` should look to sort exactly like
+ * `sort` with something on its standard input, which is the whole idea.
  *
- * builtins cannot be in one. `ps | grep hello` would want the shell's
- * own output to go somewhere other than the console, and the shell is a
- * kernel thread with no stdout to redirect -- it prints with kprintf,
- * straight at the screen. that is a real limitation and it is worth
- * saying out loud rather than failing strangely. */
+ * returns false, with something to say, if an arrow has no name after
+ * it -- `cat >` is a sentence that stops halfway through. */
+static bool take_redirects(struct stage *st, const char **error) {
+    int kept = 0;
+
+    for (int i = 0; i < st->argc; i++) {
+        const char *w = st->argv[i];
+        bool in = (strcmp(w, "<") == 0);
+        bool out = (strcmp(w, ">") == 0);
+        bool app = (strcmp(w, ">>") == 0);
+
+        if (!in && !out && !app) {
+            st->argv[kept++] = st->argv[i];
+            continue;
+        }
+        if (i + 1 >= st->argc) {
+            *error = "there is nothing after that arrow to name a file";
+            return false;
+        }
+
+        if (in) {
+            st->in_path = st->argv[i + 1];
+        } else {
+            st->out_path = st->argv[i + 1];
+            st->append = app;
+        }
+        i++;        /* the filename went with the arrow */
+    }
+
+    st->argc = kept;
+    if (st->argc == 0) {
+        *error = "that is a file with no command to put in it";
+        return false;
+    }
+    return true;
+}
 
 /* chop an already-split argv at every bare `|`, in place. each piece
  * comes back as its own argc/argv. returns how many pieces, or -1 if
@@ -1241,19 +1287,16 @@ static int split_pipeline(int argc, char **argv, struct stage *out, int max) {
         if (count == max) {
             return -1;
         }
+        memset(&out[count], 0, sizeof out[count]);
         out[count].argc = i - start;
         out[count].argv = &argv[start];
-        out[count].path = NULL;
         count++;
         start = i + 1;
     }
     return count;
 }
 
-/* is this word a builtin? a pipeline cannot contain one */
-static const struct command *builtin_named(const char *name);
-
-static void run_pipeline(int argc, char **argv) {
+static void run_pipeline(int argc, char **argv, bool background) {
     struct stage stages[PIPELINE_MAX];
     int count = split_pipeline(argc, argv, stages, PIPELINE_MAX);
 
@@ -1262,6 +1305,30 @@ static void run_pipeline(int argc, char **argv) {
                 "of it\n");
         kprintf("(and I can join at most %d)\n", PIPELINE_MAX);
         return;
+    }
+
+    for (int i = 0; i < count; i++) {
+        const char *why = NULL;
+        if (!take_redirects(&stages[i], &why)) {
+            kprintf("%s\n", why);
+            return;
+        }
+    }
+
+    /* the middle of a pipeline already has both ends spoken for, so
+     * redirecting one is asking for two different things in the same
+     * slot. saying which one would win is worse than refusing */
+    for (int i = 0; i < count; i++) {
+        if (i > 0 && stages[i].in_path != NULL) {
+            kprintf("'%s' already takes its input from the command before "
+                    "it\n", stages[i].argv[0]);
+            return;
+        }
+        if (i < count - 1 && stages[i].out_path != NULL) {
+            kprintf("'%s' already sends its output to the command after "
+                    "it\n", stages[i].argv[0]);
+            return;
+        }
     }
 
     /* every stage has to be a program before any of them starts.
@@ -1288,15 +1355,20 @@ static void run_pipeline(int argc, char **argv) {
         stages[i].path = paths[i];
     }
 
-    const char *why = NULL;
-    if (!user_pipeline(stages, count, shell_cwd, current_uid, &why)) {
-        kprintf("cannot run the pipeline: %s\n", why);
+    const char *why = "";
+    if (!user_pipeline(stages, count, shell_cwd, current_uid, background,
+                       &why)) {
+        kprintf("cannot run it: %s\n", why);
     }
 }
 
-static bool has_bar(int argc, char **argv) {
+/* does this line need the pipeline machinery? a bar or an arrow means
+ * yes -- and a plain command with neither goes the old way, which is
+ * the one that knows how to put something in the background */
+static bool needs_wiring(int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
-        if (strcmp(argv[i], "|") == 0) {
+        if (strcmp(argv[i], "|") == 0 || strcmp(argv[i], "<") == 0
+            || strcmp(argv[i], ">") == 0 || strcmp(argv[i], ">>") == 0) {
             return true;
         }
     }
@@ -1306,11 +1378,15 @@ static bool has_bar(int argc, char **argv) {
 static void run_line(char *line) {
     char *argv[ARGV_MAX];
     int argc = split(line, argv, ARGV_MAX);
-    if (shell_metacharacter(argc, argv)) {
-        return;
-    }
-    if (has_bar(argc, argv)) {
-        run_pipeline(argc, argv);
+
+    if (needs_wiring(argc, argv)) {
+        /* a trailing & belongs to the whole line rather than to the
+         * last stage, so it comes off before anything is chopped up */
+        bool background = (argc > 0 && strcmp(argv[argc - 1], "&") == 0);
+        if (background) {
+            argc--;
+        }
+        run_pipeline(argc, argv, background);
         return;
     }
     run_argv(argc, argv);   /* argc 0 just means they pressed enter */

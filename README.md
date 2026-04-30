@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.8** (**pipes.** `cat x | head` was an error message for eight versions; now it is a buffer with a process at each end)
+**version: 0.2.9** (**an editor, and redirection.** `margaret` writes things down, and `echo hi > file` replaced a whole program with punctuation)
 
 ## what it does
 
@@ -45,6 +45,8 @@ im building this to actually understand what happens between "power button" and 
 - [x] help that asks a program what it takes rather than keeping a copy
 - [x] files removed, copied, moved and stamped -- and dates fat always had room for
 - [x] pipes: `cat x | grep hee | wc -l`, with end of file and broken pipes that mean it
+- [x] redirection -- `>`, `>>`, `<` -- and 0, 1 and 2 as real descriptors at last
+- [x] a text editor that runs in ring 3 and paints its own screen
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -153,6 +155,117 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## an editor
+
+`margaret`, after the one who keeps the compendium — the only thing in
+the Velvet Room that is written down. it seemed like the right name for
+the program that writes things down.
+
+it is nano's shape, because nano's shape is the correct one for an
+editor you have to be able to use without having read anything first:
+the text fills the screen, the keys are *on* the screen, and nothing is
+modal. arrows, home, end, page up and down, `^A`/`^E`, `^T` to jump to a
+line number. `^K` cuts a line and `^K^K^K` takes three as one lump
+(without that, line-based cutting is infuriating rather than useful);
+`^Y` copies the same way, `^U` pastes. `^W` finds, `^N` finds again, and
+the search wraps — one that stopped at the bottom would make you jump to
+the top by hand to be sure you had seen everything, which is doing the
+editor's job for it. `^O` saves, `^X` leaves and asks first, `^G` shows
+all of it.
+
+### what an editor needed that nothing else did
+
+four syscalls. a shell wants none of them: it prints a prompt, reads a
+line, prints an answer, and the console keeps the cursor wherever the
+printing left it. a program painting a whole screen cannot work that
+way.
+
+```c
+#define SYS_GETKEY 21   /* ()                 -> one key, no echo       */
+#define SYS_SCREEN 22   /* (uint32 *cols, uint32 *rows) -> 0            */
+#define SYS_CURSOR 23   /* (col, row)         -> 0                      */
+#define SYS_CLEAR  24   /* ()                 -> 0                      */
+```
+
+`getkey` is the interesting one, because it is also **how raw mode
+arrives**. there is no flag anywhere saying a terminal is raw. asking
+for a line gets the line discipline, with its echo and its backspace
+handling; asking for a key gets the key. those are different questions,
+so they are different calls, and nothing has to remember what mode
+anything is in.
+
+all four are refused to anyone who is not the foreground process. a
+background program repainting the screen over the top of whoever is
+being typed at is the one thing none of this may allow.
+
+### one redraw per keystroke
+
+every key builds the *entire* screen into a buffer and writes it in one
+call, rather than working out which cells changed. that is more bytes
+than it needs to be and it is completely reliable, which at eighty by
+twenty-five is a trade worth making without thinking about it: the
+clever version is a second model of the screen, and a second model of
+anything is a second thing that can be wrong.
+
+two things about that were not obvious until they were wrong. the
+console wraps the instant the last column is written, so a line padded
+to exactly the width moves to the next row *by itself* and then the
+newline after it moves again — every other row blank. and a write is
+clamped at one page by the kernel, so a wide framebuffer silently loses
+the bottom of its own screen unless the program loops.
+
+## redirection, and three real descriptors
+
+`write file.txt some words` is gone. `echo some words > file.txt` says
+the same thing with punctuation everybody already knows, and it is one
+program fewer.
+
+getting there took the change 0.2.8 explicitly deferred. **0, 1 and 2
+had never been entries in the descriptor table** — the syscall layer
+answered them directly, because until pipes arrived there was exactly
+one place each of them could point. pipes made that two places, which
+one pointer per process could still cover. pointing stdout at a *file*
+made it three, and there was nowhere to write that down.
+
+so a descriptor is a tagged thing now:
+
+```c
+enum fd_kind {
+    FD_FREE = 0,
+    FD_CONSOLE,     /* the screen. writes print; reads are meaningless */
+    FD_KEYBOARD,    /* the line discipline. reads a line; writes are not */
+    FD_MEMORY,      /* a file already in memory, which is the ramdisk */
+    FD_DISK,        /* a file out on the disk, fetched as it is asked for */
+    FD_PIPE,
+};
+```
+
+every process is born with the keyboard in 0 and the console in 1 and 2,
+and reading or writing is one lookup and a switch. redirection is
+putting something else in a slot before the program starts. that is the
+arrangement unix has had since the beginning and the reason is exactly
+this: a program that cannot tell where its output goes is a program that
+works in a pipeline, in a file, and on a screen without knowing which.
+
+```
+igor@velvet# echo the bond endures > proof.txt
+igor@velvet# ls -1 | sort > names.txt
+igor@velvet# sort < names.txt | head -n 3
+igor@velvet# echo and again >> proof.txt
+```
+
+the arrows belong to a **command**, not to the line, which is why
+`sort < a.txt > b.txt` is one stage with both ends moved. they are taken
+out of the arguments before the program ever sees them: `sort < a.txt`
+should look to sort exactly like `sort` with something on standard
+input.
+
+`>` truncates by removing the file first, because `create` opens what is
+already there rather than emptying it — otherwise a short thing written
+over a long one leaves the short thing followed by the tail of the long
+one. and redirection asks the same permission questions `open` and
+`create` do: an arrow is not a way round anything.
 
 ## pipes
 
@@ -415,9 +528,8 @@ print is the next version's business, and a parser should not decide to
 write things.
 
 `cat -v` names each file before its contents, `cat -n` numbers the
-lines, `ls -1` prints one name per line and nothing else, `echo -n`
-leaves the newline off, and `write -t` replaces a file rather than
-adding to it.
+lines, `ls -1` prints one name per line and nothing else, and `echo -n`
+leaves the newline off.
 
 ### commands that are just commands
 
@@ -1173,6 +1285,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.9** — an editor, and the descriptor work it dragged in behind it. `margaret` is nano-shaped and paints its whole screen on every keystroke rather than tracking which cells changed; the clever version is a second model of the screen, and a second model of anything is a second thing that can be wrong. it needed four syscalls nothing had wanted before — one key, the screen size, the cursor, and clear — all refused to anyone who is not the foreground, since a background program repainting over whoever is being typed at is the one thing none of it may allow. `getkey` is also how raw mode arrives: there is no flag saying a terminal is raw, because asking for a line and asking for a key are different questions. `write` is deleted in favour of `echo hi > file`, which meant finally doing what 0.2.8 said it was deferring: **0, 1 and 2 became real descriptors**, tagged by what they point at, with redirection being nothing more than putting something else in a slot before the program starts. `>`, `>>` and `<` belong to a command rather than a line, are stripped from the arguments before the program sees them, and ask the same permission questions `open` and `create` do. `>` truncates by unlinking first, since `create` opens rather than empties. home, end, page up and page down had to be decoded on both the keyboard and the serial line — terminals send them in two different shapes and knowing one is not enough.
 - **0.2.8** — pipes, and the buffer turned out to be the easy half. the two rules that matter both hang off the reference counts: a read returns 0 once the last writer has gone (which is the only reason a pipeline ever finishes) and a write fails once the last reader has (which is the only reason `cat huge | head` stops rather than blocking forever on a buffer that can never drain). unix raises SIGPIPE there and the default disposition is to die; with no signals, the kernel does the dying part directly. releasing a process's ends had to be idempotent, because a program that *chooses* to leave runs `thread_exit` and one that is killed never does — three separate paths call `pipe_release_for` and whichever arrives first wins, since a stage that dies still holding an end leaves its neighbour asleep on a pipe that will never say end of file. 0, 1 and 2 were never table entries here, so a pipeline is one pointer each on the process rather than a rebuilt descriptor table; that is why `>` still does nothing and says so. stderr deliberately stays on the console. builtins are refused with a reason: the shell is a kernel thread printing straight at the screen and has no stdout to give away. `head`, `wc`, `grep` and `sort`, plus a `cat` that reads standard input — all of them indifferent to whether a file or a bar is on the other end, which is the whole point. tab completion learned that the word after a bar is a command and not a filename.
 - **0.2.7** — `rm`, `cp`, `mv` and `touch`, and the difference between two of them is the point: `mv` moves a name and not a file, so it costs the same on a hundred megabytes as on nothing, while `cp` really does carry every byte through a buffer. `fat32_rename` writes the new directory entry *before* striking out the old one on purpose — a machine that dies between the two leaves a file with two names, which is recoverable, where the other order leaves it with none. removing a file gives its clusters back and erases the whole run of long-name entries in front of it, since leaving those behind is how a directory ends up with a name pointing at nothing. fat has had date fields since 1980 and I had been writing zeroes into all of them; the filesystem now takes a clock as a function, so the kernel hands it the cmos and the tests hand it one stuck at a fixed instant — which is what makes "the right bytes were written" checkable rather than plausible. `stat`, and `ls -l`. no `rm -r`: that is a different operation and it can have its own name when something can be trusted to stop in the right place.
 - **0.2.6** — `help cat` runs cat with `--help` and lets it answer. what a program takes is declared inside the program, so any copy the shell kept would be a second description free to drift; there is no copy. `cat --help` typed directly gives identical text by construction rather than by discipline, and both are built from the declaration 0.2.5 introduced. builtins come out of the shell's table, which is where *they* are declared, and `help cd` says why it is a builtin at all. the plain `help` stopped printing a description beside every name -- that was a wall you had to read all of to find one line -- and prints names in columns sized to the terminal instead, with `help <name>` for the one you actually wanted.

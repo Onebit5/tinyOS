@@ -29,6 +29,25 @@
 #define SYS_RENAME 19   /* (from,flen,to,tlen)-> 0, or -1                */
 #define SYS_STAT   20   /* (path, len, struct user_stat *) -> 0, or -1   */
 
+/* ---- the four a program drawing whole screens needs ----
+ *
+ * a shell needs none of these: it prints a prompt, reads a line and
+ * prints an answer, and the console keeps the cursor where the printing
+ * left it. an editor cannot work that way. it paints the entire screen,
+ * puts the cursor somewhere in the middle of what it painted, and waits
+ * for one keystroke rather than a line.
+ *
+ * getkey is the interesting one, because it is *also* how raw mode
+ * arrives. there is no flag anywhere saying "this terminal is raw":
+ * asking for a line gets the line discipline with its echo and its
+ * backspace handling, and asking for a key gets the key. the two
+ * questions are different, so they are different calls, and nothing has
+ * to remember which mode anything is in */
+#define SYS_GETKEY 21   /* ()                 -> one key, no echo       */
+#define SYS_SCREEN 22   /* (uint32 *cols, uint32 *rows) -> 0           */
+#define SYS_CURSOR 23   /* (col, row)         -> 0                      */
+#define SYS_CLEAR  24   /* ()                 -> 0                      */
+
 /* what a file is, for anyone who wants to know without reading it.
  *
  * this layout is duplicated in user/syscall.h, which is what an abi is:
@@ -44,7 +63,7 @@ struct user_stat {
     uint8_t  pad;
 };
 
-#define SYSCALL_COUNT 21
+#define SYSCALL_COUNT 25
 
 /* wire up STAR/LSTAR/SFMASK and turn on EFER.SCE */
 void syscall_init(void);

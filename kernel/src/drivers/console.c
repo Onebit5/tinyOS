@@ -131,6 +131,25 @@ void console_clear(void) {
     draw_cursor();
 }
 
+void console_move(size_t col, size_t row) {
+    if (!ready) {
+        return;
+    }
+    if (col >= cols) {
+        col = cols > 0 ? cols - 1 : 0;
+    }
+    if (row >= rows) {
+        row = rows > 0 ? rows - 1 : 0;
+    }
+
+    /* put back whatever the block was sitting on before moving, or the
+     * old position keeps a solid rectangle nobody put there */
+    erase_cursor();
+    cur_col = col;
+    cur_row = row;
+    draw_cursor();
+}
+
 void console_putchar(char c) {
     if (!ready) {
         return;

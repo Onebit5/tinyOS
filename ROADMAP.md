@@ -187,10 +187,28 @@ signals I do the dying part directly. builtins cannot be in a pipeline
 and it says so -- the shell is a kernel thread printing straight at the
 screen, so it has no stdout to hand anybody.
 
-**0.2.9 an editor.** something nano-shaped, so a file on the disk can be
-changed by the machine that stores it rather than by rebuilding the
-image. the first program that has to think about a screen rather than a
-stream.
+**0.2.9 an editor, and redirection.** ~~something nano-shaped, so a file
+on the disk can be changed by the machine that stores it rather than by
+rebuilding the image. the first program that has to think about a screen
+rather than a stream.~~ **done in 0.2.9.** the editor is `margaret`,
+after the one who keeps the compendium -- the only thing in the velvet
+room that is written down.
+
+it needed four syscalls nothing had wanted before: one key rather than a
+line, the size of the screen, where to put the cursor, and clear. asking
+for a key *is* raw mode -- there is no flag anywhere saying a terminal
+is raw, because asking for a line and asking for a key are different
+questions and the answer to each is obvious.
+
+`write` is gone with it. `echo hello > file.txt` says the same thing
+with punctuation everybody already knows, and it is one program fewer.
+that took the change 0.2.8 said it was deferring: **0, 1 and 2 became
+real descriptors**. they had never been entries in the table at all --
+the syscall layer answered them directly, because until pipes there was
+exactly one place each could point -- and pointing stdout at a *file*
+has nowhere to be written down until they are slots like any other.
+`>`, `>>` and `<`, per command rather than per line, so `sort < a > b`
+is one stage with both ends moved.
 
 **0.2.10 job control.** ctrl+z, `bg`, `fg`, `jobs`, and process groups
 underneath them -- which the terminal half-knows about already, since it

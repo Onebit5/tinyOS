@@ -177,11 +177,38 @@ int main(void) {
 
         CHECK(!process_fd_peek(fp, FD_STDIN, NULL, NULL), "fd 0 is not a file");
         CHECK(!process_fd_peek(fp, FD_STDOUT, NULL, NULL), "nor fd 1");
+
+        /* 0, 1 and 2 became real slots in 0.2.9, so that redirection
+         * has somewhere to put a file. they are filled in before the
+         * program starts and it never finds out */
+        struct fd std;
+        CHECK(process_fd_get(fp, FD_STDIN, &std) && std.kind == FD_KEYBOARD,
+              "a new process reads from the keyboard");
+        CHECK(process_fd_get(fp, FD_STDOUT, &std) && std.kind == FD_CONSOLE,
+              "and writes to the screen");
+        CHECK(process_fd_get(fp, FD_STDERR, &std) && std.kind == FD_CONSOLE,
+              "on both of them");
+
+        /* which is exactly what redirection replaces */
+        struct fd redirected;
+        memset(&redirected, 0, sizeof redirected);
+        redirected.kind = FD_MEMORY;
+        redirected.data = (const uint8_t *)body;
+        redirected.size = 11;
+        CHECK(process_fd_install(fp, FD_STDOUT, &redirected),
+              "something else can be put in slot 1");
+        CHECK(process_fd_get(fp, FD_STDOUT, &std) && std.kind == FD_MEMORY,
+              "and that is what is there afterwards");
+
+        redirected.kind = FD_CONSOLE;
+        process_fd_install(fp, FD_STDOUT, &redirected);
         CHECK(!process_fd_peek(fp, 99, NULL, NULL), "nor one out of range");
         CHECK(!process_fd_peek(fp, -1, NULL, NULL), "nor a negative one");
 
-        CHECK(process_fd_close(fp, fd), "closing works");
-        CHECK(!process_fd_close(fp, fd), "but only once");
+        struct pipe_end closing;
+        CHECK(process_fd_close(fp, fd, &closing), "closing works");
+        CHECK(closing.p == NULL, "with no pipe to let go of, since it was a file");
+        CHECK(!process_fd_close(fp, fd, &closing), "but only once");
         CHECK(!process_fd_peek(fp, fd, NULL, NULL), "and the fd is gone");
 
         int opened = 0;

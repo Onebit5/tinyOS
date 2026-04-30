@@ -23,9 +23,9 @@ struct pipe;
 #define PROC_NAME_MAX   24
 
 /* how many files one process may hold open. 0, 1 and 2 are spoken for
- * by the console, the way they are everywhere, so an opened file gets
- * the first number from 3 up */
-#define MAX_FDS         8
+ * the way they are everywhere, so an opened file gets the first number
+ * from 3 up */
+#define MAX_FDS         12
 #define FD_STDIN        0
 #define FD_STDOUT       1
 #define FD_STDERR       2
@@ -34,16 +34,36 @@ struct pipe;
 /* what I record when a process was killed rather than choosing to go */
 #define PROCESS_KILLED  (-1)
 
-/* a file, as far as a process is concerned: somewhere in the ramdisk
- * and how far through it I am. nothing is copied -- the archive is
- * already in memory and read-only, so a descriptor is a bookmark */
+/* what a descriptor can be pointing at.
+ *
+ * until 0.2.9, 0, 1 and 2 were not descriptors at all -- the syscall
+ * layer answered them directly, because until pipes arrived there was
+ * exactly one place each of them could point. that was fine right up
+ * until `echo hi > file.txt`, which is stdout pointing at a *file*, and
+ * there was nowhere to write that down.
+ *
+ * so they are real slots now, filled in when the process is made. every
+ * read and every write is one lookup and a switch, and redirection is
+ * just a different thing in the slot before the program starts. it is
+ * the arrangement unix has had since the beginning and the reason is
+ * exactly this: a program that cannot tell where its output goes is a
+ * program that works in a pipeline, in a file, and on a screen without
+ * knowing which. */
+enum fd_kind {
+    FD_FREE = 0,
+    FD_CONSOLE,     /* the screen. writes print; reads are meaningless */
+    FD_KEYBOARD,    /* the line discipline. reads a line; writes are not */
+    FD_MEMORY,      /* a file already in memory, which is the ramdisk */
+    FD_DISK,        /* a file out on the disk, fetched as it is asked for */
+    FD_PIPE,
+};
+
 struct fd {
-    bool            open;
+    enum fd_kind    kind;
 
     /* a file in the ramdisk is already in memory, so the descriptor is
-     * a bookmark. a file on the disk is not, so all it can remember is
+     * a bookmark. one on the disk is not, so all it can remember is
      * where the file starts -- the bytes get fetched on demand */
-    bool            on_disk;
     const uint8_t  *data;       /* in memory */
 
     /* on disk: where the file starts, and where the record describing
@@ -54,6 +74,12 @@ struct fd {
 
     uint64_t        size;
     uint64_t        pos;
+
+    struct pipe    *pipe;
+    /* which end of a pipe this is, and for a file whether it was opened
+     * to be written to. one bit, because a descriptor here goes one way
+     * -- there is no read-write open and nothing has wanted one */
+    bool            writing;
 };
 
 /* everything a disk-backed descriptor knows about its file */
@@ -88,19 +114,6 @@ struct process {
     uint64_t started_ms;
     uint64_t ended_ms;
     struct fd fds[MAX_FDS];
-
-    /* where 0 and 1 go, when they do not go to the terminal.
-     *
-     * descriptors 0, 1 and 2 have never been entries in the table
-     * above -- the syscall layer answers them directly, because until
-     * now there was exactly one place they could point. a pipeline
-     * gives two of them somewhere else to point, and one pointer each
-     * is the whole of what that takes. it is not general redirection:
-     * there is no dup2 here and `>` still does nothing, because
-     * pointing stdout at a *file* wants 0, 1 and 2 to become real
-     * slots and that is a bigger change than a pipeline needs */
-    struct pipe *in;            /* NULL means the keyboard */
-    struct pipe *out;           /* NULL means the console */
 
     /* where this process is standing. every relative name it uses is
      * read from here, and it inherits whatever its parent was in --
@@ -175,23 +188,36 @@ bool process_fd_peek(int pid, int fd, const void **data, uint64_t *remaining);
 /* note that n bytes were taken */
 void process_fd_advance(int pid, int fd, uint64_t n);
 
-bool process_fd_close(int pid, int fd);
+/* a copy of what a descriptor points at. a copy rather than a pointer
+ * on purpose: the caller is about to do things that block -- read a
+ * pipe, fetch a sector -- and none of that may happen while holding the
+ * table this lives in */
+bool process_fd_get(int pid, int fd, struct fd *out);
 
-/* ---- the ends of a pipeline ----------------------------------------
- * set before the process runs, by whoever is wiring it up. the process
- * owns the ends from then on and lets go of them when it dies */
-void process_set_pipes(int pid, struct pipe *in, struct pipe *out);
+/* put something in a numbered slot. this is how redirection happens:
+ * before a program starts, whoever is wiring it up puts a pipe or a
+ * file where the console would have been, and the program never finds
+ * out */
+bool process_fd_install(int pid, int fd, const struct fd *src);
 
-/* which pipe, if any, 0 and 1 point at. NULL means the terminal */
-struct pipe *process_stdin(int pid);
-struct pipe *process_stdout(int pid);
+/* ---- the ends of a pipeline ---------------------------------------- */
 
-/* take them off the process and hand them back, so the caller can close
- * them without holding the process table's lock while it does. that
- * matters: closing a pipe wakes threads, and waking threads means
- * reaching the scheduler, which a holder of the process lock may not
- * do */
-void process_take_pipes(int pid, struct pipe **in, struct pipe **out);
+struct pipe_end {
+    struct pipe *p;
+    bool         writing;
+};
+
+/* take every pipe this process holds off it and hand them back, so the
+ * caller can close them without holding the process table's lock while
+ * it does. that matters: closing a pipe wakes threads, and waking
+ * threads means reaching the scheduler, which a holder of this lock may
+ * not do. returns how many were taken */
+size_t process_take_pipes(int pid, struct pipe_end *out, size_t max);
+
+/* close one. a pipe in that slot is handed back through `closing`
+ * rather than let go of here, for the same reason as everything else on
+ * this page. `closing->p` comes back NULL when it was not a pipe */
+bool process_fd_close(int pid, int fd, struct pipe_end *closing);
 
 /* how many a process is holding, for `ps` and the tests */
 size_t process_fd_count(int pid);

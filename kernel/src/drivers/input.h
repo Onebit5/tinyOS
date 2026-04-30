@@ -19,6 +19,14 @@
 #define KEY_RIGHT  0x103
 #define KEY_DELETE 0x104
 
+/* the four an editor wants and a line editor never did. the shell gets
+ * to the ends of a line with ctrl+a and ctrl+e, which is fine for one
+ * line -- but a page of text has a top and a bottom as well */
+#define KEY_HOME   0x105
+#define KEY_END    0x106
+#define KEY_PGUP   0x107
+#define KEY_PGDN   0x108
+
 #define KEY_CTRL_C 0x03
 
 /* called from irq handlers. wakes whoever is waiting */

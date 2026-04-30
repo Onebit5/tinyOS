@@ -80,6 +80,23 @@ struct thread *sched_current(void) { return &me; }
 
 uint64_t pit_uptime_ms(void) { return 1234; }
 
+/* the screen, stubbed. the editor's four calls are about *where* things
+ * go rather than what they say, so what is checked here is the
+ * permission on them -- only whoever is being typed at may paint the
+ * screen or take a key off it */
+static int cleared, moved_col, moved_row, keys_taken;
+void console_clear(void) { cleared++; }
+void console_move(size_t col, size_t row) {
+    moved_col = (int)col;
+    moved_row = (int)row;
+}
+void console_size(size_t *cols, size_t *rows, size_t *w, size_t *h) {
+    if (cols) *cols = 100;
+    if (rows) *rows = 40;
+    (void)w; (void)h;
+}
+
+
 /* the pipe blocks by parking on a waitq. nothing here ever fills one
  * up, so a sleep would mean a hang -- and saying so loudly is better
  * than a test that stops answering */
@@ -93,7 +110,7 @@ void waitq_sleep(void) {
 void sched_yield(void) { kprintf("<YIELD>"); }
 void sleep_ms(uint64_t ms) { kprintf("<SLEEP %lu>", ms); }
 static int next_key = 'x';
-int input_getchar_blocking(void) { return next_key; }
+int input_getchar_blocking(void) { keys_taken++; return next_key; }
 
 /* syscall_init installs this in an msr; I never call it here */
 void syscall_entry(void) { }
@@ -330,7 +347,19 @@ int main(void) {
         pipe_reset(&pin);
 
         strcpy(page, "down the pipe");
-        process_set_pipes(me.pid, &pin, &pout);
+
+        /* 0 and 1 are real descriptors now, so putting a pipe on one is
+         * putting a pipe in a slot -- the same act as `> file`, which
+         * is why one mechanism does both */
+        struct fd slot;
+        memset(&slot, 0, sizeof slot);
+        slot.kind = FD_PIPE;
+        slot.pipe = &pin;
+        slot.writing = false;
+        process_fd_install(me.pid, FD_STDIN, &slot);
+        slot.pipe = &pout;
+        slot.writing = true;
+        process_fd_install(me.pid, FD_STDOUT, &slot);
 
         out_reset();
         CHECK(write_to(FD_STDOUT, user_page, 13) == 13,
@@ -385,7 +414,11 @@ int main(void) {
         CHECK(exited, "it ends the process instead");
         CHECK(exit_code_seen == PROCESS_KILLED, "recorded as killed");
 
-        process_set_pipes(me.pid, NULL, NULL);
+        memset(&slot, 0, sizeof slot);
+        slot.kind = FD_KEYBOARD;
+        process_fd_install(me.pid, FD_STDIN, &slot);
+        slot.kind = FD_CONSOLE;
+        process_fd_install(me.pid, FD_STDOUT, &slot);
         out_reset();
         CHECK(write_to(FD_STDOUT, user_page, 13) == 13,
               "and with the pipes gone, stdout is the console again");
@@ -623,6 +656,66 @@ int main(void) {
         process_collect(guest, NULL);
     }
     strcpy(page, "motd.txt");
+
+    /* ---- the four an editor needs ----
+     *
+     * a shell wants none of these: it prints a prompt, reads a line,
+     * prints an answer, and the console keeps the cursor wherever the
+     * printing left it. a program painting a whole screen cannot work
+     * that way, and every one of these is about *where* rather than
+     * what -- so what is worth checking is the permission on them */
+    {
+        uint32_t c = 0, r = 0;
+        static uint32_t size_out[2];
+        user_extra = (uint64_t)size_out;
+        CHECK(call(SYS_SCREEN, (uint64_t)&size_out[0],
+                   (uint64_t)&size_out[1]) == 0, "the screen has a size");
+        c = size_out[0];
+        r = size_out[1];
+        CHECK(c == 100 && r == 40, "and it is the one the console reports");
+        user_extra = 0;
+
+        CHECK(call(SYS_SCREEN, kernel_page, kernel_page) == -1,
+              "and it will not be written into the kernel");
+
+        cleared = 0;
+        CHECK(call(SYS_CLEAR, 0, 0) == 0, "the foreground may clear the screen");
+        CHECK(cleared == 1, "and it happens");
+
+        CHECK(call(SYS_CURSOR, 7, 3) == 0, "and put the cursor somewhere");
+        CHECK(moved_col == 7 && moved_row == 3, "exactly where it asked");
+
+        keys_taken = 0;
+        next_key = 'z';
+        CHECK(call(SYS_GETKEY, 0, 0) == 'z', "and take one key, unechoed");
+        CHECK(keys_taken == 1, "off the input queue");
+
+        /* an interrupt has to be noticed after the wait as well as
+         * before it -- ctrl+c arrives by waking the thread, so a check
+         * only on the way in would miss every one that mattered */
+        process_interrupt(me.pid);
+        CHECK(call(SYS_GETKEY, 0, 0) == -1, "and gives up when interrupted");
+
+        /* the screen belongs to whoever is being typed at. a program in
+         * the background repainting it over the top of the foreground
+         * is the one thing none of this may allow */
+        int other = process_create("background", 0, 0, false, 0);
+        int was = me.pid;
+        me.pid = other;
+
+        cleared = 0;
+        CHECK(syscall_dispatch(SYS_CLEAR, 0, 0, 0, 0, 0) == -1,
+              "a background process may not clear the screen");
+        CHECK(cleared == 0, "and does not");
+        CHECK(syscall_dispatch(SYS_CURSOR, 1, 1, 0, 0, 0) == -1,
+              "nor move the cursor");
+        CHECK(syscall_dispatch(SYS_GETKEY, 0, 0, 0, 0, 0) == -1,
+              "nor help itself to a key meant for somebody else");
+
+        me.pid = was;
+        process_exited(other, 0, 0);
+        process_collect(other, NULL);
+    }
 
     /* ---- reading a directory ----
      * `ls` was the only command that needed something new to leave the

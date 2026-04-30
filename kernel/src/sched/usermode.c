@@ -128,10 +128,86 @@ static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
     return true;
 }
 
+/* put a file where the console or the keyboard would have been.
+ *
+ * this is the whole of redirection. `> name` makes the file if it is
+ * not there and empties it if it is, which is what everybody means by
+ * it -- a short thing written over a long one should leave the short
+ * thing, not the short thing followed by the tail of the long one.
+ * `>>` keeps what is there and starts at the end. `<` just opens it. */
+static bool redirect(int pid, int fd, const char *path, bool writing,
+                     bool append, const char **error) {
+    struct vfs_file f;
+    int uid = process_uid(pid);
+
+    if (!writing) {
+        if (!vfs_open(path, &f) || f.is_dir) {
+            *error = "no such file to read from";
+            return false;
+        }
+        /* the same question `open` asks, asked in the same way. a file
+         * a guest may not read is not one they may read by pointing an
+         * arrow at it -- an arrow is not a way round anything */
+        if (!vfs_may_read(&f, uid)) {
+            *error = "that file is not yours to read";
+            return false;
+        }
+    } else {
+        if (uid != 0) {
+            *error = "only the master may write files";
+            return false;
+        }
+        if (!append) {
+            /* truncate by removing it first. vfs_create opens what is
+             * already there rather than emptying it, and this is the
+             * one place that difference is visible to anybody */
+            struct vfs_file existing;
+            if (vfs_open(path, &existing)) {
+                if (existing.is_dir) {
+                    *error = "that is a directory";
+                    return false;
+                }
+                vfs_unlink(path);
+            }
+        }
+        if (!vfs_create(path, &f)) {
+            *error = "cannot write there -- only the disk takes new files";
+            return false;
+        }
+    }
+
+    struct fd slot;
+    memset(&slot, 0, sizeof slot);
+    slot.size = f.size;
+    slot.writing = writing;
+    slot.pos = (writing && append) ? f.size : 0;
+
+    if (f.kind == VFS_DISK) {
+        slot.kind = FD_DISK;
+        slot.cluster = f.cluster;
+        slot.entry_sector = f.entry_sector;
+        slot.entry_offset = f.entry_offset;
+    } else {
+        slot.kind = FD_MEMORY;
+        slot.data = f.data;
+    }
+
+    return process_fd_install(pid, fd, &slot);
+}
+
+static bool install_pipe(int pid, int fd, struct pipe *p, bool writing) {
+    struct fd slot;
+    memset(&slot, 0, sizeof slot);
+    slot.kind = FD_PIPE;
+    slot.pipe = p;
+    slot.writing = writing;
+    return process_fd_install(pid, fd, &slot);
+}
+
 int user_spawn(const char *path, int argc, const char *const argv[],
                const char *cwd,
                int parent, int uid, bool announce,
-               struct pipe *in, struct pipe *out, const char **error) {
+               const struct spawn_io *io, const char **error) {
     reap_abandoned();
 
     /* a program off the ramdisk is already in memory and is used where
@@ -224,8 +300,30 @@ int user_spawn(const char *path, int argc, const char *const argv[],
     if (pid != 0 && cwd != NULL) {
         process_set_cwd(pid, cwd);
     }
-    if (pid != 0 && (in != NULL || out != NULL)) {
-        process_set_pipes(pid, in, out);
+    /* whatever was asked for goes in before the thread exists, so the
+     * program has never seen anything else in those slots */
+    if (pid != 0 && io != NULL) {
+        const char *why = NULL;
+        bool ok = true;
+        if (io->in != NULL) {
+            ok = install_pipe(pid, FD_STDIN, io->in, false);
+        } else if (io->in_path != NULL) {
+            ok = redirect(pid, FD_STDIN, io->in_path, false, false, &why);
+        }
+        if (ok && io->out != NULL) {
+            ok = install_pipe(pid, FD_STDOUT, io->out, true);
+        } else if (ok && io->out_path != NULL) {
+            ok = redirect(pid, FD_STDOUT, io->out_path, true, io->append, &why);
+        }
+        if (!ok) {
+            int ignored;
+            process_exited(pid, PROCESS_KILLED, pit_uptime_ms());
+            process_collect(pid, &ignored);
+            kfree(start);
+            addrspace_destroy(space);
+            *error = (why != NULL) ? why : "could not redirect that";
+            return 0;
+        }
     }
     if (pid == 0) {
         kfree(start);
@@ -273,7 +371,7 @@ bool user_wait(int pid, int *code) {
 }
 
 bool user_pipeline(const struct stage *stages, int count, const char *cwd,
-                   int uid, const char **error) {
+                   int uid, bool background, const char **error) {
     if (count < 1 || count > PIPELINE_MAX) {
         *error = "that is more commands than I can join up";
         return false;
@@ -300,13 +398,18 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
     int started = 0;
 
     for (int i = 0; i < count; i++) {
-        struct pipe *in  = (i > 0)         ? pipes[i - 1] : NULL;
-        struct pipe *out = (i < count - 1) ? pipes[i]     : NULL;
+        struct spawn_io io;
+        memset(&io, 0, sizeof io);
+        io.in  = (i > 0)         ? pipes[i - 1] : NULL;
+        io.out = (i < count - 1) ? pipes[i]     : NULL;
+        io.in_path  = stages[i].in_path;
+        io.out_path = stages[i].out_path;
+        io.append   = stages[i].append;
 
         const char *why = NULL;
         int pid = user_spawn(stages[i].path, stages[i].argc,
                              (const char *const *)stages[i].argv,
-                             cwd, 0, uid, false, in, out, &why);
+                             cwd, 0, uid, false, &io, &why);
         pids[i] = pid;
         if (pid != 0) {
             started++;
@@ -323,8 +426,8 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
             return false;
         }
         kprintf("cannot run %s: %s\n", stages[i].path, why);
-        pipe_close_read(in);
-        pipe_close_write(out);
+        pipe_close_read(io.in);
+        pipe_close_write(io.out);
 
         if (i == 0) {
             *error = why;
@@ -333,6 +436,18 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
 
     if (started == 0) {
         return false;
+    }
+
+    /* a pipeline with an & on the end is nobody's to wait for. the
+     * terminal stays with the shell, and the next spawn sweeps up
+     * whatever is left of these */
+    if (background) {
+        for (int i = 0; i < count; i++) {
+            if (pids[i] != 0) {
+                kprintf("[kernel] pid %d runs in the background\n", pids[i]);
+            }
+        }
+        return true;
     }
 
     /* the last one gets the terminal. it is the only stage that could
@@ -385,7 +500,7 @@ bool user_run(const char *path, int argc, const char *const argv[],
               const char *cwd,
               int uid, bool background, bool announce, const char **error) {
     int pid = user_spawn(path, argc, argv, cwd, 0, uid, announce,
-                         NULL, NULL, error);
+                         NULL, error);
     if (pid == 0) {
         return false;
     }

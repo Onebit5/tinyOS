@@ -179,15 +179,22 @@ bool user_run(const char *path, int argc, const char *const argv[],
 static int pipe_count_seen;
 static const char *pipe_paths[PIPELINE_MAX];
 static int pipe_argcs[PIPELINE_MAX];
+static const char *pipe_in[PIPELINE_MAX], *pipe_out[PIPELINE_MAX];
+static bool pipe_append[PIPELINE_MAX];
+static bool pipe_background;
 static bool pipeline_ok = true;
 
 bool user_pipeline(const struct stage *stages, int count, const char *cwd,
-                   int uid, const char **error) {
+                   int uid, bool background, const char **error) {
     (void)cwd; (void)uid;
     pipe_count_seen = count;
+    pipe_background = background;
     for (int i = 0; i < count && i < PIPELINE_MAX; i++) {
         pipe_paths[i] = stages[i].path;
         pipe_argcs[i] = stages[i].argc;
+        pipe_in[i] = stages[i].in_path;
+        pipe_out[i] = stages[i].out_path;
+        pipe_append[i] = stages[i].append;
     }
     if (pipeline_ok) return true;
     *error = "no";
@@ -315,6 +322,17 @@ int main(void) {
     check_split("cat x|head", 4, "cat", "x");
     check_split("cat x |head", 4, "cat", "x");
     check_split("|", 1, "|", NULL);
+    check_split("echo hi > f", 4, "echo", "hi");
+    check_split("echo hi>f", 4, "echo", "hi");
+    check_split("echo hi>>f", 4, "echo", "hi");
+    check_split("sort <a >b", 5, "sort", "<");
+    {
+        char buf[64] = "echo hi>>f";
+        char *argv[ARGV_MAX];
+        int n = split(buf, argv, ARGV_MAX);
+        CHECK(n == 4 && strcmp(argv[2], ">>") == 0 && strcmp(argv[3], "f") == 0,
+              "two arrows with no spaces are still one word, not two");
+    }
     {
         char buf[64] = "a|b";
         char *argv[ARGV_MAX];
@@ -378,10 +396,66 @@ int main(void) {
     CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
     CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
 
-    /* the arrows are still not a thing, and still say so */
-    run("cat x > y");
-    CHECK(strstr(out, "no redirection") != NULL,
-          "redirection is still refused, and by name");
+    /* ---- redirection ----
+     *
+     * the arrows are taken *out* of the arguments, not passed on. a
+     * program has no business seeing them: `sort < a.txt` should look
+     * to sort exactly like `sort` with something on standard input,
+     * which is the entire idea */
+
+    pipe_count_seen = 0;
+    run("echo hello > out.txt");
+    CHECK(pipe_count_seen == 1, "a redirect on its own is a one-stage pipeline");
+    CHECK(pipe_out[0] && strcmp(pipe_out[0], "out.txt") == 0,
+          "with the file taken off the line");
+    CHECK(!pipe_append[0], "and a single arrow does not append");
+    CHECK(pipe_argcs[0] == 2,
+          "and the arrow and its filename gone from the arguments");
+
+    pipe_count_seen = 0;
+    run("echo hello >> out.txt");
+    CHECK(pipe_append[0], "two arrows keeps what is already there");
+
+    pipe_count_seen = 0;
+    run("sort < in.txt > out.txt");
+    CHECK(pipe_in[0] && strcmp(pipe_in[0], "in.txt") == 0, "both ends can move");
+    CHECK(pipe_out[0] && strcmp(pipe_out[0], "out.txt") == 0, "at once");
+    CHECK(pipe_argcs[0] == 1, "leaving just the command");
+
+    /* an arrow with nothing after it is a sentence that stops halfway */
+    pipe_count_seen = 0;
+    run("cat >");
+    CHECK(pipe_count_seen == 0, "an arrow with no filename runs nothing");
+    CHECK(strstr(out, "nothing after") != NULL, "and says so");
+
+    pipe_count_seen = 0;
+    run("> out.txt");
+    CHECK(pipe_count_seen == 0, "and a file with no command runs nothing");
+
+    /* the middle of a pipeline already has both ends spoken for.
+     * saying which of two things wins is worse than refusing */
+    pipe_count_seen = 0;
+    run("cat motd.txt | head > out.txt");
+    CHECK(pipe_count_seen == 2, "the last stage may still redirect its output");
+    CHECK(pipe_out[1] && strcmp(pipe_out[1], "out.txt") == 0, "to a file");
+
+    pipe_count_seen = 0;
+    run("cat motd.txt > out.txt | head");
+    CHECK(pipe_count_seen == 0,
+          "but a stage that already feeds another may not also redirect");
+    CHECK(strstr(out, "already sends") != NULL, "and is told which it was");
+
+    pipe_count_seen = 0;
+    run("cat motd.txt | head < in.txt");
+    CHECK(pipe_count_seen == 0,
+          "nor may one that is already fed take its input from a file");
+
+    /* & belongs to the line rather than to the last stage */
+    pipe_count_seen = 0;
+    run("cat motd.txt | head &");
+    CHECK(pipe_count_seen == 2 && pipe_background,
+          "a trailing & backgrounds the whole pipeline, not just its end");
+    CHECK(pipe_argcs[1] == 1, "and is not handed to anybody as an argument");
 
     /* ---- dispatch ---- */
     run("help");
@@ -685,12 +759,15 @@ int main(void) {
         CHECK(strcmp(line, "cat /notes/deeper.txt") == 0,
               "and one more character is enough to settle it");
 
-        /* the two commands that had no completion at all before */
-        strcpy(line, "write /h"); len = 8; pos = 8;
+        /* the two commands that had no completion at all before.
+         * `write` was one of them until 0.2.9 removed it -- `echo x >
+         * file` says the same thing with punctuation everybody already
+         * knows, and one program fewer */
+        strcpy(line, "grep x /h"); len = 9; pos = 9;
         out_reset();
         complete(line, &len, &pos);
-        CHECK(strcmp(line, "write /hello.txt") == 0,
-              "write completes disk paths too");
+        CHECK(strcmp(line, "grep x /hello.txt") == 0,
+              "a filename anywhere in the arguments completes");
 
         strcpy(line, "ls /n"); len = 5; pos = 5;
         out_reset();

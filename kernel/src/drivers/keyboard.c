@@ -62,6 +62,10 @@ static void feed_extended(uint8_t code, bool release) {
     case 0x4b: input_push(KEY_LEFT);   break;
     case 0x4d: input_push(KEY_RIGHT);  break;
     case 0x53: input_push(KEY_DELETE); break;
+    case 0x47: input_push(KEY_HOME);   break;
+    case 0x4f: input_push(KEY_END);    break;
+    case 0x49: input_push(KEY_PGUP);   break;
+    case 0x51: input_push(KEY_PGDN);   break;
     default: break;
     }
 }

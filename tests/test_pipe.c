@@ -30,6 +30,7 @@ void kprintf(const char *fmt, ...) {
 void *kmalloc(size_t n) { return malloc(n); }
 void kfree(void *p) { free(p); }
 
+#include "sched/process.h"
 #include "fs/pipe.h"
 
 static int failures = 0;
@@ -64,14 +65,25 @@ static bool interrupt_pending;
 bool process_interrupt_pending(int pid) { (void)pid; return interrupt_pending; }
 
 /* what a process was holding, so pipe_release_for has something to take
- * away. one process's worth is all this test needs */
+ * away. 0.2.9 made 0 and 1 real descriptors, so a process can hold a
+ * pipe in any slot and this hands back however many there are */
 static struct pipe *held_in, *held_out;
-void process_take_pipes(int pid, struct pipe **in, struct pipe **out) {
+size_t process_take_pipes(int pid, struct pipe_end *out, size_t max) {
     (void)pid;
-    *in = held_in;
-    *out = held_out;
-    held_in = NULL;
-    held_out = NULL;
+    size_t n = 0;
+    if (held_in != NULL && n < max) {
+        out[n].p = held_in;
+        out[n].writing = false;
+        n++;
+        held_in = NULL;
+    }
+    if (held_out != NULL && n < max) {
+        out[n].p = held_out;
+        out[n].writing = true;
+        n++;
+        held_out = NULL;
+    }
+    return n;
 }
 
 int main(void) {

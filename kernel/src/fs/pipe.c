@@ -129,11 +129,22 @@ void pipe_release_for(int pid) {
     }
     /* taken off the process first and closed after: closing one wakes
      * threads, and the process table's lock may not be held while
-     * reaching up to the scheduler */
-    struct pipe *in, *out;
-    process_take_pipes(pid, &in, &out);
-    pipe_close_read(in);
-    pipe_close_write(out);
+     * reaching up to the scheduler.
+     *
+     * every pipe it was holding, not just the two ends of a pipeline --
+     * once 0.2.9 made 0 and 1 real descriptors there is nothing
+     * special about them, and a process could in principle be holding
+     * a pipe in any slot */
+    struct pipe_end ends[MAX_FDS];
+    size_t n = process_take_pipes(pid, ends, MAX_FDS);
+
+    for (size_t i = 0; i < n; i++) {
+        if (ends[i].writing) {
+            pipe_close_write(ends[i].p);
+        } else {
+            pipe_close_read(ends[i].p);
+        }
+    }
 }
 
 size_t pipe_count(void) { return live; }

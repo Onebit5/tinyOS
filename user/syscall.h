@@ -28,6 +28,10 @@
 #define SYS_UNLINK 18
 #define SYS_RENAME 19
 #define SYS_STAT   20
+#define SYS_GETKEY 21
+#define SYS_SCREEN 22
+#define SYS_CURSOR 23
+#define SYS_CLEAR  24
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -166,6 +170,42 @@ static inline long spawn(const char *path) {
 static inline long wait(long pid, int *code) {
     return syscall2(SYS_WAIT, pid, (long)code);
 }
+
+/* ---- painting a whole screen ---------------------------------------
+ *
+ * a program that draws its own screen needs three things a shell never
+ * does: one key rather than a line, the size of what it is drawing on,
+ * and a way to say where in it the cursor belongs.
+ *
+ * there is no "raw mode" to turn on anywhere. asking for a line gets
+ * the line discipline, with its echo and its backspace handling;
+ * asking for a key gets the key, unechoed. they are different
+ * questions, so they are different calls, and nothing has to remember
+ * which mode anything is in */
+
+/* keys that are not characters come back above 0xff so they cannot be
+ * mistaken for one. ctrl+letter arrives as the usual control codes --
+ * ctrl+a is 1, the way it has been since 1963 */
+#define KEY_UP     0x100
+#define KEY_DOWN   0x101
+#define KEY_LEFT   0x102
+#define KEY_RIGHT  0x103
+#define KEY_DELETE 0x104
+#define KEY_HOME   0x105
+#define KEY_END    0x106
+#define KEY_PGUP   0x107
+#define KEY_PGDN   0x108
+
+/* blocks until a key is pressed. -1 if ctrl+c arrived instead */
+static inline long getkey(void) { return syscall0(SYS_GETKEY); }
+
+static inline long screen_size(uint32_t *cols, uint32_t *rows) {
+    return syscall2(SYS_SCREEN, (long)cols, (long)rows);
+}
+static inline long cursor_to(long col, long row) {
+    return syscall2(SYS_CURSOR, col, row);
+}
+static inline long clear_screen(void) { return syscall0(SYS_CLEAR); }
 
 static inline long uptime(void)      { return syscall0(SYS_UPTIME); }
 static inline void yield(void)       { syscall0(SYS_YIELD); }

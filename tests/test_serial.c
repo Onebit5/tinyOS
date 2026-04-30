@@ -85,9 +85,30 @@ int main(void) {
     feed("\x1b[C\x1b[D");
     expect_keys((int[]){KEY_RIGHT, KEY_LEFT}, 2, "ESC[C and ESC[D are right and left");
 
+    /* home and end come both ways depending on the terminal, and both
+     * have to work -- a key that only functions on half of them is
+     * worse than one that does not exist */
+    feed("\x1b[H\x1b[F");
+    expect_keys((int[]){KEY_HOME, KEY_END}, 2, "ESC[H and ESC[F are home and end");
+
+    /* the other shape: a number and a tilde. page up and page down are
+     * only ever sent this way, so knowing one shape is not enough */
+    feed("\x1b[5~\x1b[6~");
+    expect_keys((int[]){KEY_PGUP, KEY_PGDN}, 2, "ESC[5~ and ESC[6~ are the pages");
+    feed("\x1b[1~\x1b[4~\x1b[3~");
+    expect_keys((int[]){KEY_HOME, KEY_END, KEY_DELETE}, 3,
+                "and home, end and delete are sent that way by some");
+
     /* a CSI sequence I dont handle must vanish, not spray garbage */
-    feed("\x1b[H");
+    feed("\x1b[Z");
     expect_keys(NULL, 0, "an unknown escape sequence is dropped");
+    feed("\x1b[99~");
+    expect_keys(NULL, 0, "and so is an unknown numbered one");
+
+    /* the number cannot run away with itself either: a sequence that
+     * never ends must give up rather than collecting for ever */
+    feed("\x1b[123456789~a");
+    expect_keys((int[]){'a'}, 1, "a runaway number is abandoned, and text after it survives");
 
     /* the state machine must not swallow real input around a sequence */
     feed("a\x1b[Ab");
