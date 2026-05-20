@@ -210,9 +210,19 @@ has nowhere to be written down until they are slots like any other.
 `>`, `>>` and `<`, per command rather than per line, so `sort < a > b`
 is one stage with both ends moved.
 
-**0.2.10 job control.** ctrl+z, `bg`, `fg`, `jobs`, and process groups
+**0.2.10 job control.** ~~ctrl+z, `bg`, `fg`, `jobs`, and process groups
 underneath them -- which the terminal half-knows about already, since it
-has had a foreground process since 0.1.3.
+has had a foreground process since 0.1.3.~~ **done in 0.2.10.** stopping
+a thread turned out to want a *flag* rather than a state: a suspended
+thread may also be blocked on a pipe or asleep, and those answer
+different questions -- "what is it waiting for" against "may it run at
+all". squeezing both into one enum means a stopped thread forgetting it
+was stopped the moment anybody wakes it.
+
+the terminal talks to a group now rather than a pid, because `cat x |
+wc -l` is two processes and one thing the person typing is thinking
+about. and with no signals, a suspended job announces itself by leaving
+a note where the shell will look: waiting has a second way to finish.
 
 **0.2.11 fork, and copy on write.** spawning is the only way to make a
 process and it builds one from a file every time. `fork` copies an

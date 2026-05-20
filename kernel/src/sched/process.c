@@ -59,6 +59,9 @@ int process_create(const char *name, int parent, int uid, bool announce,
 
         p->pid        = next_pid++;
         p->parent     = parent;
+        /* its own group until somebody says otherwise, which is what a
+         * command typed on its own is: a job of one */
+        p->pgid       = p->pid;
         p->uid        = uid;
         p->announce   = announce;
         p->thread_id  = 0;
@@ -216,6 +219,68 @@ bool process_take_interrupt(int pid) {
     }
     spin_unlock_irq(&process_lock, flags);
     return had;
+}
+
+/* ---- groups --------------------------------------------------------- */
+
+int process_pgid(int pid) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    int g = (p != NULL) ? p->pgid : -1;
+    spin_unlock_irq(&process_lock, flags);
+    return g;
+}
+
+void process_set_pgid(int pid, int pgid) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    if (p != NULL) {
+        p->pgid = pgid;
+    }
+    spin_unlock_irq(&process_lock, flags);
+}
+
+size_t process_group_threads(int pgid, int *ids, size_t max) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    size_t n = 0;
+
+    for (size_t i = 0; i < MAX_PROCESSES && n < max; i++) {
+        if (table[i].pid == 0 || table[i].pgid != pgid) {
+            continue;
+        }
+        if (table[i].exited || table[i].thread_id == 0) {
+            continue;
+        }
+        ids[n++] = table[i].thread_id;
+    }
+
+    spin_unlock_irq(&process_lock, flags);
+    return n;
+}
+
+bool process_group_alive(int pgid) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    bool alive = false;
+
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        if (table[i].pid != 0 && table[i].pgid == pgid && !table[i].exited) {
+            alive = true;
+            break;
+        }
+    }
+
+    spin_unlock_irq(&process_lock, flags);
+    return alive;
+}
+
+void process_interrupt_group(int pgid) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        if (table[i].pid != 0 && table[i].pgid == pgid && !table[i].exited) {
+            table[i].interrupted = true;
+        }
+    }
+    spin_unlock_irq(&process_lock, flags);
 }
 
 /* ---- open files ---------------------------------------------------- */

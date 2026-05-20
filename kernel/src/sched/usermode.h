@@ -70,6 +70,38 @@ struct stage {
     bool        append;
 };
 
+/* a spawned process is created asleep, so that whoever started it can
+ * settle its group, its descriptors and who holds the terminal before
+ * anything runs. this is what lets it go */
+void user_start(int pid);
+
+/* a job: everything one typed line started, held together by a group
+ * number so the terminal can talk to all of it at once */
+struct job {
+    int  pgid;
+    int  pids[PIPELINE_MAX];
+    int  count;
+    bool stopped;       /* suspended by ctrl+z rather than finished */
+};
+
+/* wait for a job to end -- or to be stopped, which is the other way
+ * waiting can finish. returns true if it really ended; false means it
+ * is suspended and still there, which is what `fg` and `bg` are for.
+ *
+ * the terminal goes back to the shell either way */
+bool user_job_wait(struct job *j);
+
+/* let a stopped job go again, with or without the terminal. `fg` waits
+ * for it afterwards; `bg` does not */
+void user_job_continue(struct job *j, bool foreground);
+
+/* is anything in it still going? */
+bool user_job_alive(const struct job *j);
+
+/* collect whatever has finished, so the table does not fill with the
+ * remains of jobs nobody asked about */
+void user_job_collect(struct job *j);
+
 /* run `count` commands with a pipe between each neighbouring pair, and
  * wait for all of them.
  *
@@ -83,7 +115,8 @@ struct stage {
  * at all; a failure further along is reported and the rest carry on,
  * since they will see end of file and finish by themselves */
 bool user_pipeline(const struct stage *stages, int count, const char *cwd,
-                   int uid, bool background, const char **error);
+                   int uid, bool background, struct job *out,
+                   const char **error);
 
 /* block until a pid has ended, then collect it. false if there is no
  * such process. whether the caller had any business waiting for it is
@@ -94,6 +127,7 @@ bool user_wait(int pid, int *code);
  * report how it went */
 bool user_run(const char *path, int argc, const char *const argv[],
               const char *cwd,
-              int uid, bool background, bool announce, const char **error);
+              int uid, bool background, bool announce, struct job *out,
+              const char **error);
 
 #endif

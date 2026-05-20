@@ -160,9 +160,14 @@ static int ran_argc;
 static const char *ran_arg1;
 static int ran_uid = -1;
 static bool ran_announce;
+/* what the fake job comes back as: finished, or suspended by a ctrl+z
+ * that the test says happened */
+static bool run_stops;
+
 bool user_run(const char *path, int argc, const char *const argv[],
               const char *cwd,
-              int uid, bool background, bool announce, const char **error) {
+              int uid, bool background, bool announce, struct job *out,
+              const char **error) {
     (void)cwd;
     ran_uid = uid;
     ran_announce = announce;
@@ -170,9 +175,35 @@ bool user_run(const char *path, int argc, const char *const argv[],
     ran_argc = argc;
     ran_arg1 = (argc > 1) ? argv[1] : NULL;
     ran_background = background;
+
+    memset(out, 0, sizeof *out);
+    out->pgid = 42;
+    out->pids[0] = 42;
+    out->count = 1;
+    out->stopped = run_stops && !background;
+
     if (run_ok) return true;
     *error = run_error;
     return false;
+}
+
+/* a job the test can decide is still going or not */
+static bool job_is_alive;
+static int  continued_pgid, continued_foreground;
+static int  waits;
+
+bool user_job_alive(const struct job *j) { (void)j; return job_is_alive; }
+void user_job_collect(struct job *j) { (void)j; }
+
+bool user_job_wait(struct job *j) {
+    waits++;
+    j->stopped = run_stops;
+    return !run_stops;
+}
+
+void user_job_continue(struct job *j, bool foreground) {
+    continued_pgid = j->pgid;
+    continued_foreground = foreground ? 1 : 0;
 }
 /* what the shell handed to the pipeline, so a test can say the line was
  * chopped where the bars were and each piece resolved to a program */
@@ -185,8 +216,14 @@ static bool pipe_background;
 static bool pipeline_ok = true;
 
 bool user_pipeline(const struct stage *stages, int count, const char *cwd,
-                   int uid, bool background, const char **error) {
+                   int uid, bool background, struct job *out,
+                   const char **error) {
     (void)cwd; (void)uid;
+    memset(out, 0, sizeof *out);
+    out->pgid = 7;
+    out->pids[0] = 7;
+    out->count = count;
+    out->stopped = run_stops && !background;
     pipe_count_seen = count;
     pipe_background = background;
     for (int i = 0; i < count && i < PIPELINE_MAX; i++) {
@@ -395,6 +432,97 @@ int main(void) {
     run("ps | grep hello");
     CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
     CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
+
+    /* ---- jobs -----------------------------------------------------
+     *
+     * a job is one typed line, however many processes that turned out
+     * to be. the shell keeps them because it is the only thing that
+     * knows what was *typed* -- the kernel has a group number and some
+     * pids, and `[1]+ stopped  cat x | wc -l` needs the line */
+
+    run("jobs");
+    CHECK(strstr(out, "nothing is waiting") != NULL,
+          "with nothing set aside, jobs says so");
+
+    /* something put in the background is remembered, because it is
+     * still there and you will want to name it later */
+    run_stops = false;
+    job_is_alive = true;
+    run("counter &");
+    CHECK(ran_background, "an & backgrounds it");
+    CHECK(strstr(out, "[1]") != NULL, "and it gets a number");
+    CHECK(strstr(out, "running") != NULL, "and is listed as running");
+    CHECK(strstr(out, "counter &") != NULL,
+          "under the line that was typed, which is the only reason the "
+          "shell keeps jobs at all");
+
+    run("jobs");
+    CHECK(strstr(out, "[1]") && strstr(out, "counter"),
+          "and `jobs` lists it afterwards");
+
+    /* a foreground command that finishes is *not* remembered. writing
+     * it down would only make a list of everything anybody ever did */
+    run("echo hello");
+    run("jobs");
+    CHECK(strstr(out, "echo hello") == NULL,
+          "something that ran and finished leaves no job behind");
+
+    /* ctrl+z. the stub says the job came back stopped rather than done */
+    run_stops = true;
+    run("cat");
+    CHECK(strstr(out, "stopped") != NULL, "a suspended job says so");
+    CHECK(strstr(out, "[2]") != NULL, "and gets the next number");
+
+    run("jobs");
+    CHECK(strstr(out, "[1]") && strstr(out, "[2]"),
+          "both are listed");
+    CHECK(strstr(out, "[2]+") != NULL,
+          "with a + on the one last touched, which is what a bare fg means");
+
+    /* fg with no number means that one */
+    continued_pgid = 0;
+    continued_foreground = -1;
+    run_stops = false;
+    run("fg");
+    CHECK(continued_pgid != 0, "a bare fg continues the marked job");
+    CHECK(continued_foreground == 1, "and hands it the terminal");
+
+    run("jobs");
+    CHECK(strstr(out, "[2]") == NULL,
+          "and a job that finished in the foreground is gone from the list");
+
+    /* bg continues without the terminal, which is the whole difference */
+    run_stops = true;
+    run("cat");
+    continued_foreground = -1;
+    run("bg");
+    CHECK(continued_foreground == 0,
+          "bg continues it and does *not* hand over the terminal");
+    run("jobs");
+    CHECK(strstr(out, "running") != NULL, "and it is running again");
+
+    /* a job number that was never handed out */
+    run("fg 99");
+    CHECK(strstr(out, "no job 99") != NULL, "an unknown job is refused by name");
+    run("fg x");
+    CHECK(strstr(out, "jobs") != NULL, "and so is something that is not a number");
+
+    /* %1 is how everybody else spells it, so it works here too */
+    continued_pgid = 0;
+    run_stops = false;
+    run("fg %1");
+    CHECK(continued_pgid != 0, "%1 names a job the way it does everywhere");
+
+    /* the ones still on the table finished while nobody was looking.
+     * that gets reported at the next prompt rather than the instant it
+     * happens, or it would scribble over whatever is half-typed */
+    job_is_alive = false;
+    out_reset();
+    prompt();
+    CHECK(strstr(out, "done") != NULL,
+          "a background job that finished is reported at the next prompt");
+    run("jobs");
+    CHECK(strstr(out, "nothing is waiting") != NULL, "and then it is gone");
 
     /* ---- redirection ----
      *

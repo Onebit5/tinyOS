@@ -95,6 +95,15 @@ struct fd_disk {
 struct process {
     int      pid;               /* 0 means the slot is free */
     int      parent;            /* pid of whoever started it, 0 for the shell */
+
+    /* which job this belongs to.
+     *
+     * `cat x | grep y | wc -l` is three processes and *one* thing the
+     * person typing it is thinking about. ctrl+z has to stop all three
+     * or none, ctrl+c has to reach all three, and `fg` has to bring all
+     * three back -- so they share a number, and that number is the pid
+     * of the first of them. a command on its own is a group of one */
+    int      pgid;
     int      uid;               /* who it runs as. 0 is the master */
 
     /* whether to narrate this one's comings and goings. `run bin/hello`
@@ -138,6 +147,27 @@ bool process_announces(int pid);
 /* who a process runs as. -1 if there is no such pid, which callers
  * treat as "not allowed" rather than "allowed" */
 int  process_uid(int pid);
+
+/* ---- groups ---------------------------------------------------------
+ * a job is a group, and everything the terminal does it does to a whole
+ * one: the keys belong to a group, ctrl+c reaches a group, ctrl+z stops
+ * a group */
+
+int  process_pgid(int pid);
+void process_set_pgid(int pid, int pgid);
+
+/* the thread ids of everything still running in a group. that is what
+ * stopping and continuing need, and it is gathered under the table's
+ * lock and acted on afterwards -- the scheduler may not be reached
+ * while this lock is held */
+size_t process_group_threads(int pgid, int *ids, size_t max);
+
+/* deliver an interrupt to every member. one ctrl+c, the whole job */
+void process_interrupt_group(int pgid);
+
+/* is anything in the group still going? a job whose last member has
+ * ended is a job that is over */
+bool process_group_alive(int pgid);
 
 /* note which thread is running it, once there is one */
 void process_set_thread(int pid, int thread_id);

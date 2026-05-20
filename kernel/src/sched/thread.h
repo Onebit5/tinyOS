@@ -28,6 +28,19 @@ struct thread {
     size_t   stack_pages;
 
     enum thread_state state;
+
+    /* suspended by ctrl+z, and not to be picked until somebody says
+     * otherwise.
+     *
+     * a flag rather than a state, and that is the whole trick. a thread
+     * that is stopped may *also* be blocked on a pipe, or asleep, or
+     * ready -- those are answers to "what is it waiting for" and this
+     * is an answer to "may it run at all". squeezing both into one enum
+     * would mean a stopped-then-woken thread forgetting it was stopped,
+     * which is a program that resumes itself the moment anybody types
+     * at it */
+    bool     stopped;
+
     uint64_t wake_at;           /* tick to wake on, when SLEEPING */
 
     /* how many timer ticks this thread was the one running when the

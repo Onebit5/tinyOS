@@ -16,17 +16,27 @@
  * of a controlling terminal: one process at the front, everyone else
  * waiting their turn. */
 
-/* pid 0 means the kernel shell, which is where the terminal goes back
+/* group 0 means the kernel shell, which is where the terminal goes back
  * to whenever a program finishes */
 #define TTY_SHELL 0
 
-void tty_set_foreground(int pid);
+/* the front of the terminal is a *group*, not a process. `cat x | wc`
+ * is three processes and one thing the person typing is thinking about,
+ * and every question the terminal asks -- may you read these keys, does
+ * this ctrl+c reach you -- has to be asked of the whole job */
+void tty_set_foreground(int pgid);
 int  tty_foreground(void);
 
-/* a key arrived. returns true if the tty consumed it as an interrupt
- * rather than as a character -- ctrl+c aimed at a program is a request,
- * not a byte, and must not end up in anybody's input buffer */
+/* a key arrived. returns true if the tty consumed it rather than
+ * passing it on as a character -- ctrl+c and ctrl+z aimed at a program
+ * are requests, not bytes, and must not end up in anybody's buffer */
 bool tty_intercept(int key);
+
+/* did ctrl+z stop the foreground since I last asked? the shell polls
+ * this while it waits, because it is the only way it finds out: there
+ * are no signals here, so a suspended job announces itself by the
+ * waiting having a second reason to end */
+bool tty_take_stopped(int *pgid);
 
 /* read a line on behalf of a process, echoing it as it is typed.
  *

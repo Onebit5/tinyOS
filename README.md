@@ -1,12 +1,12 @@
 # tinyOS
 
-![ci](https://github.com/USERNAME/tinyOS/actions/workflows/ci.yml/badge.svg)
+![ci](https://github.com/Onebit5/tinyOS/actions/workflows/ci.yml/badge.svg)
 
 a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of its own.
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.9** (**an editor, and redirection.** `margaret` writes things down, and `echo hi > file` replaced a whole program with punctuation)
+**version: 0.2.10** (**job control.** ctrl+z, `fg`, `bg`, `jobs`, and process groups underneath them)
 
 ## what it does
 
@@ -47,6 +47,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] pipes: `cat x | grep hee | wc -l`, with end of file and broken pipes that mean it
 - [x] redirection -- `>`, `>>`, `<` -- and 0, 1 and 2 as real descriptors at last
 - [x] a text editor that runs in ring 3 and paints its own screen
+- [x] job control: ctrl+z, `fg`, `bg`, `jobs`, and a terminal that talks to groups
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -155,6 +156,127 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## job control
+
+```
+igor@velvet# margaret notes.txt
+^Z
+[1]+ stopped   margaret notes.txt
+igor@velvet# ls -1 | sort > names.txt &
+[2]+ running   ls -1 | sort > names.txt &
+igor@velvet# jobs
+[1]  stopped   margaret notes.txt
+[2]+ running   ls -1 | sort > names.txt &
+igor@velvet# fg 1
+margaret notes.txt
+```
+
+### stopping is a flag, not a state
+
+the obvious move is a `THREAD_STOPPED` next to `READY`, `SLEEPING` and
+`BLOCKED`. it is wrong, and wrong in a way that only shows up later: a
+suspended thread may *also* be blocked on a pipe, or asleep on a timer.
+those answer two different questions — "what is it waiting for" and "may
+it run at all" — and squeezing both into one enum means a stopped thread
+that gets woken **forgets it was stopped**. press ctrl+z on `cat | wc`,
+then type: the writer wakes to take your line and resumes itself.
+
+so it is one orthogonal bit:
+
+```c
+bool stopped;
+```
+
+`pick_next` skips it and nothing else changes. a stopped thread keeps
+whatever it was in the middle of — a half-typed line, a blocked pipe
+read — which is what makes continuing it *one bit* rather than a
+recovery. it also means stopping happens at the next tick rather than
+this instant, which is at most one quantum and nobody can tell.
+
+### the terminal talks to a group
+
+`cat x | grep y | wc -l` is three processes and one thing the person
+typing it is thinking about. interrupting only the last of three would
+leave the other two writing into a pipe nobody is reading, so the
+foreground is a **process group** now, named after the pid of the first
+member. ctrl+c reaches all of it; ctrl+z stops all of it; only the group
+at the front may read the keyboard.
+
+### how the shell finds out
+
+there are no signals here, so a suspended job cannot be *told* to
+anybody. instead ctrl+z leaves a note, and the shell — which is already
+sitting in a poll waiting for the job to finish — has a second reason
+for that wait to end:
+
+```c
+bool user_job_wait(struct job *j);   /* false means stopped, not finished */
+```
+
+that is the whole mechanism. `fg` clears the flags, hands the terminal
+back and waits again; `bg` clears the flags and does not. the difference
+between the two is exactly one argument.
+
+### the terminal is not shared
+
+a backgrounded job that tries to read the keyboard gets `-1` rather than
+keys meant for whoever is being typed at. unix stops the process instead
+— which is tidier and wants a signal I do not have.
+
+**and it does not get to print, either.** the console belongs to
+whoever is at the front, exactly the way the keyboard does. a job put in
+the background with `&` printing over the prompt is the noise `&` was
+supposed to spare you, and worse than noise: it lands in the middle of a
+line you are typing.
+
+so those writes are *dropped*, not refused. a program has no way to know
+it is in the background and nothing sensible to do about it — a write
+that failed would only make it die or spin, while a write that quietly
+went nowhere is what a terminal nobody is watching actually is. if you
+want the output, say where it goes:
+
+```
+igor@velvet# ls -1 | sort > names.txt &
+```
+
+descriptor 2 is the exception, and it is the exception everywhere for
+the same reason: it reaches the terminal whatever else is going on, so a
+job that failed in the background still gets to say so. that is the same
+call 0.2.8 made for pipes — errors are not data.
+
+`fg` and `bg` need to do nothing about any of this. the question is
+asked at the moment of the write rather than answered once when the job
+starts, so moving a job between front and back moves its output with it.
+
+### spawned asleep
+
+a thread that starts the instant it is created can print before anybody
+has said which job it belongs to or who holds the terminal — so its
+first line goes to whichever answer those questions happened to have a
+moment ago. that is a race with a very quiet failure: *some* output,
+*sometimes*, missing.
+
+so `user_spawn` builds the thread parked and `user_start` releases it,
+once the group and the terminal are settled. it also closes a latent
+version of the same hole from 0.2.8: a stage that finished before
+`process_set_pgid` ran was a stage ctrl+c could not reach.
+
+### the jobs live in the shell
+
+the kernel has a group number and some pids. `[1]+ stopped  cat x |
+wc -l` needs **the line that was typed**, and the shell is the only
+thing that has it — so the table is there, and the line is copied before
+the split chops it into words with NULs.
+
+a job is only written down when there is a reason to. something that ran
+in the foreground and finished is over; recording it would only build a
+list of everything anybody ever did. what earns a slot is being
+suspended or being backgrounded, because in both cases it is still there
+and you will want to name it later. anything that finishes while nobody
+is looking is reported at the **next prompt** rather than the instant it
+happens — saying it immediately would scribble over whatever is
+half-typed, which is why every shell has always done it there.
 
 ## an editor
 
@@ -1285,6 +1407,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.10** — job control, and the interesting part was getting stopping wrong first. a `THREAD_STOPPED` state next to `READY` and `BLOCKED` looks right and is not: a suspended thread may *also* be blocked on a pipe, and those answer different questions — what is it waiting for, against may it run at all. one enum for both means a stopped thread forgets it was stopped the moment anything wakes it, so `cat | wc` under ctrl+z would resume itself as soon as you typed. it is an orthogonal flag that `pick_next` skips, which also makes continuing a job one bit rather than a recovery, since it kept whatever it was halfway through. the terminal's front is a process group now rather than a pid — `cat x | grep y | wc -l` is one thing to whoever typed it, and interrupting only the last of three leaves the other two writing into a pipe nobody reads. with no signals, a suspended job announces itself by leaving a note the shell picks up in the poll it was already sitting in: waiting simply gained a second way to finish, and `fg` and `bg` differ by one argument. the job table lives in the shell because the kernel has pids and the shell has the line that was typed; jobs are recorded only when they survive the command (backgrounded or suspended), and anything that finished quietly is reported at the next prompt rather than over the top of whatever is being typed.
 - **0.2.9** — an editor, and the descriptor work it dragged in behind it. `margaret` is nano-shaped and paints its whole screen on every keystroke rather than tracking which cells changed; the clever version is a second model of the screen, and a second model of anything is a second thing that can be wrong. it needed four syscalls nothing had wanted before — one key, the screen size, the cursor, and clear — all refused to anyone who is not the foreground, since a background program repainting over whoever is being typed at is the one thing none of it may allow. `getkey` is also how raw mode arrives: there is no flag saying a terminal is raw, because asking for a line and asking for a key are different questions. `write` is deleted in favour of `echo hi > file`, which meant finally doing what 0.2.8 said it was deferring: **0, 1 and 2 became real descriptors**, tagged by what they point at, with redirection being nothing more than putting something else in a slot before the program starts. `>`, `>>` and `<` belong to a command rather than a line, are stripped from the arguments before the program sees them, and ask the same permission questions `open` and `create` do. `>` truncates by unlinking first, since `create` opens rather than empties. home, end, page up and page down had to be decoded on both the keyboard and the serial line — terminals send them in two different shapes and knowing one is not enough.
 - **0.2.8** — pipes, and the buffer turned out to be the easy half. the two rules that matter both hang off the reference counts: a read returns 0 once the last writer has gone (which is the only reason a pipeline ever finishes) and a write fails once the last reader has (which is the only reason `cat huge | head` stops rather than blocking forever on a buffer that can never drain). unix raises SIGPIPE there and the default disposition is to die; with no signals, the kernel does the dying part directly. releasing a process's ends had to be idempotent, because a program that *chooses* to leave runs `thread_exit` and one that is killed never does — three separate paths call `pipe_release_for` and whichever arrives first wins, since a stage that dies still holding an end leaves its neighbour asleep on a pipe that will never say end of file. 0, 1 and 2 were never table entries here, so a pipeline is one pointer each on the process rather than a rebuilt descriptor table; that is why `>` still does nothing and says so. stderr deliberately stays on the console. builtins are refused with a reason: the shell is a kernel thread printing straight at the screen and has no stdout to give away. `head`, `wc`, `grep` and `sort`, plus a `cat` that reads standard input — all of them indifferent to whether a file or a bar is on the other end, which is the whole point. tab completion learned that the word after a bar is a command and not a filename.
 - **0.2.7** — `rm`, `cp`, `mv` and `touch`, and the difference between two of them is the point: `mv` moves a name and not a file, so it costs the same on a hundred megabytes as on nothing, while `cp` really does carry every byte through a buffer. `fat32_rename` writes the new directory entry *before* striking out the old one on purpose — a machine that dies between the two leaves a file with two names, which is recoverable, where the other order leaves it with none. removing a file gives its clusters back and erases the whole run of long-name entries in front of it, since leaving those behind is how a directory ends up with a name pointing at nothing. fat has had date fields since 1980 and I had been writing zeroes into all of them; the filesystem now takes a clock as a function, so the kernel hands it the cmos and the tests hand it one stuck at a fixed instant — which is what makes "the right bytes were written" checkable rather than plausible. `stat`, and `ls -l`. no `rm -r`: that is a different operation and it can have its own name when something can be trusted to stop in the right place.

@@ -172,6 +172,27 @@ static int64_t sys_write(uint64_t fd, uint64_t ptr, uint64_t len) {
 
     switch (f.kind) {
     case FD_CONSOLE:
+        /* the console belongs to whoever is at the front of the
+         * terminal, exactly the way the keyboard does. a job put in the
+         * background with `&` printing over the prompt is the noise
+         * that `&` was supposed to spare you -- and worse than noise,
+         * because it lands in the middle of a line you are typing.
+         *
+         * so it is dropped rather than refused. a program has no way to
+         * know it is in the background and no sensible thing to do
+         * about it, and a write that fails would have it either die or
+         * loop; a write that quietly went nowhere is what a terminal
+         * nobody is watching actually is.
+         *
+         * descriptor 2 is the exception, and it is the exception
+         * everywhere for the same reason: it is the one that reaches
+         * the terminal whatever else is going on, so a job that failed
+         * in the background still gets to say so. the same call was
+         * made for pipes in 0.2.8 -- errors are not data */
+        if (fd != FD_STDERR
+            && process_pgid(caller_pid()) != tty_foreground()) {
+            return (int64_t)len;
+        }
         return sys_write_console(ptr, len);
 
     case FD_PIPE: {
@@ -341,7 +362,7 @@ static int64_t sys_close(int fd) {
  * its own screen. only the foreground may have it, the same rule the
  * line discipline follows -- keys belong to whoever is being typed at */
 static int64_t sys_getkey(void) {
-    if (caller_pid() != tty_foreground()) {
+    if (process_pgid(caller_pid()) != tty_foreground()) {
         return -1;
     }
     if (process_take_interrupt(caller_pid())) {
@@ -379,7 +400,7 @@ static int64_t sys_screen(uint64_t cols_ptr, uint64_t rows_ptr) {
 }
 
 static int64_t sys_cursor(uint64_t col, uint64_t row) {
-    if (caller_pid() != tty_foreground()) {
+    if (process_pgid(caller_pid()) != tty_foreground()) {
         return -1;
     }
     console_move((size_t)col, (size_t)row);
@@ -387,7 +408,7 @@ static int64_t sys_cursor(uint64_t col, uint64_t row) {
 }
 
 static int64_t sys_clear(void) {
-    if (caller_pid() != tty_foreground()) {
+    if (process_pgid(caller_pid()) != tty_foreground()) {
         return -1;
     }
     console_clear();
@@ -640,7 +661,14 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
     const char *argv[1] = { path };
     int pid = user_spawn(path, 1, argv, process_cwd(caller_pid()), caller_pid(),
                          process_uid(caller_pid()), false, NULL, &why);
-    return (pid == 0) ? -1 : pid;
+    if (pid == 0) {
+        return -1;
+    }
+    /* nothing to settle for a child spawned by a program -- it inherits
+     * its parent's group and keeps the descriptors it was born with --
+     * so it goes straight away */
+    user_start(pid);
+    return pid;
 }
 
 /* block until a child ends, then hand back how it went. a program may

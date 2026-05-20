@@ -11,58 +11,113 @@ static struct spinlock tty_lock = SPINLOCK("tty", LOCK_RANK_DEVICE);
 
 static int foreground = TTY_SHELL;
 
-void tty_set_foreground(int pid) {
+/* set by ctrl+z, taken by whoever was waiting. the shell has no other
+ * way to hear about it: there are no signals, so this is the message */
+static int stopped_group;
+
+void tty_set_foreground(int pgid) {
     uint64_t flags = spin_lock_irq(&tty_lock);
-    foreground = pid;
+    foreground = pgid;
     spin_unlock_irq(&tty_lock, flags);
+}
+
+bool tty_take_stopped(int *pgid) {
+    uint64_t flags = spin_lock_irq(&tty_lock);
+    int g = stopped_group;
+    stopped_group = 0;
+    spin_unlock_irq(&tty_lock, flags);
+
+    if (g == 0) {
+        return false;
+    }
+    *pgid = g;
+    return true;
 }
 
 int tty_foreground(void) {
     return foreground;
 }
 
+/* ctrl+z: stop the whole job where it stands.
+ *
+ * nothing is asked of the program and nothing needs to be. every thread
+ * in the group is simply marked unpickable, keeping whatever it was in
+ * the middle of -- a half-typed line, a blocked pipe read -- so that
+ * continuing it later is one bit rather than a recovery */
+static bool stop_foreground(int pgid) {
+    int ids[MAX_PROCESSES];
+    size_t n = process_group_threads(pgid, ids, MAX_PROCESSES);
+    if (n == 0) {
+        return false;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        sched_set_stopped(ids[i], true);
+    }
+
+    uint64_t flags = spin_lock_irq(&tty_lock);
+    stopped_group = pgid;
+    foreground = TTY_SHELL;     /* the terminal comes back to the shell */
+    spin_unlock_irq(&tty_lock, flags);
+
+    kprintf("\n");
+    return true;
+}
+
 bool tty_intercept(int key) {
-    if (key != KEY_CTRL_C) {
+    if (key != KEY_CTRL_C && key != KEY_CTRL_Z) {
         return false;
     }
 
-    int pid = foreground;
-    if (pid == TTY_SHELL) {
-        /* the shell is at the front, and it wants ctrl+c as an ordinary
-         * key so its line editor can abandon the line. nothing to do */
-        return false;
+    int pgid = foreground;
+    if (pgid == TTY_SHELL) {
+        /* the shell is at the front. it wants ctrl+c as an ordinary key
+         * so its line editor can abandon the line, and ctrl+z means
+         * nothing when there is nothing running to suspend */
+        return key == KEY_CTRL_Z;
     }
 
-    /* aimed at a program. asking twice means insisting: the first one
-     * is delivered and the program may do as it likes with it, the
-     * second stops being a request */
-    if (process_interrupt_pending(pid)) {
-        const struct process *p = process_find(pid);
-        int tid = (p != NULL) ? p->thread_id : 0;
-        kprintf("\n[tty] pid %d did not take the hint\n", pid);
-        if (tid != 0) {
-            sched_kill(tid);
+    if (key == KEY_CTRL_Z) {
+        return stop_foreground(pgid);
+    }
+
+    /* ctrl+c reaches every member. a pipeline is one thing to whoever
+     * typed it, and interrupting only the last of three would leave the
+     * other two writing into a pipe nobody is reading */
+    int ids[MAX_PROCESSES];
+    size_t n = process_group_threads(pgid, ids, MAX_PROCESSES);
+    if (n == 0) {
+        return true;
+    }
+
+    /* asking twice means insisting: the first one is delivered and the
+     * program may do as it likes with it, the second stops being a
+     * request. asked of the group's leader, since that is the one whose
+     * answer the person is waiting on */
+    if (process_interrupt_pending(pgid)) {
+        kprintf("\n[tty] job %d did not take the hint\n", pgid);
+        for (size_t i = 0; i < n; i++) {
+            sched_kill(ids[i]);
         }
         return true;
     }
 
-    process_interrupt(pid);
+    process_interrupt_group(pgid);
 
-    /* wake it, wherever it is. a program asleep or blocked on a read
-     * has to come back and look at the flag, or an interrupt would
+    /* wake them, wherever they are. a program asleep or blocked on a
+     * read has to come back and look at the flag, or an interrupt would
      * only arrive whenever it next happened to do something */
-    const struct process *p = process_find(pid);
-    if (p != NULL && p->thread_id != 0) {
-        sched_wake_thread(p->thread_id);
+    for (size_t i = 0; i < n; i++) {
+        sched_wake_thread(ids[i]);
     }
     return true;
 }
 
 int64_t tty_read_line(int pid, char *buf, uint64_t len) {
-    /* only the process at the front of the terminal may read it. a
+    /* only the job at the front of the terminal may read it. a
      * background program helping itself would take keys from whoever
      * is actually being typed at */
-    if (pid != foreground || len == 0) {
+    if (process_pgid(pid) != foreground || len == 0) {
         return -1;
     }
     if (process_take_interrupt(pid)) {

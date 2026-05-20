@@ -332,7 +332,17 @@ int user_spawn(const char *path, int argc, const char *const argv[],
         return 0;
     }
 
-    struct thread *t = thread_create(path, user_thread_start, start);
+    /* parked, not running.
+     *
+     * a thread that starts the instant it is created can print before
+     * anybody has said which job it belongs to or who holds the
+     * terminal -- so its first line of output goes to whichever answer
+     * those questions happened to have a moment ago. that is a race
+     * with a very quiet failure: some output, sometimes, missing.
+     *
+     * so it goes into the ring asleep and whoever spawned it says when.
+     * user_start is that. */
+    struct thread *t = thread_create_parked(path, user_thread_start, start);
     if (t == NULL) {
         int ignored;
         process_exited(pid, PROCESS_KILLED, pit_uptime_ms());
@@ -370,8 +380,104 @@ bool user_wait(int pid, int *code) {
     return process_collect(pid, code);
 }
 
+/* let a spawned process actually begin. everything about it -- its
+ * group, its descriptors, who holds the terminal -- is settled by now,
+ * which is the entire reason it was made asleep */
+void user_start(int pid) {
+    const struct process *p = process_find(pid);
+    if (p != NULL && p->thread_id != 0) {
+        sched_wake_thread(p->thread_id);
+    }
+}
+
+/* ---- jobs -----------------------------------------------------------
+ *
+ * everything one typed line started, held together by a group number so
+ * the terminal can talk to all of it at once. the number is the pid of
+ * the first process, which is arbitrary and traditional and means the
+ * group needs nothing allocated to name it */
+
+bool user_job_alive(const struct job *j) {
+    for (int i = 0; i < j->count; i++) {
+        if (j->pids[i] == 0) {
+            continue;
+        }
+        const struct process *p = process_find(j->pids[i]);
+        if (p != NULL && !p->exited) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void user_job_collect(struct job *j) {
+    for (int i = 0; i < j->count; i++) {
+        if (j->pids[i] == 0) {
+            continue;
+        }
+        int code = 0;
+        if (process_collect(j->pids[i], &code)) {
+            /* being killed is worth saying, since somebody asked for
+             * it. except in the middle of a pipeline, where it is the
+             * broken-pipe machinery working exactly as intended */
+            if (code == PROCESS_KILLED && i == j->count - 1) {
+                kprintf("[kernel] pid %d was killed\n", j->pids[i]);
+            }
+            j->pids[i] = 0;
+        }
+    }
+}
+
+bool user_job_wait(struct job *j) {
+    /* waiting by id rather than by pointer is deliberate: the reaper
+     * may free a thread the moment it dies, and an id cannot dangle.
+     * this polls every 20ms, which no human will notice */
+    for (;;) {
+        if (!user_job_alive(j)) {
+            j->stopped = false;
+            break;
+        }
+
+        /* the other way waiting can end. there are no signals here, so
+         * a ctrl+z announces itself by leaving a note the terminal
+         * hands over when asked */
+        int which = 0;
+        if (tty_take_stopped(&which) && which == j->pgid) {
+            j->stopped = true;
+            tty_set_foreground(TTY_SHELL);
+            return false;
+        }
+
+        sleep_ms(20);
+    }
+
+    tty_set_foreground(TTY_SHELL);
+    user_job_collect(j);
+    return true;
+}
+
+void user_job_continue(struct job *j, bool foreground) {
+    int ids[MAX_PROCESSES];
+    size_t n = process_group_threads(j->pgid, ids, MAX_PROCESSES);
+    for (size_t i = 0; i < n; i++) {
+        sched_set_stopped(ids[i], false);
+    }
+    j->stopped = false;
+
+    /* the terminal goes with it, or does not. that is the whole
+     * difference between fg and bg -- a background job runs, but
+     * reading the keyboard is refused, because the keys belong to
+     * whoever is being typed at */
+    if (foreground) {
+        tty_set_foreground(j->pgid);
+    }
+}
+
 bool user_pipeline(const struct stage *stages, int count, const char *cwd,
-                   int uid, bool background, const char **error) {
+                   int uid, bool background, struct job *out,
+                   const char **error) {
+    memset(out, 0, sizeof *out);
+
     if (count < 1 || count > PIPELINE_MAX) {
         *error = "that is more commands than I can join up";
         return false;
@@ -394,8 +500,8 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
         }
     }
 
-    int pids[PIPELINE_MAX];
     int started = 0;
+    out->count = count;
 
     for (int i = 0; i < count; i++) {
         struct spawn_io io;
@@ -410,8 +516,16 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
         int pid = user_spawn(stages[i].path, stages[i].argc,
                              (const char *const *)stages[i].argv,
                              cwd, 0, uid, false, &io, &why);
-        pids[i] = pid;
+        out->pids[i] = pid;
         if (pid != 0) {
+            /* the first one to start names the group and everybody
+             * else joins it. that has to happen before anything is
+             * waited for, or a ctrl+z arriving early would find a job
+             * that is not yet a job */
+            if (out->pgid == 0) {
+                out->pgid = pid;
+            }
+            process_set_pgid(pid, out->pgid);
             started++;
             continue;
         }
@@ -438,72 +552,55 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
         return false;
     }
 
-    /* a pipeline with an & on the end is nobody's to wait for. the
-     * terminal stays with the shell, and the next spawn sweeps up
-     * whatever is left of these */
-    if (background) {
-        for (int i = 0; i < count; i++) {
-            if (pids[i] != 0) {
-                kprintf("[kernel] pid %d runs in the background\n", pids[i]);
-            }
+    /* the terminal is the job's now, unless it was sent to the
+     * background. I stop watching the keyboard entirely -- ctrl+c and
+     * ctrl+z go to it rather than being acted on for it, and every
+     * other key is its to read. this is the difference between a shell
+     * that waits and one that stands in the way.
+     *
+     * before anything runs, because a program's very first write asks
+     * who holds the terminal and the answer has to already be right */
+    if (!background) {
+        tty_set_foreground(out->pgid);
+    }
+
+    for (int i = 0; i < count; i++) {
+        if (out->pids[i] != 0) {
+            user_start(out->pids[i]);
         }
+    }
+
+    if (background) {
         return true;
     }
 
-    /* the last one gets the terminal. it is the only stage that could
-     * sensibly want the keyboard -- everything earlier is reading from
-     * whoever is in front of it -- and it is the one still running when
-     * a person reaches for ctrl+c */
-    int last = 0;
-    for (int i = count - 1; i >= 0; i--) {
-        if (pids[i] != 0) {
-            last = pids[i];
-            break;
-        }
-    }
-    tty_set_foreground(last);
-
-    /* wait for all of them, not just the last. the shell's prompt must
-     * not come back while something in the middle is still printing --
-     * and by id rather than by pointer, because the reaper may free a
-     * thread the instant it dies and an id cannot dangle */
-    for (int i = 0; i < count; i++) {
-        if (pids[i] == 0) {
-            continue;
-        }
-        const struct process *p = process_find(pids[i]);
-        int id = (p != NULL) ? p->thread_id : 0;
-        while (sched_thread_alive(id)) {
-            sleep_ms(20);
-        }
-    }
-
-    tty_set_foreground(TTY_SHELL);
-
-    for (int i = 0; i < count; i++) {
-        int code = 0;
-        if (pids[i] != 0 && process_collect(pids[i], &code)) {
-            if (code == PROCESS_KILLED) {
-                /* the ordinary end of a pipeline whose reader stopped
-                 * early, so it is only worth saying about the last one
-                 * -- `yes | head` killing yes is the machinery working */
-                if (i == count - 1) {
-                    kprintf("[kernel] pid %d was killed\n", pids[i]);
-                }
-            }
-        }
-    }
+    user_job_wait(out);
     return true;
 }
 
 bool user_run(const char *path, int argc, const char *const argv[],
               const char *cwd,
-              int uid, bool background, bool announce, const char **error) {
+              int uid, bool background, bool announce, struct job *out,
+              const char **error) {
+    memset(out, 0, sizeof *out);
+
     int pid = user_spawn(path, argc, argv, cwd, 0, uid, announce,
                          NULL, error);
     if (pid == 0) {
         return false;
     }
+
+    /* a command on its own is a job of one, and its group is itself.
+     * process_create already set that, but saying it here is what makes
+     * the two ways of starting something answer to the same machinery */
+    out->pgid = pid;
+    out->pids[0] = pid;
+    out->count = 1;
+
+    if (!background) {
+        tty_set_foreground(out->pgid);
+    }
+    user_start(pid);
 
     if (background) {
         /* nobody is waiting, so nobody will collect it. the slot stays
@@ -514,42 +611,6 @@ bool user_run(const char *path, int argc, const char *const argv[],
         return true;
     }
 
-    const struct process *p = process_find(pid);
-    int id = (p != NULL) ? p->thread_id : 0;
-
-    /* the terminal is the program's now. I stop watching the keyboard
-     * entirely -- ctrl+c goes to it rather than being acted on for it,
-     * and every other key is its to read. this is the difference
-     * between a shell that waits and one that stands in the way */
-    tty_set_foreground(pid);
-
-    /* a foreground program is waited for, because that is what a shell
-     * does. without it the prompt prints first and the program prints
-     * over the top of it, leaving output with no prompt underneath.
-     *
-     * waiting by id rather than by pointer is deliberate: the reaper
-     * may free the thread the moment it dies, and an id cannot dangle.
-     * a real join would sleep on a waitq owned by the thread, which
-     * needs lifetime rules I do not have -- this polls every 20ms,
-     * which no human will notice. */
-    while (sched_thread_alive(id)) {
-        sleep_ms(20);
-    }
-
-    tty_set_foreground(TTY_SHELL);
-
-    /* collect it: take the code and free the slot, which is the whole
-     * reason the process outlived the thread */
-    int code = 0;
-    if (process_collect(pid, &code)) {
-        /* being killed is always worth saying, because somebody asked
-         * for it and deserves to know it happened. an exit code is
-         * only interesting when the run was a demonstration */
-        if (code == PROCESS_KILLED) {
-            kprintf("[kernel] pid %d was killed\n", pid);
-        } else if (announce && code != 0) {
-            kprintf("[kernel] pid %d exited with %d\n", pid, code);
-        }
-    }
+    user_job_wait(out);
     return true;
 }

@@ -666,6 +666,122 @@ static void missing(const char *what, const char *name) {
     }
 }
 
+/* ---- jobs -----------------------------------------------------------
+ *
+ * a job is one typed line, however many processes that turned out to
+ * be. the shell keeps them because it is the only thing that knows what
+ * was typed -- the kernel has a group number and some pids, and `[1]+
+ * stopped  cat x | wc -l` needs the line.
+ *
+ * a job is remembered only when there is a reason to: something that
+ * ran in the foreground and finished is over, and writing it down would
+ * only be a list of everything anybody ever did. what earns a slot is
+ * being suspended or being put in the background -- in both cases it is
+ * still there and you will want to say so later. */
+
+#define JOBS_MAX 8
+
+enum job_state { JOB_FREE = 0, JOB_RUNNING, JOB_STOPPED };
+
+struct shell_job {
+    int             number;         /* what you type after fg */
+    enum job_state  state;
+    struct job      j;
+    char            line[LINE_MAX];
+};
+
+static struct shell_job jobs[JOBS_MAX];
+static int next_job_number = 1;
+
+/* the last one referred to, which is what a bare `fg` means. the same
+ * one `+` marks in the listing */
+static int current_job;
+
+static struct shell_job *job_slot(int number) {
+    for (int i = 0; i < JOBS_MAX; i++) {
+        if (jobs[i].state != JOB_FREE && jobs[i].number == number) {
+            return &jobs[i];
+        }
+    }
+    return NULL;
+}
+
+static struct shell_job *job_remember(const struct job *j, const char *line,
+                                      enum job_state state) {
+    for (int i = 0; i < JOBS_MAX; i++) {
+        if (jobs[i].state != JOB_FREE) {
+            continue;
+        }
+        jobs[i].state = state;
+        jobs[i].number = next_job_number++;
+        jobs[i].j = *j;
+        size_t n = 0;
+        while (line[n] != '\0' && n < LINE_MAX - 1) {
+            jobs[i].line[n] = line[n];
+            n++;
+        }
+        jobs[i].line[n] = '\0';
+        current_job = jobs[i].number;
+        return &jobs[i];
+    }
+    kprintf("that is more jobs than I can keep track of\n");
+    return NULL;
+}
+
+static void job_forget(struct shell_job *s) {
+    s->state = JOB_FREE;
+    if (current_job == s->number) {
+        current_job = 0;
+        /* whatever is left, most recently started */
+        for (int i = 0; i < JOBS_MAX; i++) {
+            if (jobs[i].state != JOB_FREE && jobs[i].number > current_job) {
+                current_job = jobs[i].number;
+            }
+        }
+    }
+}
+
+static void job_print(const struct shell_job *s, const char *what) {
+    kprintf("[%d]%c %-8s %s\n", s->number,
+            s->number == current_job ? '+' : ' ', what, s->line);
+}
+
+/* anything that finished while nobody was looking. called before each
+ * prompt, which is where every shell has always reported this -- saying
+ * it the instant it happens would scribble over whatever is being
+ * typed */
+static void jobs_reap(void) {
+    for (int i = 0; i < JOBS_MAX; i++) {
+        struct shell_job *s = &jobs[i];
+        if (s->state != JOB_RUNNING) {
+            continue;
+        }
+        if (user_job_alive(&s->j)) {
+            continue;
+        }
+        user_job_collect(&s->j);
+        job_print(s, "done");
+        job_forget(s);
+    }
+}
+
+/* the line as it was typed, kept so a job can be named later. it is
+ * copied before the split chops it into words with NULs */
+static char typed_line[LINE_MAX];
+
+/* what to do with a job that came back from the foreground. either it
+ * finished, in which case there is nothing to remember, or ctrl+z
+ * stopped it and it wants a number */
+static void job_returned(const struct job *j) {
+    if (!j->stopped) {
+        return;
+    }
+    struct shell_job *s = job_remember(j, typed_line, JOB_STOPPED);
+    if (s != NULL) {
+        job_print(s, "stopped");
+    }
+}
+
 /* start a program, handing it everything after the command name as its
  * arguments. a trailing & means the background */
 static void launch(const char *path, int argc, char **argv, bool announce) {
@@ -674,15 +790,120 @@ static void launch(const char *path, int argc, char **argv, bool announce) {
         argc--;
     }
 
+    struct job j;
     const char *why = NULL;
     if (!user_run(path, argc, (const char *const *)argv, shell_cwd,
-                  current_uid, background, announce, &why)) {
+                  current_uid, background, announce, &j, &why)) {
         if (why == USER_RUN_NO_SUCH_FILE) {
             missing("run", path);
         } else {
             kprintf("cannot run %s: %s\n", path, why);
         }
+        return;
     }
+
+    if (background) {
+        struct shell_job *s = job_remember(&j, typed_line, JOB_RUNNING);
+        if (s != NULL) {
+            job_print(s, "running");
+        }
+        return;
+    }
+    job_returned(&j);
+}
+
+/* ---- the three commands job control is for ------------------------- */
+
+static void cmd_jobs(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    int shown = 0;
+    for (int i = 0; i < JOBS_MAX; i++) {
+        if (jobs[i].state == JOB_FREE) {
+            continue;
+        }
+        job_print(&jobs[i],
+                  jobs[i].state == JOB_STOPPED ? "stopped" : "running");
+        shown++;
+    }
+    if (shown == 0) {
+        kprintf("nothing is waiting\n");
+    }
+}
+
+/* which job a command like `fg 2` means. no number means the one marked
+ * `+`, which is the one you last touched -- that is what makes a bare
+ * `fg` the useful thing it is */
+static struct shell_job *job_named(int argc, char **argv, const char *who) {
+    int number = current_job;
+
+    if (argc > 1) {
+        number = 0;
+        const char *p = argv[1];
+        if (*p == '%') {
+            p++;               /* `%1` is how everybody else spells it */
+        }
+        for (; *p != '\0'; p++) {
+            if (*p < '0' || *p > '9') {
+                kprintf("%s <number> -- `jobs` lists them\n", who);
+                return NULL;
+            }
+            number = number * 10 + (*p - '0');
+        }
+    }
+
+    if (number == 0) {
+        kprintf("nothing is waiting\n");
+        return NULL;
+    }
+
+    struct shell_job *s = job_slot(number);
+    if (s == NULL) {
+        kprintf("there is no job %d\n", number);
+    }
+    return s;
+}
+
+static void cmd_fg(int argc, char **argv) {
+    struct shell_job *s = job_named(argc, argv, "fg");
+    if (s == NULL) {
+        return;
+    }
+
+    kprintf("%s\n", s->line);       /* say what is coming back */
+    current_job = s->number;
+
+    user_job_continue(&s->j, true);
+    if (user_job_wait(&s->j)) {
+        job_forget(s);              /* it finished this time */
+        return;
+    }
+
+    /* stopped again. it keeps its number, which is what makes ctrl+z,
+     * fg, ctrl+z, fg work without the numbers wandering */
+    s->state = JOB_STOPPED;
+    job_print(s, "stopped");
+}
+
+static void cmd_bg(int argc, char **argv) {
+    struct shell_job *s = job_named(argc, argv, "bg");
+    if (s == NULL) {
+        return;
+    }
+    if (s->state == JOB_RUNNING) {
+        kprintf("[%d] is already running\n", s->number);
+        return;
+    }
+
+    current_job = s->number;
+    s->state = JOB_RUNNING;
+    user_job_continue(&s->j, false);
+    job_print(s, "running");
+
+    /* it runs, but the keyboard is not its any more. a read from it
+     * comes back -1 rather than taking keys from whoever is being typed
+     * at -- unix stops the process instead, which is tidier and wants a
+     * signal I do not have */
 }
 
 static void cmd_run(int argc, char **argv) {
@@ -1053,6 +1274,9 @@ static const struct command commands[] = {
     { "persona","the face this machine wears",          cmd_persona, false, NULL },
     { "mem",    "frames and heap, honestly counted",    cmd_mem, false, NULL },
     { "ps",     "the threads that walk this realm",     cmd_ps, false, NULL },
+    { "jobs",   "what thou hast set aside",             cmd_jobs, false, NULL },
+    { "fg",     "bring one back to the front",          cmd_fg, false, "fg [number]" },
+    { "bg",     "let one carry on without the keyboard", cmd_bg, false, "bg [number]" },
     { "top",    "the same, but watched rather than asked", cmd_top, false, NULL },
     { "lspci",  "what is plugged into this machine",    cmd_lspci, false, NULL },
     { "slabs",  "the object caches, and what they hold", cmd_slabs, false, NULL },
@@ -1355,11 +1579,22 @@ static void run_pipeline(int argc, char **argv, bool background) {
         stages[i].path = paths[i];
     }
 
+    struct job j;
     const char *why = "";
     if (!user_pipeline(stages, count, shell_cwd, current_uid, background,
-                       &why)) {
+                       &j, &why)) {
         kprintf("cannot run it: %s\n", why);
+        return;
     }
+
+    if (background) {
+        struct shell_job *s = job_remember(&j, typed_line, JOB_RUNNING);
+        if (s != NULL) {
+            job_print(s, "running");
+        }
+        return;
+    }
+    job_returned(&j);
 }
 
 /* does this line need the pipeline machinery? a bar or an arrow means
@@ -1377,6 +1612,16 @@ static bool needs_wiring(int argc, char **argv) {
 
 static void run_line(char *line) {
     char *argv[ARGV_MAX];
+
+    /* kept before the split, which chops the line into words with NULs
+     * written over the spaces. a job has to be able to say what it was */
+    size_t n = 0;
+    while (line[n] != '\0' && n < LINE_MAX - 1) {
+        typed_line[n] = line[n];
+        n++;
+    }
+    typed_line[n] = '\0';
+
     int argc = split(line, argv, ARGV_MAX);
 
     if (needs_wiring(argc, argv)) {
@@ -1393,6 +1638,11 @@ static void run_line(char *line) {
 }
 
 static void prompt(void) {
+    /* anything that finished while nobody was looking gets reported
+     * here rather than the instant it happens -- saying it immediately
+     * would scribble over whatever is half-typed */
+    jobs_reap();
+
     console_set_colors(COLOR_PROMPT, 0x101018);
     kprintf("%s@velvet:%s%s ", current_user, shell_cwd,
             current_uid == 0 ? "#" : "$");

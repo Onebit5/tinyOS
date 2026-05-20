@@ -102,6 +102,13 @@ enum sched_kill_result sched_kill(int id);
  * not currently asking for anything */
 void sched_wake_thread(int id);
 
+/* stop a thread, or let it go again. a stopped thread is simply never
+ * picked; everything else about it -- what it was blocked on, how far
+ * through a read it was -- is left exactly as it was, which is what
+ * makes continuing it a matter of clearing one bit */
+void sched_set_stopped(int id, bool stopped);
+bool sched_thread_stopped(int id);
+
 /* take one thread off a queue without waking it. used when a thread is
  * killed while blocked -- the queue must not be left holding a pointer
  * to something the reaper is about to free */

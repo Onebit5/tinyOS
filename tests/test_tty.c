@@ -37,6 +37,23 @@ void sched_wake_thread(int id) { woken_thread = id; }
 #include "sched/sched.h"
 enum sched_kill_result sched_kill(int id) { killed_thread = id; return SCHED_KILL_OK; }
 
+/* which threads ctrl+z suspended. recorded rather than done, since the
+ * question here is *who* it reached rather than what the scheduler does
+ * about it */
+static int stopped[8];
+static int stopped_count;
+void sched_set_stopped(int id, bool stop) {
+    if (stop && stopped_count < 8) {
+        stopped[stopped_count++] = id;
+    }
+}
+bool sched_thread_stopped(int id) {
+    for (int i = 0; i < stopped_count; i++) {
+        if (stopped[i] == id) return true;
+    }
+    return false;
+}
+
 /* a scripted keyboard: the test says what gets typed, and the line
  * discipline reads it exactly as it would read a person */
 static const int *script;
@@ -100,6 +117,81 @@ int main(void) {
     CHECK(killed_thread == 9,
           "but this one kills, because the program had its chance");
     CHECK(strstr(out, "did not take the hint") != NULL, "and says why");
+
+    /* ---- a job is a group, and the terminal talks to all of it ----
+     *
+     * `cat x | grep y | wc -l` is three processes and one thing the
+     * person typing it is thinking about. interrupting only the last of
+     * three would leave the other two writing into a pipe nobody reads */
+    {
+        int a = process_create("cat", 0, 0, false, 0);
+        int b = process_create("grep", 0, 0, false, 0);
+        int c = process_create("wc", 0, 0, false, 0);
+        process_set_thread(a, 21);
+        process_set_thread(b, 22);
+        process_set_thread(c, 23);
+        process_set_pgid(b, a);
+        process_set_pgid(c, a);
+        tty_set_foreground(a);
+
+        CHECK(process_pgid(a) == a && process_pgid(b) == a,
+              "a pipeline is one group, named after the first of them");
+
+        CHECK(tty_intercept(KEY_CTRL_C), "ctrl+c is taken");
+        CHECK(process_interrupt_pending(a), "and reaches the first");
+        CHECK(process_interrupt_pending(b), "and the middle");
+        CHECK(process_interrupt_pending(c),
+              "and the last -- all of it, or the survivors write into a "
+              "pipe nobody is reading");
+
+        process_take_interrupt(a);
+        process_take_interrupt(b);
+        process_take_interrupt(c);
+
+        /* ---- ctrl+z ----
+         *
+         * nothing is asked of the program. every thread in the group is
+         * simply marked unpickable, keeping whatever it was halfway
+         * through, so that continuing it later is one bit rather than a
+         * recovery */
+        stopped_count = 0;
+        out_reset();
+        CHECK(tty_intercept(KEY_CTRL_Z), "ctrl+z is taken as well");
+        CHECK(stopped_count == 3, "and stops every member of the job");
+        CHECK(sched_thread_stopped(21) && sched_thread_stopped(22)
+              && sched_thread_stopped(23), "all three of them");
+        CHECK(!process_interrupt_pending(a),
+              "without delivering anything -- a stopped program is not "
+              "asked, it is simply not run");
+
+        CHECK(tty_foreground() == TTY_SHELL,
+              "and the terminal comes straight back to the shell");
+
+        /* the shell has no other way to hear about it: there are no
+         * signals here, so a note is left where it will look */
+        int which = 0;
+        CHECK(tty_take_stopped(&which), "a note is left saying which job");
+        CHECK(which == a, "naming the group");
+        CHECK(!tty_take_stopped(&which), "and taking it twice finds nothing");
+
+        /* a background job may not read the keyboard. the keys belong
+         * to whoever is being typed at */
+        char buf[16];
+        CHECK(tty_read_line(a, buf, sizeof buf) == -1,
+              "a job that is not at the front cannot read a line");
+
+        process_exited(a, 0, 0); process_collect(a, NULL);
+        process_exited(b, 0, 0); process_collect(b, NULL);
+        process_exited(c, 0, 0); process_collect(c, NULL);
+    }
+
+    /* ctrl+z with the shell at the front means nothing, but it must not
+     * reach the line editor as a stray character either */
+    tty_set_foreground(TTY_SHELL);
+    stopped_count = 0;
+    CHECK(tty_intercept(KEY_CTRL_Z),
+          "ctrl+z at a prompt is swallowed rather than typed");
+    CHECK(stopped_count == 0, "and stops nobody");
 
     /* ---- handing the terminal back ---- */
     tty_set_foreground(TTY_SHELL);

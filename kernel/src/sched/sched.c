@@ -182,13 +182,14 @@ static struct thread *pick_next(void) {
 
     struct thread *t = start->next;
     while (t != start) {
-        if (!is_idle(t) && t->state == THREAD_READY) {
+        if (!is_idle(t) && t->state == THREAD_READY && !t->stopped) {
             return t;
         }
         t = t->next;
     }
 
-    if (current != NULL && current->state == THREAD_RUNNING) {
+    if (current != NULL && current->state == THREAD_RUNNING
+        && !current->stopped) {
         return current;     /* still runnable and nobody is waiting */
     }
     return ME->idle;
@@ -313,6 +314,52 @@ void waitq_wake_all(struct waitq *q) {
     spin_unlock_irq(&sched_lock, flags);
 }
 
+/* suspend, or let go again.
+ *
+ * a stopped thread keeps whatever it was doing -- it may be halfway
+ * through a read, parked on a pipe, or simply ready -- and is only
+ * removed from consideration. so it stops on the next tick rather than
+ * this instant, which is at most one quantum and nobody can tell.
+ *
+ * that also means continuing it needs to do nothing but clear the flag.
+ * whatever it was waiting for it is still waiting for, and if that
+ * arrived while it was stopped it is already marked ready */
+void sched_set_stopped(int id, bool stopped) {
+    uint64_t flags = spin_lock_irq(&sched_lock);
+
+    struct thread *t = ring;
+    if (t != NULL) {
+        do {
+            if (t->id == id) {
+                t->stopped = stopped;
+                break;
+            }
+            t = t->next;
+        } while (t != ring);
+    }
+
+    spin_unlock_irq(&sched_lock, flags);
+}
+
+bool sched_thread_stopped(int id) {
+    uint64_t flags = spin_lock_irq(&sched_lock);
+    bool stopped = false;
+
+    struct thread *t = ring;
+    if (t != NULL) {
+        do {
+            if (t->id == id) {
+                stopped = t->stopped && t->state != THREAD_DEAD;
+                break;
+            }
+            t = t->next;
+        } while (t != ring);
+    }
+
+    spin_unlock_irq(&sched_lock, flags);
+    return stopped;
+}
+
 void sched_wake_thread(int id) {
     uint64_t flags = spin_lock_irq(&sched_lock);
 
@@ -399,7 +446,10 @@ static void dump_one(struct thread *t) {
     for (size_t i = strlen(t->name); i < THREAD_NAME_MAX; i++) {
         kprintf(" ");
     }
-    kprintf("%-9s", thread_state_name(t->state));
+    /* stopped is not a state -- a suspended thread is still blocked on
+     * whatever it was blocked on -- but it is what you want to see in
+     * this column, because it is the reason it is not running */
+    kprintf("%-9s", t->stopped ? "stopped" : thread_state_name(t->state));
 
     /* which core, if any, is running it this instant. a thread that is
      * merely ready is on nobody's cpu -- and with more than one core

@@ -28,6 +28,7 @@
 #define KEY_PGDN   0x108
 
 #define KEY_CTRL_C 0x03
+#define KEY_CTRL_Z 0x1a
 
 /* called from irq handlers. wakes whoever is waiting */
 void input_push(int key);

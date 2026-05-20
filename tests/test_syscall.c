@@ -231,6 +231,9 @@ int64_t tty_read_line(int pid, char *buf, uint64_t len) {
 }
 
 /* spawn and wait live in usermode.c, which needs a real cpu */
+static int started_pid = -1;
+void user_start(int pid) { started_pid = pid; }
+
 static int spawned_parent = -1;
 static const char *spawned_path;
 static int spawned_uid = -1;
@@ -333,6 +336,38 @@ int main(void) {
     CHECK(strcmp(out, "hello from ring 3") == 0, "and writes exactly it");
 
     CHECK(write_to(FD_STDOUT, user_page, 0) == 0, "a zero-length write is fine");
+
+    /* ---- the console belongs to whoever holds the terminal ----
+     *
+     * a job put in the background with `&` printing over the prompt is
+     * the noise `&` was supposed to spare you, and worse than noise --
+     * it lands in the middle of a line somebody is typing */
+    {
+        strcpy(page, "hello from ring 3");
+        int was_fg = foreground_pid;
+
+        foreground_pid = 999;       /* somebody else is at the front */
+        out_reset();
+        CHECK(write_to(FD_STDOUT, user_page, 17) == 17,
+              "a background write is accepted rather than refused");
+        CHECK(out[0] == '\0', "and goes nowhere");
+
+        /* accepted rather than refused on purpose: a program has no way
+         * to know it is in the background and nothing sensible to do
+         * about it, so a failure would only make it die or spin */
+
+        out_reset();
+        CHECK(write_to(FD_STDERR, user_page, 17) == 17, "stderr still writes");
+        CHECK(strcmp(out, "hello from ring 3") == 0,
+              "and reaches the terminal anyway, so a job that failed in "
+              "the background still says so");
+
+        foreground_pid = was_fg;
+        out_reset();
+        CHECK(write_to(FD_STDOUT, user_page, 17) == 17, "back at the front");
+        CHECK(strcmp(out, "hello from ring 3") == 0, "and printing again");
+        out_reset();
+    }
 
     /* ---- stdout, when it is not the console ----
      *
