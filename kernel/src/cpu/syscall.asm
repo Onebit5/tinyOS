@@ -78,6 +78,29 @@ syscall_entry:
     push r8
     push r9
 
+    ; and now the six the abi says are somebody else's problem.
+    ;
+    ; they are pushed for exactly one caller: fork. a forked child has
+    ; to come back from a `syscall` it never made, holding everything
+    ; its parent held -- and the parent's rbx, rbp and r12-r15 are in
+    ; the cpu right now and will be on some C prologue's stack a moment
+    ; from now, where nothing can reach them.
+    ;
+    ; so the whole of ring 3's state gets written down, in an order that
+    ; makes it a `struct user_regs`, and the address of it is handed to
+    ; the dispatcher. six pushes and six pops on every system call is
+    ; the price of fork existing at all, and it is a dozen cycles
+    push rbp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r11, rsp                            ; the frame, for the 7th argument
+                                            ; (r11's own value is already
+                                            ; saved, so it is free)
+
     sti                                     ; safe now, I am on my own stack
 
     ; two calling conventions meet here and they are NOT the same one.
@@ -100,9 +123,21 @@ syscall_entry:
     mov rsi, rdi                            ; a0
     mov rdi, rax                            ; and the number itself
 
+    ; the seventh argument goes on the stack, which is where sysv puts
+    ; everything past the sixth. after `call` pushes the return address
+    ; the callee finds it at [rsp+8], exactly where it looks
+    push r11
     call syscall_dispatch                   ; returns its result in rax
+    add rsp, 8
 
     cli                                     ; nothing may interrupt the unwind
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
 
     pop r9
     pop r8
@@ -116,5 +151,43 @@ syscall_entry:
     pop rsp                                 ; back onto the user's stack
 
     o64 sysret                              ; and back to ring 3
+
+; ---- a forked child coming back from a syscall it never made --------
+;
+; the child is a thread that has never been in ring 3. it does not
+; return through the stub above, because it never came in through it --
+; so it is handed a copy of what its parent's frame looked like, and
+; leaves by the same door with one register changed.
+;
+; that one register is rax, and it is the entire interface: the parent
+; gets the child's pid and the child gets zero, so a program can tell
+; which of the two it is by looking at what fork answered.
+;
+; fork_return(struct user_regs *frame) -- never returns
+global fork_return
+fork_return:
+    cli                                     ; sysret wants rcx and r11 intact
+    mov rsp, rdi                            ; stand on the copy
+    xor rax, rax                            ; "you are the child"
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+
+    pop r9
+    pop r8
+    pop r10
+    pop rdx
+    pop rsi
+    pop rdi
+
+    pop r11                                 ; flags
+    pop rcx                                 ; rip
+    pop rsp                                 ; and the user stack it was on
+
+    o64 sysret
 
 section .note.GNU-stack noalloc noexec nowrite progbits

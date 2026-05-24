@@ -182,6 +182,10 @@ bool process_collect(int pid, int *code);
 
 const struct process *process_find(int pid);
 
+/* what it is called. a forked child takes its parent's name, since it
+ * is the same program */
+const char *process_name(int pid);
+
 /* deliver an interrupt. the process finds it on its next syscall */
 void process_interrupt(int pid);
 
@@ -229,6 +233,13 @@ bool process_fd_get(int pid, int fd, struct fd *out);
  * file where the console would have been, and the program never finds
  * out */
 bool process_fd_install(int pid, int fd, const struct fd *src);
+
+/* take every one of `from`'s descriptors, pointing at the same things.
+ * this is what fork does about open files, and the interesting part is
+ * the pipes: one gains a holder rather than being duplicated, or the
+ * parent closing its end would tell the far side there is nobody left
+ * when there plainly is */
+bool process_fds_inherit(int pid, int from);
 
 /* ---- the ends of a pipeline ---------------------------------------- */
 

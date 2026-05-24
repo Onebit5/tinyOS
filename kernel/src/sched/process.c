@@ -1,6 +1,7 @@
 #include "sched/process.h"
 #include "cpu/interrupts.h"
 #include "sched/spinlock.h"
+#include "fs/pipe.h"
 #include "lib/string.h"
 
 /* a fixed table rather than a linked list of allocations. thirty-two is
@@ -399,6 +400,40 @@ void process_fd_advance(int pid, int fd, uint64_t n) {
     }
 
     spin_unlock_irq(&process_lock, flags);
+}
+
+const char *process_name(int pid) {
+    const struct process *p = slot_for(pid);
+    return (p != NULL) ? p->name : "?";
+}
+
+bool process_fds_inherit(int pid, int from) {
+    /* copied out under the lock and the pipes referenced after it.
+     * taking a pipe's lock while holding this one is the wrong way up
+     * the ranks, and a pipe wakes threads besides */
+    struct fd copy[MAX_FDS];
+
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *child = slot_for(pid);
+    struct process *parent = slot_for(from);
+    bool ok = (child != NULL && parent != NULL);
+    if (ok) {
+        for (int i = 0; i < MAX_FDS; i++) {
+            copy[i] = parent->fds[i];
+            child->fds[i] = copy[i];
+        }
+    }
+    spin_unlock_irq(&process_lock, flags);
+
+    if (!ok) {
+        return false;
+    }
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (copy[i].kind == FD_PIPE) {
+            pipe_share(copy[i].pipe, copy[i].writing);
+        }
+    }
+    return true;
 }
 
 bool process_fd_get(int pid, int fd, struct fd *out) {

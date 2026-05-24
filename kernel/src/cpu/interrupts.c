@@ -10,6 +10,7 @@
 #include "lib/panic.h"
 #include "lib/backtrace.h"
 #include "mm/pmm.h"
+#include "mm/addrspace.h"
 #include "drivers/console.h"
 #include "sched/sched.h"
 #include <stddef.h>
@@ -162,10 +163,30 @@ void interrupt_dispatch(struct interrupt_frame *f) {
         return;
     }
 
+    struct thread *me = sched_current();
+
+    /* the page fault handler stops being purely an error path.
+     *
+     * a write to a page marked copy-on-write is not a mistake, it is
+     * the whole mechanism: two address spaces were sharing one frame
+     * and one of them has just asked to change it. give that one a
+     * private copy and let the instruction run again. the program never
+     * finds out any of this happened.
+     *
+     * checked before anything is printed, because the overwhelming
+     * majority of faults from here on are this and nobody wants a log
+     * line per page */
+    if (f->vector == 14 && me != NULL && me->space != NULL) {
+        uint64_t cr2 = read_cr2();
+        bool present = (f->error_code & 1) != 0;
+        bool write = (f->error_code & 2) != 0;
+        if (present && write && addrspace_fault(me->space, cr2, true)) {
+            return;
+        }
+    }
+
     /* cpu exception. print everything I know, then panic */
     console_set_colors(0xe64553, 0x101018);
-
-    struct thread *me = sched_current();
 
     /* a double fault means the cpu couldnt even deliver the first
      * exception -- almost always because rsp was already somewhere

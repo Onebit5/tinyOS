@@ -19,6 +19,9 @@
 #include "drivers/console.h"
 #include "drivers/input.h"
 #include "fs/pipe.h"
+#include "mm/kmalloc.h"
+#include "mm/addrspace.h"
+#include "mm/vmm.h"
 #include "sched/auth.h"
 #include "lib/string.h"
 
@@ -39,7 +42,7 @@ static const char *const call_names[SYSCALL_COUNT] = {
     "open", "close", "getpid", "spawn", "wait", "readdir", "getuid",
     "create", "chdir", "getcwd", "mkdir", "rmdir",
     "unlink", "rename", "stat",
-    "getkey", "screen", "cursor", "clear",
+    "getkey", "screen", "cursor", "clear", "fork",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -356,11 +359,112 @@ static int64_t sys_close(int fd) {
     return 0;
 }
 
+/* ---- fork -----------------------------------------------------------
+ *
+ * spawning was the only way to make a process and it built one from a
+ * file every time. this makes one from a process instead: the same
+ * program, the same open files, the same place in it -- two of
+ * everything except the answer, which is how either half knows which it
+ * is.
+ *
+ * nothing is copied. the address space is duplicated by marking every
+ * page read-only in both and letting the first write fault, so the cost
+ * is the page tables and a walk. see addrspace_fork. */
+static void fork_child_start(void *arg);
+
+static int64_t sys_fork(struct user_regs *regs) {
+    if (regs == NULL) {
+        return -1;
+    }
+
+    struct thread *me = sched_current();
+    if (me == NULL || me->space == NULL || me->pid == 0) {
+        return -1;      /* a kernel thread has nothing to fork */
+    }
+
+    int parent = me->pid;
+
+    /* the frame travels with the child, because the parent's kernel
+     * stack -- which is where it lives right now -- is not the child's
+     * to stand on */
+    struct user_regs *frame = kmalloc(sizeof *frame);
+    if (frame == NULL) {
+        return -1;
+    }
+    *frame = *regs;
+
+    struct addrspace *space = addrspace_fork(me->space, vmm_kernel_pml4());
+    if (space == NULL) {
+        kfree(frame);
+        return -1;
+    }
+
+    int pid = process_create(process_name(parent), parent,
+                             process_uid(parent), false, pit_uptime_ms());
+    if (pid == 0) {
+        kfree(frame);
+        addrspace_destroy(space);
+        return -1;
+    }
+
+    /* a child is part of its parent's job. ctrl+c has to reach it, and
+     * the terminal has to count it as one of the things it is waiting
+     * for -- otherwise a forked child is a process no key can reach */
+    process_set_pgid(pid, process_pgid(parent));
+    process_set_cwd(pid, process_cwd(parent));
+
+    /* every descriptor, pointing at the same thing. a pipe learns it
+     * has another holder, or the parent closing its end would tell the
+     * far side there is nobody left when there plainly is */
+    if (!process_fds_inherit(pid, parent)) {
+        kfree(frame);
+        addrspace_destroy(space);
+        process_exited(pid, PROCESS_KILLED, pit_uptime_ms());
+        process_collect(pid, NULL);
+        return -1;
+    }
+
+    struct thread *t = thread_create_parked(process_name(pid),
+                                            fork_child_start, frame);
+    if (t == NULL) {
+        kfree(frame);
+        addrspace_destroy(space);
+        process_exited(pid, PROCESS_KILLED, pit_uptime_ms());
+        process_collect(pid, NULL);
+        return -1;
+    }
+    t->space = space;
+    t->pid = pid;
+    process_set_thread(pid, t->id);
+
+    /* released only now, with the group, the descriptors and the space
+     * all settled -- the same reason spawn parks its threads */
+    sched_wake_thread(t->id);
+
+    /* and the two answers. the parent's is the return value below; the
+     * child's is the zero fork_return writes into rax */
+    return pid;
+}
+
 /* ---- drawing on the whole screen ----------------------------------- */
 
 /* one key, unechoed and untranslated, for a program that is painting
  * its own screen. only the foreground may have it, the same rule the
  * line discipline follows -- keys belong to whoever is being typed at */
+/* the child's first instruction as a thread. it has never been in ring
+ * 3, so there is nothing to return *from* -- it leaves through a copy
+ * of the frame its parent was holding, which fork_return restores whole
+ * and then sysrets out of */
+static void fork_child_start(void *arg) {
+    struct user_regs *frame = arg;
+    struct user_regs local = *frame;
+    kfree(frame);
+
+    /* on this thread's own kernel stack now, which is the one stack
+     * that is certainly mine and certainly not going anywhere */
+    fork_return(&local);
+}
+
 static int64_t sys_getkey(void) {
     if (process_pgid(caller_pid()) != tty_foreground()) {
         return -1;
@@ -697,7 +801,7 @@ static int64_t sys_wait(uint64_t pid, uint64_t code_ptr) {
 /* the number is in rax, arguments in rdi rsi rdx rcx (the asm moved r10
  * there for me) and r8. returns into rax */
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
-                         uint64_t a3, uint64_t a4) {
+                         uint64_t a3, uint64_t a4, struct user_regs *regs) {
     if (nr < SYSCALL_COUNT) {
         call_counts[nr]++;
     }
@@ -745,6 +849,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_cursor(a0, a1);
     case SYS_CLEAR:
         return sys_clear();
+    case SYS_FORK:
+        return sys_fork(regs);
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

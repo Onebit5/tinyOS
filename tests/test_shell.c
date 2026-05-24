@@ -145,6 +145,12 @@ void klog_dump(void) { kprintf("<DMESG>"); }
 static bool run_ok = true;
 static const char *ran_path;
 #include "sched/usermode.h"
+
+/* a pipe a forked child inherits gains a holder rather than being
+ * copied. nothing here forks, so it only has to exist */
+struct pipe;
+void pipe_share(struct pipe *p, bool writing) { (void)p; (void)writing; }
+
 #include "sched/auth.h"
 const char *const USER_RUN_NO_SUCH_FILE = "no such file in the ramdisk";
 

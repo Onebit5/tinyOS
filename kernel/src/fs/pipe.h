@@ -80,6 +80,13 @@ struct pipe *pipe_create(void);
 void pipe_close_read(struct pipe *p);
 void pipe_close_write(struct pipe *p);
 
+/* one more holder of an end. this is what fork does about a pipe: the
+ * child gets the same pipe rather than a copy of it, and the count has
+ * to say so -- otherwise the parent closing its end tells the far side
+ * there is nobody left when there plainly is, and the far side stops
+ * reading a pipe that is still being written to */
+void pipe_share(struct pipe *p, bool writing);
+
 /* read, blocking until there is something or every writer has gone.
  * returns 0 at end of file, -1 if `pid` was interrupted while waiting */
 int64_t pipe_read(struct pipe *p, int pid, void *buf, uint64_t len);

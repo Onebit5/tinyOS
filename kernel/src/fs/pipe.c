@@ -123,6 +123,19 @@ void pipe_close_write(struct pipe *p) {
     maybe_free(p);
 }
 
+void pipe_share(struct pipe *p, bool writing) {
+    if (p == NULL) {
+        return;
+    }
+    uint64_t flags = spin_lock_irq(&p->lock);
+    if (writing) {
+        p->writers++;
+    } else {
+        p->readers++;
+    }
+    spin_unlock_irq(&p->lock, flags);
+}
+
 void pipe_release_for(int pid) {
     if (pid == 0) {
         return;

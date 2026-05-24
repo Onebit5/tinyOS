@@ -234,14 +234,69 @@ int64_t tty_read_line(int pid, char *buf, uint64_t len) {
 static int started_pid = -1;
 void user_start(int pid) { started_pid = pid; }
 
+/* fork's moving parts, recorded rather than done. what the dispatcher
+ * owes is the *order*: an address space, then a process, then its
+ * group and its descriptors, and only then a thread let loose -- a
+ * child released before any of that is one no key can reach and one
+ * whose first write goes somewhere nobody chose */
+/* both defined in headers included further down, and both only ever
+ * pointed at here */
+struct user_regs;
+struct spawn_io;
+static int forked_spaces, forked_threads, freed_spaces;
+
+struct addrspace *addrspace_fork(const struct addrspace *from, uint64_t kp) {
+    (void)from; (void)kp;
+    forked_spaces++;
+    return &my_space;
+}
+void addrspace_destroy(struct addrspace *as) { (void)as; freed_spaces++; }
+uint64_t vmm_kernel_pml4(void);
+
+static struct thread child_thread;
+struct thread *thread_create_parked(const char *name, void (*entry)(void *),
+                                    void *arg) {
+    (void)name; (void)entry;
+    forked_threads++;
+    child_thread.id = 77;
+    /* the frame is the child's to free, and nothing here runs it */
+    kfree(arg);
+    return &child_thread;
+}
+void fork_return(struct user_regs *frame) { (void)frame; }
+
+/* when the child was let loose. it must be *after* everything else --
+ * a child released before its group and its descriptors are settled is
+ * a child no key can reach */
+static int woke_thread = -1;
+static int pgid_at_wake = -1, fds_at_wake = -1, space_at_wake = -1;
+
+void sched_wake_thread(int id) {
+    woke_thread = id;
+
+    /* what the child looked like at the moment it was let loose. this
+     * is the whole assertion: released *after* its group, its files and
+     * its address space are settled. a child released before its group
+     * is one ctrl+c cannot reach, and one released before its
+     * descriptors is one whose first write goes nowhere anybody chose */
+    for (size_t i = 0; ; i++) {
+        const struct process *p = process_at(i);
+        if (p == NULL) break;
+        if (p->thread_id != id) continue;
+        pgid_at_wake = p->pgid;
+        fds_at_wake = (int)process_fd_count(p->pid);
+        space_at_wake = forked_spaces;
+    }
+}
+
 static int spawned_parent = -1;
 static const char *spawned_path;
 static int spawned_uid = -1;
 static const char *spawned_cwd;
 int user_spawn(const char *path, int argc, const char *const argv[],
                const char *cwd, int parent, int uid, bool announce,
-               const char **error) {
-    (void)argc; (void)argv; (void)error; (void)announce;
+               const struct spawn_io *io, const char **error) {
+    (void)argc; (void)argv; (void)error; (void)announce; (void)io;
     spawned_path = path; spawned_parent = parent; spawned_uid = uid;
     spawned_cwd = cwd;
     return 77;
@@ -253,26 +308,36 @@ bool user_wait(int pid, int *code) {
 
 #include "cpu/syscall.h"
 extern int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1,
-                                uint64_t a2, uint64_t a3, uint64_t a4);
+                                uint64_t a2, uint64_t a3, uint64_t a4,
+                                struct user_regs *regs);
+
+/* what ring 3 was holding, which the entry stub writes down on every
+ * call so that fork has something to hand a child. nothing else reads
+ * it, so one frame with recognisable values in it is plenty */
+static struct user_regs caller_frame = {
+    .r15 = 15, .r14 = 14, .r13 = 13, .r12 = 12, .rbx = 3, .rbp = 5,
+    .r9 = 9, .r8 = 8, .r10 = 10, .rdx = 2, .rsi = 6, .rdi = 7,
+    .r11 = 0x202, .rcx = 0x400123, .rsp = 0x6ffffffff000ull,
+};
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 
 static int64_t call(uint64_t nr, uint64_t a0, uint64_t a1) {
     out_reset();
-    return syscall_dispatch(nr, a0, a1, 0, 0, 0);
+    return syscall_dispatch(nr, a0, a1, 0, 0, 0, &caller_frame);
 }
 
 static int64_t call3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     out_reset();
-    return syscall_dispatch(nr, a0, a1, a2, 0, 0);
+    return syscall_dispatch(nr, a0, a1, a2, 0, 0, &caller_frame);
 }
 
 /* readdir takes a path in the last two, so it needs all five */
 static int64_t call5(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                      uint64_t a3, uint64_t a4) {
     out_reset();
-    return syscall_dispatch(nr, a0, a1, a2, a3, a4);
+    return syscall_dispatch(nr, a0, a1, a2, a3, a4, &caller_frame);
 }
 
 /* read and write take a descriptor first now, the way they do
@@ -596,21 +661,21 @@ int main(void) {
         foreground_pid = guest;
 
         out_reset();
-        CHECK(syscall_dispatch(SYS_OPEN, (uint64_t)page, 10, 0, 0, 0) == -1,
+        CHECK(syscall_dispatch(SYS_OPEN, (uint64_t)page, 10, 0, 0, 0, &caller_frame) == -1,
               "and a guest may not");
         CHECK(strstr(out, "may not read") != NULL, "and is told so plainly");
 
         strcpy(page, "motd.txt");
-        CHECK(syscall_dispatch(SYS_OPEN, (uint64_t)page, 8, 0, 0, 0) >= FD_FIRST_FILE,
+        CHECK(syscall_dispatch(SYS_OPEN, (uint64_t)page, 8, 0, 0, 0, &caller_frame) >= FD_FIRST_FILE,
               "but may still read what is readable by anyone");
 
-        CHECK(syscall_dispatch(SYS_GETUID, 0, 0, 0, 0, 0) == 1000,
+        CHECK(syscall_dispatch(SYS_GETUID, 0, 0, 0, 0, 0, &caller_frame) == 1000,
               "and getuid says who it really is");
 
         /* a spawned child gets the uid of whoever started it -- a
          * program picking its own would make the whole idea decorative */
         strcpy(page, "bin/thing");
-        (void)syscall_dispatch(SYS_SPAWN, (uint64_t)page, 9, 0, 0, 0);
+        (void)syscall_dispatch(SYS_SPAWN, (uint64_t)page, 9, 0, 0, 0, &caller_frame);
         CHECK(spawned_uid == 1000, "a child inherits the uid it was started with");
 
         me.pid = was;
@@ -681,7 +746,7 @@ int main(void) {
 
         out_reset();
         strcpy(page, "/gone.txt");
-        CHECK(syscall_dispatch(SYS_UNLINK, (uint64_t)page, 9, 0, 0, 0) == -1,
+        CHECK(syscall_dispatch(SYS_UNLINK, (uint64_t)page, 9, 0, 0, 0, &caller_frame) == -1,
               "a guest may not remove a file");
         CHECK(strstr(out, "may not remove") != NULL, "and is told why");
 
@@ -739,17 +804,73 @@ int main(void) {
         me.pid = other;
 
         cleared = 0;
-        CHECK(syscall_dispatch(SYS_CLEAR, 0, 0, 0, 0, 0) == -1,
+        CHECK(syscall_dispatch(SYS_CLEAR, 0, 0, 0, 0, 0, &caller_frame) == -1,
               "a background process may not clear the screen");
         CHECK(cleared == 0, "and does not");
-        CHECK(syscall_dispatch(SYS_CURSOR, 1, 1, 0, 0, 0) == -1,
+        CHECK(syscall_dispatch(SYS_CURSOR, 1, 1, 0, 0, 0, &caller_frame) == -1,
               "nor move the cursor");
-        CHECK(syscall_dispatch(SYS_GETKEY, 0, 0, 0, 0, 0) == -1,
+        CHECK(syscall_dispatch(SYS_GETKEY, 0, 0, 0, 0, 0, &caller_frame) == -1,
               "nor help itself to a key meant for somebody else");
 
         me.pid = was;
         process_exited(other, 0, 0);
         process_collect(other, NULL);
+    }
+
+    /* ---- fork ----
+     *
+     * spawning was the only way to make a process and it built one from
+     * a file every time. this makes one from a process: the same
+     * program, the same open files, the same place in it, and one
+     * difference -- the answer, which is how either half knows which it
+     * is */
+    {
+        strcpy(page, "motd.txt");
+        long held = call(SYS_OPEN, (uint64_t)page, 8);
+        CHECK(held >= FD_FIRST_FILE, "the parent has a file open");
+
+        process_set_pgid(me.pid, me.pid);
+
+        forked_spaces = forked_threads = 0;
+        woke_thread = -1;
+        pgid_at_wake = -1;
+        fds_at_wake = -1;
+
+        int64_t child = call(SYS_FORK, 0, 0);
+        CHECK(child > 0, "fork answers the parent with a pid");
+        CHECK(child != me.pid, "which is not the parent's own");
+        CHECK(forked_spaces == 1, "one address space was made");
+        CHECK(forked_threads == 1, "and one thread to run in it");
+
+        const struct process *kid = process_find((int)child);
+        CHECK(kid != NULL, "and there is a process there");
+
+        CHECK(kid->parent == me.pid, "whose parent is the one that forked");
+        CHECK(kid->pgid == me.pid,
+              "in the same job, so ctrl+c reaches it -- otherwise a forked "
+              "child is a process no key can touch");
+        CHECK(kid->uid == process_uid(me.pid), "running as the same user");
+        CHECK(strcmp(process_cwd((int)child), process_cwd(me.pid)) == 0,
+              "standing where its parent was standing");
+
+        CHECK(process_fd_count((int)child) == process_fd_count(me.pid),
+              "holding every file its parent held");
+        struct fd inherited;
+        CHECK(process_fd_get((int)child, (int)held, &inherited),
+              "including that one");
+
+        /* the ordering, which is the part that is easy to get wrong and
+         * silent when you do */
+        CHECK(woke_thread == 77, "the child was let loose");
+        CHECK(pgid_at_wake == me.pid,
+              "but only once its group was settled");
+        CHECK(fds_at_wake > 0, "and its descriptors with it");
+
+        /* the child is a real process and must not be left in the table
+         * -- nothing here is going to run it */
+        process_exited((int)child, 0, 0);
+        process_collect((int)child, NULL);
+        call(SYS_CLOSE, (uint64_t)held, 0);
     }
 
     /* ---- reading a directory ----
@@ -842,7 +963,7 @@ int main(void) {
 
     /* ---- exit ---- */
     if (setjmp(jb) == 0) {
-        syscall_dispatch(SYS_EXIT, 0, 0, 0, 0, 0);
+        syscall_dispatch(SYS_EXIT, 0, 0, 0, 0, 0, &caller_frame);
         printf("FAIL: SYS_EXIT returned\n");
         failures++;
     }

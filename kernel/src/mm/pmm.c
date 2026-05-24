@@ -18,6 +18,13 @@ static uint64_t highest_addr;    /* top of the direct map, see pmm.h */
 static uint64_t peak_used;       /* the high-water mark, in frames */
 static uint64_t meta_bytes;      /* what the buddy's bookkeeping costs */
 
+/* who shares what: one byte per frame, holding how many *extra* holders
+ * it has. up here with the rest of the allocator's state because
+ * pmm_init_from_map has to clear it before it rebuilds anything */
+static uint8_t *shares;
+static uint64_t shares_frames;
+static uint64_t share_bytes;
+
 /* the frames the bookkeeping itself lives in, so I know not to give
  * them away. an allocator that hands out its own records is briefly
  * very fast and then very confused */
@@ -91,6 +98,13 @@ void pmm_init_from_map(const struct ph_memmap_entry *entries, size_t count,
     highest_addr = 0;
     reclaim_count = 0;
     peak_used = 0;
+
+    /* the old table, if there was one, came out of an allocator that is
+     * about to be thrown away entirely. dropping the pointer is the
+     * whole of freeing it */
+    shares = NULL;
+    shares_frames = 0;
+    share_bytes = 0;
     for (size_t i = 0; i < count; i++) {
         const struct ph_memmap_entry *e = &entries[i];
         kprintf("  %016lx - %016lx  %s\n", e->base, e->base + e->length,
@@ -180,6 +194,12 @@ void pmm_init_from_map(const struct ph_memmap_entry *entries, size_t count,
         }
         give_away(e->base / PAGE_SIZE, (e->base + e->length) / PAGE_SIZE);
     }
+
+    /* one byte per frame, so that a frame can have more than one owner.
+     * built here, with one core running and no lock held, because the
+     * only other moment to build it is the first time somebody forks --
+     * and that is inside the pmm lock, asking the pmm for memory */
+    pmm_shares_init();
 }
 
 /* the plumbing, which needs a real boot to have happened. the brains
@@ -192,8 +212,10 @@ void pmm_init(void) {
     kprintf("memory map, as philemon found it:\n");
     pmm_init_from_map((const struct ph_memmap_entry *)h->memmap,
                       h->memmap_count, h->hhdm);
-    kprintf("  -> %lu MiB usable, %lu KiB spent on the buddy's books\n",
-            pmm_total_bytes() / (1024 * 1024), meta_bytes / 1024);
+    kprintf("  -> %lu MiB usable, %lu KiB on the buddy's books, "
+            "%lu KiB on who shares what\n",
+            pmm_total_bytes() / (1024 * 1024), meta_bytes / 1024,
+            pmm_share_bytes() / 1024);
 }
 
 #endif
@@ -248,6 +270,99 @@ void pmm_free_pages(uint64_t phys, size_t count) {
 
 uint64_t pmm_alloc(void)         { return pmm_alloc_pages(1); }
 void     pmm_free(uint64_t phys) { pmm_free_pages(phys, 1); }
+
+/* ---- shared frames ---------------------------------------------------
+ *
+ * one byte per frame, holding how many *extra* holders it has. a byte
+ * because a frame cannot be shared more times than there are processes
+ * and there are thirty-two of those -- and because for a two gigabyte
+ * machine this table is half a megabyte, which is already more than I
+ * would like to spend on a fact that is almost always zero.
+ *
+ * the alternative is a hash of the frames that are actually shared,
+ * which is smaller and slower and has to be right about eviction. a
+ * flat array is neither of those things */
+static uint8_t *share_slot(uint64_t phys) {
+    uint64_t frame = phys / PAGE_SIZE;
+    if (shares == NULL || frame >= shares_frames) {
+        return NULL;
+    }
+    return &shares[frame];
+}
+
+/* built once, at the end of pmm_init_from_map, and never again.
+ *
+ * it used to build itself on first use, which was a deadlock waiting
+ * for somebody to fork: pmm_ref holds the pmm lock, and allocating the
+ * table takes the pmm lock. lazy allocation of a thing the allocator
+ * itself needs is a trap, and the way out is not to be clever about the
+ * locking -- it is to do it at the start, where there is exactly one
+ * core and no lock is held by anybody */
+void pmm_shares_init(void) {
+    if (shares != NULL || highest_addr == 0) {
+        return;
+    }
+    uint64_t frames = highest_addr / PAGE_SIZE;
+    uint64_t bytes = (frames + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    uint64_t pages = bytes / PAGE_SIZE;
+
+    /* the buddy rounds to a power of two, so ask for exactly that and
+     * free with the same number -- which is the one rule its interface
+     * has */
+    size_t order_pages = 1;
+    while (order_pages < pages) {
+        order_pages *= 2;
+    }
+
+    uint64_t phys = pmm_alloc_pages(order_pages);
+    if (phys == 0) {
+        return;     /* no memory for it, so nothing may be shared. honest */
+    }
+    shares = pmm_phys_to_virt(phys);
+    memset(shares, 0, order_pages * PAGE_SIZE);
+    shares_frames = frames;
+    share_bytes = order_pages * PAGE_SIZE;
+}
+
+/* may anything be shared at all? on a machine too small to hold the
+ * table, no -- and a fork that went ahead anyway would free a frame
+ * somebody else was still reading. saying no is the only honest answer */
+bool pmm_can_share(void) { return shares != NULL; }
+
+uint64_t pmm_share_bytes(void) { return share_bytes; }
+
+void pmm_ref(uint64_t phys) {
+    uint64_t flags = spin_lock_irq(&pmm_lock);
+    uint8_t *slot = share_slot(phys);
+    if (slot != NULL && *slot < 255) {
+        (*slot)++;
+    }
+    spin_unlock_irq(&pmm_lock, flags);
+}
+
+bool pmm_unref(uint64_t phys) {
+    uint64_t flags = spin_lock_irq(&pmm_lock);
+    uint8_t *slot = share_slot(phys);
+    bool last = true;
+    if (slot != NULL && *slot > 0) {
+        (*slot)--;
+        last = false;
+    }
+    spin_unlock_irq(&pmm_lock, flags);
+
+    if (last) {
+        pmm_free_pages(phys, 1);
+    }
+    return last;
+}
+
+unsigned pmm_shares(uint64_t phys) {
+    uint64_t flags = spin_lock_irq(&pmm_lock);
+    const uint8_t *slot = share_slot(phys);
+    unsigned n = (slot != NULL) ? *slot : 0;
+    spin_unlock_irq(&pmm_lock, flags);
+    return n;
+}
 
 void *pmm_phys_to_virt(uint64_t phys) {
     return (void *)(phys + hhdm_offset);

@@ -23,6 +23,14 @@ void panic(const char *fmt, ...) {
 
 #include "sched/process.h"
 
+/* a pipe a forked child inherits gains a holder rather than being
+ * copied. recorded rather than done, since what matters here is that
+ * the process table asks at all */
+static int shared_pipes;
+void pipe_share(struct pipe *p, bool writing) {
+    (void)p; (void)writing; shared_pipes++;
+}
+
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 

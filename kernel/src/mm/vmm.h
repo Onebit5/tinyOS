@@ -24,6 +24,14 @@
 #define PTE_GLOBAL  (1ull << 8)
 #define PTE_NX      (1ull << 63)    /* needs EFER.NXE, or its a fault */
 
+/* bits 9, 10 and 11 belong to whoever is writing the tables -- the cpu
+ * ignores them entirely. this one says "there is a second address space
+ * pointing at this frame, and the read-only bit above is a lie I told
+ * on purpose". without it a copy-on-write page and a genuinely
+ * read-only one are indistinguishable at fault time, and the difference
+ * between them is copying the page and killing the program */
+#define PTE_COW     (1ull << 9)
+
 #define PTE_ADDR_MASK 0x000ffffffffff000ull
 
 #define PAGE_SIZE_2M (2ull * 1024 * 1024)

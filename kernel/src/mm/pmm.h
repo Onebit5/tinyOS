@@ -34,6 +34,40 @@ void     pmm_free_pages(uint64_t phys, size_t count);
 uint64_t pmm_alloc(void);
 void     pmm_free(uint64_t phys);
 
+/* ---- frames with more than one owner --------------------------------
+ *
+ * copy on write means two address spaces pointing at one frame, and
+ * whichever of them ends first must not hand it back while the other is
+ * still reading it. so a frame can be shared, and freeing it only
+ * really frees it when the last holder lets go.
+ *
+ * the count kept is of *extra* holders, so zero means one owner and the
+ * ordinary path costs nothing but a byte's worth of lookup. a frame
+ * nobody has shared behaves exactly as it always did. */
+
+/* one more holder of this frame */
+void pmm_ref(uint64_t phys);
+
+/* one fewer. frees it only when the last one lets go. returns true if
+ * that is what happened */
+bool pmm_unref(uint64_t phys);
+
+/* how many *extra* holders a frame has. 0 means one owner, which is
+ * every frame that was never shared */
+unsigned pmm_shares(uint64_t phys);
+
+/* build the table. called once from pmm_init_from_map, where one core
+ * is running and nothing is held -- it allocates, so it can never be
+ * called from anywhere that already has the pmm's lock */
+void pmm_shares_init(void);
+
+/* may anything be shared? false on a machine too small to have paid for
+ * the table, and a fork must refuse rather than go ahead: without it a
+ * frame with two owners is freed by whichever finishes first */
+bool pmm_can_share(void);
+
+uint64_t pmm_share_bytes(void);
+
 /* phys -> usable pointer, through the hhdm */
 void *pmm_phys_to_virt(uint64_t phys);
 

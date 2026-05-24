@@ -32,6 +32,7 @@
 #define SYS_SCREEN 22
 #define SYS_CURSOR 23
 #define SYS_CLEAR  24
+#define SYS_FORK   25
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -160,6 +161,19 @@ static inline long stat(const char *path, struct stat *out) {
 
 static inline long getpid(void) { return syscall0(SYS_GETPID); }
 static inline long getuid(void) { return syscall0(SYS_GETUID); }
+
+/* two of everything except the answer.
+ *
+ * the process this returns into is the same program, at the same
+ * instruction, with the same open files and the same memory -- and one
+ * difference, which is what comes back here. the parent gets the
+ * child's pid; the child gets 0. that one number is how either half
+ * knows which it is, and it is the whole interface.
+ *
+ * nothing is copied. both halves share every page until one of them
+ * writes to it, so the memory only costs something at the moment it is
+ * actually changed. -1 means it could not be done at all */
+static inline long fork(void) { return syscall0(SYS_FORK); }
 
 static inline long spawn(const char *path) {
     return syscall2(SYS_SPAWN, (long)path, (long)ustrlen(path));

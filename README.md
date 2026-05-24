@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.10** (**job control.** ctrl+z, `fg`, `bg`, `jobs`, and process groups underneath them)
+**version: 0.2.11** (**fork, and copy on write.** two processes sharing every page until one of them writes)
 
 ## what it does
 
@@ -48,6 +48,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] redirection -- `>`, `>>`, `<` -- and 0, 1 and 2 as real descriptors at last
 - [x] a text editor that runs in ring 3 and paints its own screen
 - [x] job control: ctrl+z, `fg`, `bg`, `jobs`, and a terminal that talks to groups
+- [x] `fork` with copy on write -- the page fault handler stops being only an error path
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -156,6 +157,127 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## fork, and copy on write
+
+spawning was the only way to make a process, and it built one from a
+file every time. `fork` makes one from a *process*: the same program, at
+the same instruction, with the same open files and the same memory — and
+exactly one difference, which is what the call answers.
+
+```c
+long child = fork();
+if (child == 0) {
+    /* I am the child */
+} else {
+    /* I am the parent, and that is the child's pid */
+}
+```
+
+that one number is the entire interface, and it is the whole reason fork
+is strange the first time you meet it: the function returns *twice*,
+into two different processes.
+
+### nothing is copied
+
+`addrspace_fork` copies the page **tables** and not one page of memory.
+every writable leaf in both spaces loses its write bit and gains a
+software flag:
+
+```c
+#define PTE_COW     (1ull << 9)
+```
+
+bits 9, 10 and 11 belong to whoever is writing the tables — the cpu
+ignores them. this one says *"the read-only above is a lie I told on
+purpose"*, and without it a copy-on-write page and a genuinely read-only
+one are indistinguishable at fault time. the difference between them is
+copying a page and killing a program.
+
+**the parent's entries change too**, and that is the part that is easy
+to get wrong: protect only the child and you get a fork where the parent
+quietly writes through the child's memory, which looks like it works.
+there is a test that fails on exactly that.
+
+### the fault handler stops being an error path
+
+```c
+if (present && write && addrspace_fault(me->space, cr2, true)) {
+    return;
+}
+```
+
+checked before anything is printed, because from here on the
+overwhelming majority of page faults are this and nobody wants a log
+line per page. a frame that is down to one holder is not copied at all —
+it just gets its write bit back, which is what makes fork-then-exit cost
+nothing and stops a chain of forks leaving copies behind.
+
+frames grew a share count for this: one byte each, holding how many
+*extra* holders a frame has, so zero means one owner and every frame
+nobody ever shared behaves exactly as it always did. the table is built
+at boot, and the boot log says what it cost:
+
+```
+  -> 2047 MiB usable, 64 KiB on the buddy's books, 512 KiB on who shares what
+```
+
+it built itself lazily at first, on the first frame anybody shared. that
+is a deadlock with a fuse on it: `pmm_ref` holds the pmm's lock, and
+allocating the table asks the pmm for memory. the machine died on the
+first fork. **lazy allocation of a thing the allocator itself needs is a
+trap**, and the way out is not to be clever about the locking — it is to
+do it at the start, where one core is running and nobody holds anything.
+
+a machine too small to pay for the table cannot fork at all, and says
+so. going ahead without the counts would have whichever half finished
+first hand back a frame the other was still reading.
+
+### the harder half was the two returns
+
+a forked child has to come back from a `syscall` it never made, holding
+everything its parent held. `rbx`, `rbp` and `r12`–`r15` are the
+problem: the abi says they are the callee's to preserve, so at the
+moment of the call they are in the cpu, and a moment later they are
+buried under some C prologue's stack frame where nothing can reach them.
+
+so the entry stub writes **all** of ring 3 down on every call, in an
+order that makes it a `struct user_regs`, and hands the address to the
+dispatcher as a seventh argument. six extra pushes and pops on every
+system call, for one caller. it is about a dozen cycles and it is the
+price of fork existing at all.
+
+the child then leaves by a door of its own — `fork_return` stands on a
+copy of that frame, pops the lot, zeroes `rax`, and `sysret`s. it has
+never been in ring 3, so there is nothing to return *from*.
+
+### what a child inherits
+
+its parent's descriptors, working directory, uid, and **process group**
+— that last one mattering more than it looks, since a child outside its
+parent's group is a process no ctrl+c can reach. a pipe gains a holder
+rather than being duplicated: without that, the parent closing its end
+would tell the far side there is nobody left when there plainly is.
+
+one deliberate difference from unix: an inherited file descriptor gets
+its *own* position rather than sharing one. unix shares the offset
+through the open file description; here two processes reading the same
+inherited fd each walk it independently.
+
+### seeing it
+
+```
+igor@velvet# gemini
+[child] I wrote 'c' over the page we were sharing
+[child] the page says: c, and my stack says 1001
+[parent] the child has been and gone
+[parent] the page says: p, and my stack says 1100
+```
+
+`gemini` — named for the twins — exists because copy on write is
+invisible when it works, and a thing you cannot see is a thing you
+cannot believe. both halves write to the same address, and neither sees
+the other's write.
 
 ## job control
 
@@ -1407,6 +1529,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.11** — `fork`, with copy on write, and the page tables were the easy half. two things were not. **the parent's pages have to lose their write bit as well as the child's** — protect only the child and the parent quietly writes through the child's memory, which looks like it works; there is a test that fails on precisely that. and **a forked child has to return from a syscall it never made**, holding everything its parent held — including `rbx`, `rbp` and `r12`–`r15`, which the abi says are the callee's problem and which are therefore in the cpu at the moment of the call and buried under a C prologue a moment later. so the entry stub now writes the whole of ring 3 down on every call and hands the frame to the dispatcher; the child leaves through `fork_return`, which stands on a copy of that frame, zeroes `rax` and `sysret`s. `PTE_COW` is a software bit the cpu ignores, saying the read-only above it is a lie told on purpose — without it a shared page and a genuinely read-only one are indistinguishable at fault time, and the difference between them is copying a page and killing a program. frames gained a one-byte share count; a frame down to its last holder is not copied at all, which is what makes fork-then-exit free. a child inherits descriptors, cwd, uid and its parent's **process group**, that last one because a child outside it is a process no ctrl+c can reach. `gemini` exists to make it visible, since copy on write is invisible when it works.
 - **0.2.10** — job control, and the interesting part was getting stopping wrong first. a `THREAD_STOPPED` state next to `READY` and `BLOCKED` looks right and is not: a suspended thread may *also* be blocked on a pipe, and those answer different questions — what is it waiting for, against may it run at all. one enum for both means a stopped thread forgets it was stopped the moment anything wakes it, so `cat | wc` under ctrl+z would resume itself as soon as you typed. it is an orthogonal flag that `pick_next` skips, which also makes continuing a job one bit rather than a recovery, since it kept whatever it was halfway through. the terminal's front is a process group now rather than a pid — `cat x | grep y | wc -l` is one thing to whoever typed it, and interrupting only the last of three leaves the other two writing into a pipe nobody reads. with no signals, a suspended job announces itself by leaving a note the shell picks up in the poll it was already sitting in: waiting simply gained a second way to finish, and `fg` and `bg` differ by one argument. the job table lives in the shell because the kernel has pids and the shell has the line that was typed; jobs are recorded only when they survive the command (backgrounded or suspended), and anything that finished quietly is reported at the next prompt rather than over the top of whatever is being typed.
 - **0.2.9** — an editor, and the descriptor work it dragged in behind it. `margaret` is nano-shaped and paints its whole screen on every keystroke rather than tracking which cells changed; the clever version is a second model of the screen, and a second model of anything is a second thing that can be wrong. it needed four syscalls nothing had wanted before — one key, the screen size, the cursor, and clear — all refused to anyone who is not the foreground, since a background program repainting over whoever is being typed at is the one thing none of it may allow. `getkey` is also how raw mode arrives: there is no flag saying a terminal is raw, because asking for a line and asking for a key are different questions. `write` is deleted in favour of `echo hi > file`, which meant finally doing what 0.2.8 said it was deferring: **0, 1 and 2 became real descriptors**, tagged by what they point at, with redirection being nothing more than putting something else in a slot before the program starts. `>`, `>>` and `<` belong to a command rather than a line, are stripped from the arguments before the program sees them, and ask the same permission questions `open` and `create` do. `>` truncates by unlinking first, since `create` opens rather than empties. home, end, page up and page down had to be decoded on both the keyboard and the serial line — terminals send them in two different shapes and knowing one is not enough.
 - **0.2.8** — pipes, and the buffer turned out to be the easy half. the two rules that matter both hang off the reference counts: a read returns 0 once the last writer has gone (which is the only reason a pipeline ever finishes) and a write fails once the last reader has (which is the only reason `cat huge | head` stops rather than blocking forever on a buffer that can never drain). unix raises SIGPIPE there and the default disposition is to die; with no signals, the kernel does the dying part directly. releasing a process's ends had to be idempotent, because a program that *chooses* to leave runs `thread_exit` and one that is killed never does — three separate paths call `pipe_release_for` and whichever arrives first wins, since a stage that dies still holding an end leaves its neighbour asleep on a pipe that will never say end of file. 0, 1 and 2 were never table entries here, so a pipeline is one pointer each on the process rather than a rebuilt descriptor table; that is why `>` still does nothing and says so. stderr deliberately stays on the console. builtins are refused with a reason: the shell is a kernel thread printing straight at the screen and has no stdout to give away. `head`, `wc`, `grep` and `sort`, plus a `cat` that reads standard input — all of them indifferent to whether a file or a bar is on the other end, which is the whole point. tab completion learned that the word after a bar is a command and not a filename.

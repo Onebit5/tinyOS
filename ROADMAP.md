@@ -224,11 +224,23 @@ wc -l` is two processes and one thing the person typing is thinking
 about. and with no signals, a suspended job announces itself by leaving
 a note where the shell will look: waiting has a second way to finish.
 
-**0.2.11 fork, and copy on write.** spawning is the only way to make a
+**0.2.11 fork, and copy on write.** ~~spawning is the only way to make a
 process and it builds one from a file every time. `fork` copies an
 address space instead -- or rather does not copy it, marks every page
 read-only in both, and copies one page at a time as somebody writes.
-the page fault handler stops being purely an error path.
+the page fault handler stops being purely an error path.~~ **done in
+0.2.11.** the awkward part was not the page tables, it was the two
+returns: a forked child has to come back from a `syscall` it never
+made, holding everything its parent held -- and half of that is in
+callee-saved registers that the abi says are somebody else's problem,
+sitting in the cpu at the moment of the call and buried under a C
+prologue a moment later. so the entry stub writes the whole of ring 3
+down on every call now, six extra pushes, for one caller.
+
+the other thing worth writing down: the *parent's* pages have to lose
+their write bit too. protecting only the child gives you a fork where
+the parent quietly writes through the child's memory, and it looks
+like it works.
 
 **0.2.12 demand paging.** if a fault can mean "copy this page" it can
 mean "there was never a page here yet". stacks that grow, `mmap`, and

@@ -24,6 +24,28 @@ struct addrspace {
  * thing be built and inspected on a host with no cpu involved */
 struct addrspace *addrspace_create(uint64_t kernel_pml4);
 
+/* a copy of `from` that shares every page with it rather than copying
+ * any.
+ *
+ * every writable page in both spaces is marked read-only and flagged
+ * PTE_COW, and the frame gains a second holder. the first write on
+ * either side faults, and the handler makes that one page private. so
+ * forking costs the page *tables* and nothing else, which for a program
+ * that immediately goes off and does something different is nearly all
+ * of the saving there is.
+ *
+ * the tables themselves really are copied. they have to be: the two
+ * spaces are about to disagree about what is in them */
+struct addrspace *addrspace_fork(const struct addrspace *from,
+                                 uint64_t kernel_pml4);
+
+/* a write faulted on a page marked copy-on-write. give this space a
+ * private copy and let the write through.
+ *
+ * returns false if the address was not one of those, which means the
+ * fault was a real one and the caller should treat it as such */
+bool addrspace_fault(struct addrspace *as, uint64_t virt, bool write);
+
 /* free everything in the lower half -- the program's pages, its stack,
  * and the tables that described them. the upper half is shared and is
  * emphatically not mine to free.

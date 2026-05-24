@@ -64,6 +64,12 @@ int input_getchar_blocking(void) {
 
 #include "sched/process.h"
 #include "drivers/tty.h"
+
+/* a pipe a forked child inherits gains a holder rather than being
+ * copied. nothing here forks, so it only has to exist */
+struct pipe;
+void pipe_share(struct pipe *p, bool writing) { (void)p; (void)writing; }
+
 #include "drivers/input.h"
 
 static int failures;
