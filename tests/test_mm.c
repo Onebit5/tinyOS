@@ -47,8 +47,16 @@ int main(void) {
 
     uint64_t usable = (MiB - 0x1000) + 6 * MiB;
     CHECK(pmm_total_bytes() == usable, "total == sum of usable regions");
-    /* the buddy's books for 8MiB of frames fit in one page, parked in e0 */
-    CHECK(pmm_free_bytes() == usable - PAGE_SIZE, "free == total - the books");
+
+    /* two things are spent before anybody asks for anything: the
+     * buddy's own books, which for 8MiB of frames fit in one page and
+     * are parked in e0 rather than allocated, and the table saying who
+     * shares which frame, which *is* allocated. both are real memory
+     * gone before the first program runs and both should be visible */
+    CHECK(pmm_share_bytes() > 0, "the share table was built at init");
+    uint64_t overhead = PAGE_SIZE + pmm_share_bytes();
+    CHECK(pmm_free_bytes() == usable - overhead,
+          "free == total, less the books and the share table");
 
     /* single frame round trip */
     uint64_t f = pmm_alloc();
@@ -57,7 +65,7 @@ int main(void) {
           "frame is inside a usable region");
     memset(pmm_phys_to_virt(f), 0xab, PAGE_SIZE);
     pmm_free(f);
-    CHECK(pmm_free_bytes() == usable - PAGE_SIZE, "books balance after 1 frame");
+    CHECK(pmm_free_bytes() == usable - overhead, "books balance after 1 frame");
 
     /* contiguous run: 4 frames, writable end to end */
     uint64_t run = pmm_alloc_pages(4);
@@ -101,6 +109,63 @@ int main(void) {
         if (seen[i]) pmm_free(i * PAGE_SIZE);
     }
     CHECK(pmm_free_bytes() == expect_frames * PAGE_SIZE, "all returned");
+
+    /* ---- frames with more than one owner ----
+     *
+     * this runs against the *real* pmm and the real lock, which is the
+     * point of it being here rather than in the address space suite.
+     * the first version of this built its table the first time anybody
+     * asked to share a frame -- inside the pmm's own lock, asking the
+     * pmm for memory -- and the machine died the first time anything
+     * forked. a stub cannot find that; only the real lock can */
+    {
+        uint64_t frame = pmm_alloc();
+        CHECK(frame != 0, "a frame to share");
+        uint64_t free_before = pmm_free_bytes();
+
+        CHECK(pmm_shares(frame) == 0,
+              "a frame nobody shared has one owner, which is what zero means");
+
+        pmm_ref(frame);
+        CHECK(pmm_shares(frame) == 1, "sharing it gives it a second holder");
+
+        CHECK(!pmm_unref(frame), "the first to let go does not free it");
+        CHECK(pmm_free_bytes() == free_before,
+              "and the frame really is still out -- freeing it here is a "
+              "page handed out again while somebody is reading it");
+        CHECK(pmm_shares(frame) == 0, "with one holder left");
+
+        CHECK(pmm_unref(frame), "and the last one frees it");
+        CHECK(pmm_free_bytes() == free_before + PAGE_SIZE, "for real");
+
+        /* several at once, which is what a program forked twice looks
+         * like from down here */
+        uint64_t f2 = pmm_alloc();
+        free_before = pmm_free_bytes();
+        pmm_ref(f2);
+        pmm_ref(f2);
+        pmm_ref(f2);
+        CHECK(pmm_shares(f2) == 3, "a frame can have several extra holders");
+        CHECK(!pmm_unref(f2) && !pmm_unref(f2) && !pmm_unref(f2),
+              "and none of them frees it");
+        CHECK(pmm_free_bytes() == free_before, "it is still out");
+        CHECK(pmm_unref(f2), "until the last");
+        CHECK(pmm_free_bytes() == free_before + PAGE_SIZE, "and then it goes");
+
+        /* a frame nobody ever shared is freed by one unref, which is
+         * what makes unref safe to use everywhere instead of free */
+        uint64_t f3 = pmm_alloc();
+        free_before = pmm_free_bytes();
+        CHECK(pmm_unref(f3), "an unshared frame goes back on the first unref");
+        CHECK(pmm_free_bytes() == free_before + PAGE_SIZE, "properly");
+
+        /* nonsense addresses must not scribble outside the table */
+        pmm_ref(0xffffffffull * PAGE_SIZE);
+        CHECK(pmm_shares(0xffffffffull * PAGE_SIZE) == 0,
+              "a frame beyond the table is not counted, and not written to");
+
+        CHECK(pmm_can_share(), "and this machine can share at all");
+    }
 
     /* ---- heap on top ---- */
     uint64_t used0 = kheap_used_bytes();
@@ -158,6 +223,10 @@ int main(void) {
     struct ph_memmap_entry rmap[3] = { r0, r1, r2 };
 
     pmm_init_from_map(rmap, 3, hhdm);
+
+    /* a second init builds a second share table -- the first one came
+     * out of an allocator that no longer exists */
+    CHECK(pmm_share_bytes() > 0, "and again after the allocator is rebuilt");
 
     uint64_t total_before = pmm_total_bytes();
     uint64_t free_before  = pmm_free_bytes();
