@@ -4,9 +4,21 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* how big a stack ring 3 gets. it is not guarded -- the guard page
- * trick lives in the direct map, and this is a user mapping */
-#define USER_STACK_PAGES 4
+/* how big a stack ring 3 may grow to, and how much of it exists before
+ * the program starts.
+ *
+ * up to 0.2.12 these were the same number and it was four: every
+ * program got exactly four pages whether it used them or not, and
+ * running off the end was a fault with nothing behind it.
+ *
+ * now the *range* is agreed to and the pages arrive as they are
+ * touched. a program that uses a few hundred bytes of stack costs one
+ * page; one that recurses gets more without anybody having decided in
+ * advance how much it would need. and the address below the range is
+ * still nothing at all, which is the guard page for free -- it costs no
+ * memory because there is nothing there to cost anything */
+#define USER_STACK_PAGES 256            /* a megabyte of room */
+#define USER_STACK_EAGER 2              /* mapped before it starts */
 
 /* where user stacks go. low enough to be nowhere near the kernel, high
  * enough that a program's own segments will not collide with it */

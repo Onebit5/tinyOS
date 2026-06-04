@@ -251,6 +251,25 @@ struct addrspace *addrspace_fork(const struct addrspace *from, uint64_t kp) {
     return &my_space;
 }
 void addrspace_destroy(struct addrspace *as) { (void)as; freed_spaces++; }
+
+/* mmap, recorded rather than done. what the dispatcher owes is the
+ * refusals -- an absurd length, and an address nobody handed out */
+static uint64_t reserved_len;
+static uint64_t next_reservation = 0x600000000000ull;
+static uint64_t dropped_at;
+static bool drop_ok = true;
+
+uint64_t addrspace_reserve(struct addrspace *as, uint64_t len, uint64_t flags) {
+    (void)as; (void)flags;
+    reserved_len = len;
+    return next_reservation;
+}
+bool addrspace_drop_region(struct addrspace *as, uint64_t start) {
+    (void)as;
+    dropped_at = start;
+    return drop_ok;
+}
+uint64_t vmm_nx(void) { return 0; }
 uint64_t vmm_kernel_pml4(void);
 
 static struct thread child_thread;
@@ -871,6 +890,33 @@ int main(void) {
         process_exited((int)child, 0, 0);
         process_collect((int)child, NULL);
         call(SYS_CLOSE, (uint64_t)held, 0);
+    }
+
+    /* ---- memory a program asked for ----
+     *
+     * everything a program had until now was decided before it started.
+     * this is the other way round: it asks, and gets a range that is
+     * its to use -- with not one page of it made until it is touched */
+    {
+        reserved_len = 0;
+        int64_t at = call(SYS_MMAP, 8192, 0);
+        CHECK(at != 0, "a program can ask for memory");
+        CHECK(reserved_len == 8192, "and asks for exactly what it said");
+
+        CHECK(call(SYS_MMAP, 0, 0) == 0, "asking for nothing gets nothing");
+        CHECK(call(SYS_MMAP, 1ull << 40, 0) == 0,
+              "and an absurd length is refused rather than served -- the "
+              "pages are not made until they are touched, so without a "
+              "limit a program could reserve more than the machine has");
+
+        dropped_at = 0;
+        CHECK(call(SYS_MUNMAP, (uint64_t)at, 0) == 0, "and give it back");
+        CHECK(dropped_at == (uint64_t)at, "by the address it was handed");
+
+        drop_ok = false;
+        CHECK(call(SYS_MUNMAP, 0x123000, 0) == -1,
+              "an address nobody handed out is refused");
+        drop_ok = true;
     }
 
     /* ---- reading a directory ----

@@ -167,11 +167,12 @@ void interrupt_dispatch(struct interrupt_frame *f) {
 
     /* the page fault handler stops being purely an error path.
      *
-     * a write to a page marked copy-on-write is not a mistake, it is
-     * the whole mechanism: two address spaces were sharing one frame
-     * and one of them has just asked to change it. give that one a
-     * private copy and let the instruction run again. the program never
-     * finds out any of this happened.
+     * a fault here is usually not a mistake at all. two of them are the
+     * mechanism rather than the failure: a write to a page two spaces
+     * were sharing, which means give this one a private copy; and a
+     * touch of a page that was never there, which means make it. either
+     * way the instruction runs again and the program never finds out.
+     *
      *
      * checked before anything is printed, because the overwhelming
      * majority of faults from here on are this and nobody wants a log
@@ -180,7 +181,7 @@ void interrupt_dispatch(struct interrupt_frame *f) {
         uint64_t cr2 = read_cr2();
         bool present = (f->error_code & 1) != 0;
         bool write = (f->error_code & 2) != 0;
-        if (present && write && addrspace_fault(me->space, cr2, true)) {
+        if (addrspace_fault(me->space, cr2, write, present)) {
             return;
         }
     }

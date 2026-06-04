@@ -85,10 +85,13 @@ struct argblock {
     uint64_t argc;
 };
 
+/* the arguments go on the pages that exist before the program does.
+ * `stack_phys` is the *lowest* of those, so the top of what is mapped
+ * is however many eager pages up from it */
 static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
                        struct argblock *out) {
     uint8_t *base_k = pmm_phys_to_virt(stack_phys);
-    uint8_t *top_k  = base_k + USER_STACK_PAGES * PAGE_SIZE;
+    uint8_t *top_k  = base_k + USER_STACK_EAGER * PAGE_SIZE;
 
     /* the kernel address of a given user address inside this stack */
     #define user_addr(va) (top_k - (USER_STACK_TOP - (va)))
@@ -103,8 +106,8 @@ static bool build_args(uint64_t stack_phys, int argc, const char *const argv[],
     /* the strings themselves, backwards so argv[0] ends up lowest */
     for (int i = argc - 1; i >= 0; i--) {
         uint64_t len = strlen(argv[i]) + 1;
-        if (sp - len <= USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE + 256) {
-            return false;       /* leave the program some stack to run on */
+        if (sp - len <= USER_STACK_TOP - USER_STACK_EAGER * PAGE_SIZE + 256) {
+            return false;       /* it has to fit in what is mapped so far */
         }
         sp -= len;
         memcpy(user_addr(sp), argv[i], len);
@@ -221,10 +224,10 @@ int user_spawn(const char *path, int argc, const char *const argv[],
         return 0;
     }
 
-    const char *why = NULL;
-    if (!elf_is_loadable(image, image_size, &why)) {
+    const char *bad = NULL;
+    if (!elf_is_loadable(image, image_size, &bad)) {
         vfs_release(image, owned);
-        *error = why;
+        *error = bad;
         return 0;
     }
 
@@ -237,32 +240,88 @@ int user_spawn(const char *path, int argc, const char *const argv[],
         return 0;
     }
 
-    struct elf_load_result loaded = elf_load(image, image_size, space->pml4);
+    /* two ways in, and which one depends on a single question: will
+     * this image still be here when the program runs?
+     *
+     * a program off the ramdisk is a stretch of a tar philemon handed
+     * over at boot. it never moves and is never freed, so the segments
+     * can simply be *described* and each page fetched the first time it
+     * is touched -- the program starts without a byte of it having been
+     * read.
+     *
+     * one off the disk is a copy on the heap that somebody has to free.
+     * making it outlive the program, and every fork of the program,
+     * needs a lifetime scheme that demand paging does not need in order
+     * to be worth having. so that one is loaded the old way, and every
+     * program in /boot/bin -- which is all of them -- gets the new one */
+    struct elf_load_result loaded = { 0, 0, false, NULL };
+    struct elf_segment segs[ELF_SEGMENTS_MAX];
+    size_t seg_count = 0;
+    const char *why = NULL;
+    bool lazy = false;
 
-    /* elf_load has copied every segment into the new address space, so
-     * whatever I read the program out of is nobody's business now */
-    vfs_release(image, owned);
+    if (!owned && elf_describe(image, image_size, segs, ELF_SEGMENTS_MAX,
+                               &seg_count, &loaded.entry, &loaded.brk,
+                               &why)) {
+        lazy = true;
+        for (size_t i = 0; i < seg_count; i++) {
+            if (!addrspace_add_region(space, segs[i].vaddr, segs[i].end,
+                                      segs[i].flags, VMA_FILE,
+                                      (const uint8_t *)image,
+                                      segs[i].offset, segs[i].file_end)) {
+                lazy = false;   /* no room to describe it. copy it in */
+                break;
+            }
+        }
+        loaded.ok = lazy;
+    }
+
+    if (!lazy) {
+        loaded = elf_load(image, image_size, space->pml4);
+    }
+
+    /* whatever I read the program out of is nobody's business now --
+     * unless it is being read from as the program runs, which is
+     * exactly what `lazy` means */
+    if (!lazy) {
+        vfs_release(image, owned);
+    }
 
     if (!loaded.ok) {
         addrspace_destroy(space);
-        *error = loaded.error;
+        *error = (loaded.error != NULL) ? loaded.error : why;
         return 0;
     }
 
-    /* a stack for ring 3: writable, never executable, mapped user */
-    uint64_t stack_phys = pmm_alloc_pages(USER_STACK_PAGES);
+    /* a stack for ring 3: writable, never executable, mapped user.
+     *
+     * the whole megabyte is agreed to and almost none of it is made.
+     * only the top pages exist, because the arguments have to be
+     * written into them before the program runs -- everything below
+     * arrives when the program first pushes that far, and a program
+     * that never does never pays for it */
+    uint64_t stack_flags = PTE_USER | PTE_WRITE | vmm_nx();
+    uint64_t stack_base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
+
+    if (!addrspace_add_region(space, stack_base, USER_STACK_TOP,
+                              stack_flags, VMA_ANON, NULL, 0, 0)) {
+        addrspace_destroy(space);
+        *error = "no room to describe a stack";
+        return 0;
+    }
+
+    uint64_t eager_base = USER_STACK_TOP - USER_STACK_EAGER * PAGE_SIZE;
+    uint64_t stack_phys = pmm_alloc_pages(USER_STACK_EAGER);
     if (stack_phys == 0) {
         addrspace_destroy(space);
         *error = "no memory for a user stack";
         return 0;
     }
-    memset(pmm_phys_to_virt(stack_phys), 0, USER_STACK_PAGES * PAGE_SIZE);
+    memset(pmm_phys_to_virt(stack_phys), 0, USER_STACK_EAGER * PAGE_SIZE);
 
-    uint64_t stack_base = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
-    if (!vmm_map_range(space->pml4, stack_base, stack_phys,
-                       USER_STACK_PAGES * PAGE_SIZE,
-                       PTE_USER | PTE_WRITE | vmm_nx())) {
-        pmm_free_pages(stack_phys, USER_STACK_PAGES);
+    if (!vmm_map_range(space->pml4, eager_base, stack_phys,
+                       USER_STACK_EAGER * PAGE_SIZE, stack_flags)) {
+        pmm_free_pages(stack_phys, USER_STACK_EAGER);
         addrspace_destroy(space);
         *error = "could not map a user stack";
         return 0;

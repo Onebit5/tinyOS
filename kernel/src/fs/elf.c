@@ -1,6 +1,17 @@
 #include "fs/elf.h"
 #include "lib/string.h"
 
+/* what a segment turns into, in page table terms. describing one is
+ * pure arithmetic and runs on a host; mapping one needs a real cpu and
+ * lives below the guard further down */
+#include "mm/vmm.h"
+
+/* elf_load gets this from pmm.h, which needs a real machine. describing
+ * a segment needs only the number */
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#endif
+
 #define ET_EXEC 2
 #define PT_LOAD 1
 
@@ -88,10 +99,89 @@ bool elf_is_loadable(const void *image, uint64_t size, const char **why) {
     return true;
 }
 
+bool elf_describe(const void *image, uint64_t size,
+                  struct elf_segment *out, size_t max, size_t *count,
+                  uint64_t *entry, uint64_t *brk, const char **why) {
+    if (!elf_is_loadable(image, size, why)) {
+        return false;
+    }
+
+    const struct elf64_header *h = image;
+    const struct elf64_phdr *ph =
+        (const struct elf64_phdr *)((const uint8_t *)image + h->phoff);
+
+    *count = 0;
+    *entry = h->entry;
+    *brk = 0;
+
+    for (uint16_t i = 0; i < h->phnum; i++) {
+        if (ph[i].type != PT_LOAD || ph[i].memsz == 0) {
+            continue;
+        }
+        if (ph[i].offset + ph[i].filesz > size) {
+            *why = "a segment reaches past the end of the file";
+            return false;
+        }
+        /* the higher half is mine. a program claiming to live there is
+         * either broken or trying something */
+        if (ph[i].vaddr >= 0xffff800000000000ull) {
+            *why = "a segment wants to live in kernel space";
+            return false;
+        }
+        if (*count == max) {
+            *why = "more segments than I can describe";
+            return false;
+        }
+
+        uint64_t start = ph[i].vaddr & ~(PAGE_SIZE - 1);
+        uint64_t end = (ph[i].vaddr + ph[i].memsz + PAGE_SIZE - 1)
+                     & ~(PAGE_SIZE - 1);
+
+        /* two segments sharing a page cannot both be described: one
+         * record would have to fetch the other's bytes, and they may
+         * not even agree about whether the page is writable. the
+         * linker puts each on its own page, so this is a check rather
+         * than a case */
+        for (size_t j = 0; j < *count; j++) {
+            if (start < out[j].end && end > out[j].vaddr) {
+                *why = "two segments share a page";
+                return false;
+            }
+        }
+
+        uint64_t flags = PTE_USER;
+        if (ph[i].flags & PF_W) {
+            flags |= PTE_WRITE | vmm_nx();
+        } else if (!(ph[i].flags & PF_X)) {
+            flags |= vmm_nx();
+        }
+
+        out[*count].vaddr = start;
+        out[*count].end = end;
+        out[*count].file_end = ph[i].vaddr + ph[i].filesz;
+        /* the offset of `start` rather than of vaddr, since the record
+         * describes whole pages and the segment may begin partway into
+         * one -- though with a page-aligned linker script it never
+         * does, and the arithmetic is the same either way */
+        out[*count].offset = ph[i].offset - (ph[i].vaddr - start);
+        out[*count].flags = flags;
+        (*count)++;
+
+        if (end > *brk) {
+            *brk = end;
+        }
+    }
+
+    if (*count == 0) {
+        *why = "nothing to load";
+        return false;
+    }
+    return true;
+}
+
 #ifndef TINYOS_HOSTED
 
 #include "mm/pmm.h"
-#include "mm/vmm.h"
 
 struct elf_load_result elf_load(const void *image, uint64_t size,
                                 uint64_t pml4) {

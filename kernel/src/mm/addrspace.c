@@ -27,6 +27,12 @@ struct addrspace *addrspace_create(uint64_t kernel_pml4) {
         return NULL;
     }
 
+    /* the slab hands back whatever was in the object last time, and a
+     * region table full of somebody else's leftovers is worse than
+     * broken -- it is a record saying a wild pointer is legitimate.
+     * every field here has to be set on purpose */
+    memset(as, 0, sizeof *as);
+
     as->pml4 = vmm_new_address_space();
     if (as->pml4 == 0) {
         slab_free(as);
@@ -137,12 +143,23 @@ struct addrspace *addrspace_fork(const struct addrspace *from,
         mine[i] = child | (parent[i] & ~PTE_ADDR_MASK);
     }
 
+    /* the records come too. a child whose stack cannot grow is a child
+     * that dies the first time it calls anything */
+    for (size_t i = 0; i < VMA_MAX; i++) {
+        as->vmas[i] = from->vmas[i];
+    }
+
     /* the parent's own entries just changed under it, and every core
      * that has run it may be holding a translation that still says
      * writable */
     smp_tlb_shootdown();
     return as;
 }
+
+/* where mmap hands things out: above everything a program links to and
+ * a long way below the stack, so the two can never meet */
+#define MMAP_BASE  0x0000600000000000ull
+#define MMAP_LIMIT 0x00006fff00000000ull
 
 /* find the leaf entry for an address, or NULL. no allocation: this runs
  * inside a fault handler and a fault handler that allocates page tables
@@ -165,9 +182,179 @@ static uint64_t *leaf_for(uint64_t pml4_phys, uint64_t virt) {
     return &table[(virt >> 12) & 0x1ff];
 }
 
-bool addrspace_fault(struct addrspace *as, uint64_t virt, bool write) {
-    if (as == NULL || !write) {
-        return false;       /* a read never faults on one of these */
+/* ---- regions ---------------------------------------------------------
+ *
+ * the record that makes a not-present fault answerable. without one
+ * there is no way to tell a stack that wants to grow from a program
+ * dereferencing nonsense */
+
+static struct vma *region_for(struct addrspace *as, uint64_t virt) {
+    for (size_t i = 0; i < VMA_MAX; i++) {
+        struct vma *v = &as->vmas[i];
+        if (v->kind != VMA_NONE && virt >= v->start && virt < v->end) {
+            return v;
+        }
+    }
+    return NULL;
+}
+
+bool addrspace_add_region(struct addrspace *as, uint64_t start, uint64_t end,
+                          uint64_t flags, enum vma_kind kind,
+                          const uint8_t *image, uint64_t image_offset,
+                          uint64_t file_end) {
+    if (as == NULL || end <= start) {
+        return false;
+    }
+
+    start &= ~(PAGE_SIZE - 1);
+    end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    struct vma *slot = NULL;
+    for (size_t i = 0; i < VMA_MAX; i++) {
+        if (as->vmas[i].kind == VMA_NONE) {
+            if (slot == NULL) {
+                slot = &as->vmas[i];
+            }
+            continue;
+        }
+        /* two records disagreeing about one address is worse than
+         * refusing to make the second */
+        if (start < as->vmas[i].end && end > as->vmas[i].start) {
+            return false;
+        }
+    }
+    if (slot == NULL) {
+        return false;
+    }
+
+    slot->kind = kind;
+    slot->start = start;
+    slot->end = end;
+    slot->flags = flags;
+    slot->image = image;
+    slot->image_offset = image_offset;
+    slot->file_end = file_end;
+    return true;
+}
+
+bool addrspace_drop_region(struct addrspace *as, uint64_t start) {
+    if (as == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < VMA_MAX; i++) {
+        struct vma *v = &as->vmas[i];
+        if (v->kind == VMA_NONE || v->start != start) {
+            continue;
+        }
+
+        /* whatever of it was ever touched has real pages behind it */
+        for (uint64_t a = v->start; a < v->end; a += PAGE_SIZE) {
+            uint64_t *pte = leaf_for(as->pml4, a);
+            if (pte == NULL || !(*pte & PTE_PRESENT)) {
+                continue;
+            }
+            uint64_t phys = *pte & PTE_ADDR_MASK;
+            *pte = 0;
+            pmm_unref(phys);
+            vmm_flush_page(a);
+        }
+
+        v->kind = VMA_NONE;
+        return true;
+    }
+    return false;
+}
+
+uint64_t addrspace_reserve(struct addrspace *as, uint64_t len, uint64_t flags) {
+    if (as == NULL || len == 0) {
+        return 0;
+    }
+    len = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+
+    /* above everything a program links to and below where its stack
+     * lives, walking up past whatever is already out. a first fit over
+     * sixteen records rather than a free list: with this many regions
+     * the list would be the bigger half of the code */
+    uint64_t at = MMAP_BASE;
+    for (bool moved = true; moved; ) {
+        moved = false;
+        for (size_t i = 0; i < VMA_MAX; i++) {
+            const struct vma *v = &as->vmas[i];
+            if (v->kind == VMA_NONE) {
+                continue;
+            }
+            if (at < v->end && at + len > v->start) {
+                at = v->end;
+                moved = true;
+            }
+        }
+        if (at + len > MMAP_LIMIT) {
+            return 0;
+        }
+    }
+
+    if (!addrspace_add_region(as, at, at + len, flags, VMA_ANON, NULL, 0, 0)) {
+        return 0;
+    }
+    return at;
+}
+
+/* give a not-present address the page it was always going to have */
+static bool populate(struct addrspace *as, struct vma *v, uint64_t virt) {
+    uint64_t page = virt & ~(PAGE_SIZE - 1);
+
+    uint64_t phys = pmm_alloc_pages(1);
+    if (phys == 0) {
+        return false;
+    }
+    uint8_t *mem = pmm_phys_to_virt(phys);
+
+    if (v->kind == VMA_FILE && v->image != NULL && page < v->file_end) {
+        /* the bytes that exist, then zeroes. one page can be both --
+         * that is exactly what the end of a segment looks like when the
+         * bss starts partway through it */
+        uint64_t have = v->file_end - page;
+        if (have > PAGE_SIZE) {
+            have = PAGE_SIZE;
+        }
+        memcpy(mem, v->image + v->image_offset + (page - v->start), have);
+        memset(mem + have, 0, PAGE_SIZE - have);
+    } else {
+        /* anonymous memory is zeroes, and has to be: handing a program
+         * a page with somebody else's data still in it is the oldest
+         * information leak there is */
+        memset(mem, 0, PAGE_SIZE);
+    }
+
+    if (!vmm_map_range(as->pml4, page, phys, PAGE_SIZE, v->flags)) {
+        pmm_free_pages(phys, 1);
+        return false;
+    }
+    vmm_flush_page(page);
+    return true;
+}
+
+bool addrspace_fault(struct addrspace *as, uint64_t virt, bool write,
+                     bool present) {
+    if (as == NULL) {
+        return false;
+    }
+
+    if (!present) {
+        /* nothing here yet. the only thing that makes this answerable
+         * rather than fatal is a record saying the range was agreed to */
+        struct vma *v = region_for(as, virt);
+        if (v == NULL) {
+            return false;
+        }
+        if (write && !(v->flags & PTE_WRITE)) {
+            return false;   /* a write to a region that was never writable */
+        }
+        return populate(as, v, virt);
+    }
+
+    if (!write) {
+        return false;       /* a read of a present page never faults on me */
     }
 
     uint64_t *pte = leaf_for(as->pml4, virt);

@@ -64,8 +64,10 @@ struct user_stat {
 };
 
 #define SYS_FORK   25   /* ()  -> the child's pid, or 0 if you are it   */
+#define SYS_MMAP   26   /* (len)              -> address, or 0          */
+#define SYS_MUNMAP 27   /* (address)          -> 0, or -1               */
 
-#define SYSCALL_COUNT 26
+#define SYSCALL_COUNT 28
 
 /* everything ring 3 was holding when it made the call, written down by
  * the entry stub in the order it pushes them.

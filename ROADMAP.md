@@ -242,9 +242,26 @@ their write bit too. protecting only the child gives you a fork where
 the parent quietly writes through the child's memory, and it looks
 like it works.
 
-**0.2.12 demand paging.** if a fault can mean "copy this page" it can
+**0.2.12 demand paging.** ~~if a fault can mean "copy this page" it can
 mean "there was never a page here yet". stacks that grow, `mmap`, and
-programs that start faster because nothing is loaded until it is read.
+programs that start faster because nothing is loaded until it is
+read.~~ **done in 0.2.12.** the whole of it hangs on one thing: a
+*record* saying which addresses are legitimately empty. without one
+there is no telling a stack that wants to grow from a program
+dereferencing nonsense, and a kernel that guesses wrong either kills
+good programs or conjures memory for bad ones.
+
+so each space keeps a small table of ranges it has agreed to, and every
+not-present fault is answered out of it or not at all. the stack is a
+megabyte of range with two pages in it; the address below is nothing,
+which is the guard page for free -- it costs no memory because there is
+nothing there to cost anything.
+
+lazy program loading is for images that will still be in memory when
+the program runs, which is the ramdisk and therefore every program
+there is. one read off the disk is a copy on the heap somebody has to
+free, and making it outlive an unknown number of forks is a lifetime
+scheme demand paging does not need in order to be worth having.
 
 **0.2.13 a cache between the disk and everything else.** every read
 goes to the drive today, one sector at a time, through a single bounce

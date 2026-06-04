@@ -42,7 +42,7 @@ static const char *const call_names[SYSCALL_COUNT] = {
     "open", "close", "getpid", "spawn", "wait", "readdir", "getuid",
     "create", "chdir", "getcwd", "mkdir", "rmdir",
     "unlink", "rename", "stat",
-    "getkey", "screen", "cursor", "clear", "fork",
+    "getkey", "screen", "cursor", "clear", "fork", "mmap", "munmap",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -107,6 +107,12 @@ static bool user_range_ok(uint64_t addr, uint64_t len) {
 }
 
 #define WRITE_MAX 4096
+
+/* the most a program may ask for in one go. a limit rather than "as
+ * much as the address space holds", because the pages are not made
+ * until they are touched -- so without one, a program could reserve
+ * more than the machine has and only find out halfway through using it */
+#define MMAP_MAX (64ull * 1024 * 1024)
 
 /* which process is asking. everything touching per-process state goes
  * through this rather than assuming */
@@ -444,6 +450,40 @@ static int64_t sys_fork(struct user_regs *regs) {
     /* and the two answers. the parent's is the return value below; the
      * child's is the zero fork_return writes into rax */
     return pid;
+}
+
+/* ---- memory a program asked for -------------------------------------
+ *
+ * everything a program had until now was decided before it started: its
+ * segments and a stack. this is the other way round -- it asks, and
+ * gets a range of addresses that are its to use.
+ *
+ * not one page of it is made here. the range is agreed to and the pages
+ * arrive as they are touched, so asking for a megabyte and using four
+ * bytes of it costs one page. that is not an optimisation bolted on
+ * afterwards, it is the only thing that makes asking for a lot
+ * reasonable in the first place. */
+static int64_t sys_mmap(uint64_t len) {
+    struct thread *me = sched_current();
+    if (me == NULL || me->space == NULL || len == 0) {
+        return 0;
+    }
+    if (len > MMAP_MAX) {
+        return 0;       /* an absurd ask is refused rather than served */
+    }
+    return (int64_t)addrspace_reserve(me->space, len,
+                                      PTE_USER | PTE_WRITE | vmm_nx());
+}
+
+static int64_t sys_munmap(uint64_t addr) {
+    struct thread *me = sched_current();
+    if (me == NULL || me->space == NULL) {
+        return -1;
+    }
+    /* by the address it was handed out at, not by any address inside
+     * it. partial unmapping is a thing unix does and nothing here
+     * needs, and pretending to support it would be worse than saying so */
+    return addrspace_drop_region(me->space, addr) ? 0 : -1;
 }
 
 /* ---- drawing on the whole screen ----------------------------------- */
@@ -851,6 +891,10 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_clear();
     case SYS_FORK:
         return sys_fork(regs);
+    case SYS_MMAP:
+        return sys_mmap(a0);
+    case SYS_MUNMAP:
+        return sys_munmap(a0);
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

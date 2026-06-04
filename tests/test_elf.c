@@ -6,13 +6,21 @@
 #include <stdint.h>
 
 #include "fs/elf.h"
+#include "mm/vmm.h"    /* for the PTE flags a segment turns into */
+
+/* whether this cpu can honour the no-execute bit is a question about
+ * the machine rather than about the file, so describing a segment asks
+ * -- and on a host there is nobody to ask */
+uint64_t vmm_nx(void) { return 0; }
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 
 /* a minimal but valid elf64 header, which each test then breaks in one
- * specific way */
-static uint8_t img[4096];
+ * specific way. big enough to hold a couple of segments at plausible
+ * offsets, since a segment reaching past the end of the file is one of
+ * the things that has to be refused */
+static uint8_t img[16384];
 
 static void reset(void) {
     memset(img, 0, sizeof img);
@@ -33,6 +41,18 @@ static void refuses(const char *what) {
         printf("FAIL: accepted an image that %s\n", what);
         failures++;
     }
+}
+
+/* write a PT_LOAD program header into the image at slot `n` */
+static void segment(int n, uint64_t offset, uint64_t vaddr, uint64_t filesz,
+                    uint64_t memsz, uint32_t flags) {
+    uint8_t *p = img + 64 + n * 56;
+    *(uint32_t *)(p + 0) = 1;           /* PT_LOAD */
+    *(uint32_t *)(p + 4) = flags;
+    *(uint64_t *)(p + 8) = offset;
+    *(uint64_t *)(p + 16) = vaddr;
+    *(uint64_t *)(p + 32) = filesz;
+    *(uint64_t *)(p + 40) = memsz;
 }
 
 int main(void) {
@@ -59,7 +79,9 @@ int main(void) {
 
     /* the one that matters most: headers pointing past the file. a
      * loader that trusts this reads whatever follows in memory */
-    reset(); *(uint64_t *)(img + 32) = 8192;
+    /* expressed against the image rather than as a number, so growing
+     * the image cannot quietly turn this into a valid file */
+    reset(); *(uint64_t *)(img + 32) = sizeof img - 8;
     refuses("puts its program headers past the end of the file");
 
     reset();
@@ -87,6 +109,95 @@ int main(void) {
      * stating: it maps into a given address space rather than whatever
      * happens to be live, which is what lets a program be built before
      * anything switches to it */
+
+    /* ---- describing the segments rather than copying them ----
+     *
+     * for an image that will still be in memory when the program runs,
+     * the loader has nothing to do at load time. this is what it hands
+     * back instead, and the arithmetic in it is what decides which
+     * bytes a page gets when the fault arrives */
+    {
+        struct elf_segment segs[ELF_SEGMENTS_MAX];
+        size_t count = 0;
+        uint64_t entry = 0, brk = 0;
+
+        reset();
+        *(uint16_t *)(img + 56) = 2;    /* two segments */
+        /* text: read + execute, exactly a page */
+        segment(0, 0x1000, 0x400000, 0x1000, 0x1000, 5);
+        /* data: read + write, with 200 bytes of bss past the file */
+        segment(1, 0x2000, 0x402000, 0x400, 0x4c8, 6);
+
+        CHECK(elf_describe(img, sizeof img, segs, ELF_SEGMENTS_MAX, &count,
+                           &entry, &brk, &why),
+              "a two-segment image can be described");
+        CHECK(count == 2, "as two segments");
+        CHECK(entry == 0x400000, "with the entry point");
+
+        CHECK(segs[0].vaddr == 0x400000 && segs[0].end == 0x401000,
+              "the first covers exactly its page");
+        CHECK(segs[0].file_end == 0x401000,
+              "with a file byte behind every address in it");
+        CHECK(!(segs[0].flags & PTE_WRITE),
+              "and is not writable, because the file said so");
+
+        CHECK(segs[1].vaddr == 0x402000, "the second starts where it says");
+        CHECK(segs[1].end == 0x403000,
+              "and is rounded up to whole pages, bss included");
+        CHECK(segs[1].file_end == 0x402400,
+              "with the file stopping partway through -- everything past "
+              "here is bss, and the page that straddles it is both");
+        CHECK(segs[1].flags & PTE_WRITE, "and it is writable");
+        CHECK(segs[1].offset == 0x2000, "reading from the right place");
+
+        CHECK(brk == 0x403000, "and the break is past all of it");
+
+        /* the refusals. each of these is a program that would otherwise
+         * be described wrongly and fault forever, or worse */
+        reset();
+        *(uint16_t *)(img + 56) = 1;
+        segment(0, 0x1000, 0xffff800000000000ull, 0x1000, 0x1000, 6);
+        CHECK(!elf_describe(img, sizeof img, segs, ELF_SEGMENTS_MAX, &count,
+                            &entry, &brk, &why),
+              "a segment that wants to live in kernel space is refused");
+
+        reset();
+        *(uint16_t *)(img + 56) = 1;
+        segment(0, 0x1000, 0x400000, 0x100000, 0x100000, 6);
+        CHECK(!elf_describe(img, sizeof img, segs, ELF_SEGMENTS_MAX, &count,
+                            &entry, &brk, &why),
+              "and so is one reaching past the end of the file");
+
+        /* two segments sharing a page cannot both be described: one
+         * record would have to fetch the other's bytes, and they may
+         * not even agree about whether the page is writable */
+        reset();
+        *(uint16_t *)(img + 56) = 2;
+        segment(0, 0x1000, 0x400000, 0x100, 0x100, 5);
+        segment(1, 0x1100, 0x400100, 0x100, 0x100, 6);
+        CHECK(!elf_describe(img, sizeof img, segs, ELF_SEGMENTS_MAX, &count,
+                            &entry, &brk, &why),
+              "two segments sharing a page are refused, so the caller "
+              "falls back to copying them in");
+
+        reset();
+        *(uint16_t *)(img + 56) = 0;
+        CHECK(!elf_describe(img, sizeof img, segs, ELF_SEGMENTS_MAX, &count,
+                            &entry, &brk, &why),
+              "an image with nothing to load is refused");
+
+        /* more segments than there is room to remember. the caller has
+         * a way out -- elf_load has no such limit, because it does not
+         * have to remember anything */
+        reset();
+        *(uint16_t *)(img + 56) = ELF_SEGMENTS_MAX + 1;
+        for (int i = 0; i <= ELF_SEGMENTS_MAX; i++) {
+            segment(i, 0x1000, 0x400000 + (uint64_t)i * 0x1000, 0x10, 0x10, 6);
+        }
+        CHECK(!elf_describe(img, sizeof img, segs, ELF_SEGMENTS_MAX, &count,
+                            &entry, &brk, &why),
+              "and so is one with more segments than I keep room for");
+    }
 
     if (!failures) printf("all good\n");
     return failures;

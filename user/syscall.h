@@ -33,6 +33,8 @@
 #define SYS_CURSOR 23
 #define SYS_CLEAR  24
 #define SYS_FORK   25
+#define SYS_MMAP   26
+#define SYS_MUNMAP 27
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -174,6 +176,23 @@ static inline long getuid(void) { return syscall0(SYS_GETUID); }
  * writes to it, so the memory only costs something at the moment it is
  * actually changed. -1 means it could not be done at all */
 static inline long fork(void) { return syscall0(SYS_FORK); }
+
+/* ---- memory, asked for rather than given ---------------------------
+ *
+ * everything a program had until now was decided before it started.
+ * this is the other way round: ask for a length, get an address.
+ *
+ * nothing is actually made until it is touched, so asking for a
+ * megabyte and using four bytes of it costs one page. that is what
+ * makes asking for a lot reasonable rather than rude. 0 means no */
+static inline void *mmap(long len) {
+    return (void *)syscall1(SYS_MMAP, len);
+}
+
+/* by the address mmap handed back, not by any address inside it */
+static inline long munmap(void *at) {
+    return syscall1(SYS_MUNMAP, (long)at);
+}
 
 static inline long spawn(const char *path) {
     return syscall2(SYS_SPAWN, (long)path, (long)ustrlen(path));

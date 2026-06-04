@@ -28,6 +28,14 @@ uint64_t pmm_alloc_pages(size_t count) {
     }
     if (next_free + count > ARENA_PAGES) return 0;
     uint64_t phys = next_free * 4096;
+
+    /* whatever was in it before, which is what a real allocator hands
+     * back. the arena starts zeroed and frames are never reused here,
+     * so without this every fresh page would arrive conveniently blank
+     * and nothing could tell a page that was zeroed on purpose from one
+     * that happened to be zero -- which is the difference between an
+     * empty page and somebody else's data */
+    memset(arena + phys, 0xde, count * 4096);
     for (size_t i = 0; i < count; i++) {
         if (taken[next_free + i]) { printf("FAIL: pmm handed out a live frame\n"); exit(1); }
         taken[next_free + i] = 1;
@@ -240,7 +248,7 @@ int main(void) {
 
         /* ---- and now the write ---- */
         uint64_t was = outstanding;
-        CHECK(addrspace_fault(c, 0x401000, true),
+        CHECK(addrspace_fault(c, 0x401000, true, true),
               "a write to a shared page is handled rather than fatal");
         CHECK(outstanding == was + 1, "by taking exactly one new frame");
 
@@ -260,7 +268,7 @@ int main(void) {
          * nothing at all -- there is nobody left to protect it from */
         CHECK(pmm_shares(data) == 0, "the frame is down to one holder");
         was = outstanding;
-        CHECK(addrspace_fault(p, 0x401000, true),
+        CHECK(addrspace_fault(p, 0x401000, true, true),
               "the parent's write is handled too");
         CHECK(outstanding == was,
               "and takes no frame, because the last holder needs no copy of "
@@ -270,11 +278,11 @@ int main(void) {
 
         /* what is *not* a copy-on-write fault has to be refused, or a
          * wild pointer becomes a page silently conjured out of nowhere */
-        CHECK(!addrspace_fault(p, 0x400000, true),
+        CHECK(!addrspace_fault(p, 0x400000, true, true),
               "a write to a genuinely read-only page is still a real fault");
-        CHECK(!addrspace_fault(p, 0x900000, true),
-              "and so is one to an address that is not mapped at all");
-        CHECK(!addrspace_fault(p, 0x401000, false),
+        CHECK(!addrspace_fault(p, 0x900000, true, false),
+              "and so is one to an address nobody ever agreed to");
+        CHECK(!addrspace_fault(p, 0x401000, false, true),
               "a read never needs one of these");
 
         addrspace_destroy(c);
@@ -299,7 +307,7 @@ int main(void) {
               "a child that never wrote leaves the parent's page alone");
 
         /* and the parent may write again without paying for a copy */
-        CHECK(addrspace_fault(p, 0x400000, true), "the parent takes it back");
+        CHECK(addrspace_fault(p, 0x400000, true, true), "the parent takes it back");
         CHECK(vmm_translate(p->pml4, 0x400000) == page,
               "the same frame it always had");
 
@@ -343,6 +351,184 @@ int main(void) {
               "a fork with nowhere to count holders is refused");
         can_share = true;
         addrspace_destroy(p);
+    }
+
+    /* ---- demand paging -----------------------------------------
+     *
+     * a fault could already mean "copy this page". this is the other
+     * thing it can mean: "there was never a page here, and there was
+     * always going to be one". the whole difference between that and a
+     * wild pointer is a record saying the range was agreed to */
+    {
+        uint64_t level = outstanding;
+        struct addrspace *p = addrspace_create(kernel_space);
+        uint64_t flags = PTE_USER | PTE_WRITE;
+
+        /* measured from here, so the space's own pml4 is not counted
+         * as something a region cost */
+        uint64_t empty = outstanding;
+
+        CHECK(addrspace_add_region(p, 0x700000, 0x710000, flags,
+                                   VMA_ANON, NULL, 0, 0),
+              "a range can be agreed to");
+        CHECK(outstanding == empty,
+              "and agreeing to sixteen pages costs not one of them");
+        CHECK(vmm_translate(p->pml4, 0x700000) == VMM_NO_MAPPING,
+              "with nothing behind any of it yet");
+
+        /* touching it is answerable */
+        CHECK(addrspace_fault(p, 0x704abc, true, false),
+              "touching a page inside it is answered rather than fatal");
+        CHECK(vmm_translate(p->pml4, 0x704000) != VMM_NO_MAPPING,
+              "and there is a page there now");
+        CHECK(vmm_translate(p->pml4, 0x705000) == VMM_NO_MAPPING,
+              "but only the one that was touched");
+
+        /* it has to be zeroes. handing a program a page with somebody
+         * else's data still in it is the oldest leak there is */
+        const uint8_t *fresh = pmm_phys_to_virt(
+            vmm_translate(p->pml4, 0x704000));
+        int nonzero = 0;
+        for (int i = 0; i < 4096; i++) {
+            if (fresh[i] != 0) nonzero++;
+        }
+        CHECK(nonzero == 0, "and it is zeroes, not whatever was in it before");
+
+        /* and what is *not* agreed to stays fatal, which is the entire
+         * reason the record exists */
+        CHECK(!addrspace_fault(p, 0x6fffff, true, false),
+              "a page just below the range is still a wild pointer");
+        CHECK(!addrspace_fault(p, 0x710000, true, false),
+              "and so is one just above it -- that is the guard page, and "
+              "it costs nothing because there is nothing there");
+
+        /* a read-only region must not be written into */
+        CHECK(addrspace_add_region(p, 0x800000, 0x801000, PTE_USER,
+                                   VMA_ANON, NULL, 0, 0),
+              "a read-only range can be agreed to");
+        CHECK(!addrspace_fault(p, 0x800000, true, false),
+              "and a write to it is refused rather than quietly served");
+        CHECK(addrspace_fault(p, 0x800000, false, false),
+              "though a read of it is fine");
+
+        /* overlapping records are refused: two of them disagreeing
+         * about one address is worse than not having the second */
+        CHECK(!addrspace_add_region(p, 0x708000, 0x720000, flags,
+                                    VMA_ANON, NULL, 0, 0),
+              "a range overlapping one already there is refused");
+
+        /* taking it back frees whatever was ever touched */
+        uint64_t before_drop = outstanding;
+        CHECK(addrspace_drop_region(p, 0x700000), "a range can be taken back");
+        CHECK(outstanding == before_drop - 1,
+              "and the one page that was made goes back with it");
+        CHECK(vmm_translate(p->pml4, 0x704000) == VMM_NO_MAPPING,
+              "with nothing left mapped");
+        CHECK(!addrspace_fault(p, 0x704000, true, false),
+              "and touching it is a wild pointer again");
+        CHECK(!addrspace_drop_region(p, 0x700000), "dropping it twice does nothing");
+        CHECK(!addrspace_drop_region(p, 0x704000),
+              "and it goes by the address it was made at, not one inside it");
+
+        addrspace_destroy(p);
+        CHECK(outstanding == level, "and nothing leaked");
+    }
+
+    /* ---- a region backed by an image ---------------------------
+     *
+     * the same record, with somewhere for the bytes to come from. this
+     * is how a program starts without a byte of it having been read */
+    {
+        uint64_t level = outstanding;
+        static uint8_t fake_image[8192];
+        for (int i = 0; i < 8192; i++) {
+            fake_image[i] = (uint8_t)(i & 0xff);
+        }
+
+        struct addrspace *p = addrspace_create(kernel_space);
+
+        /* a segment of 6000 bytes in a range of two pages: the tail of
+         * the second page is bss, and one page is both */
+        CHECK(addrspace_add_region(p, 0x400000, 0x402000, PTE_USER,
+                                   VMA_FILE, fake_image, 0, 0x400000 + 6000),
+              "a file-backed range can be agreed to");
+
+        CHECK(addrspace_fault(p, 0x400000, false, false), "the first page arrives");
+        const uint8_t *page0 = pmm_phys_to_virt(vmm_translate(p->pml4, 0x400000));
+        CHECK(memcmp(page0, fake_image, 4096) == 0,
+              "holding the bytes that were in the image");
+
+        CHECK(addrspace_fault(p, 0x401000, false, false), "and so does the second");
+        const uint8_t *page1 = pmm_phys_to_virt(vmm_translate(p->pml4, 0x401000));
+        CHECK(memcmp(page1, fake_image + 4096, 6000 - 4096) == 0,
+              "with the bytes that exist");
+        int tail_nonzero = 0;
+        for (int i = 6000 - 4096; i < 4096; i++) {
+            if (page1[i] != 0) tail_nonzero++;
+        }
+        CHECK(tail_nonzero == 0,
+              "and zeroes past where the file stopped -- one page being both "
+              "is exactly what the end of a segment looks like");
+
+        addrspace_destroy(p);
+        CHECK(outstanding == level, "with nothing left over");
+    }
+
+    /* ---- mmap ---- */
+    {
+        uint64_t level = outstanding;
+        struct addrspace *p = addrspace_create(kernel_space);
+        uint64_t flags = PTE_USER | PTE_WRITE;
+
+        uint64_t empty = outstanding;
+
+        uint64_t a = addrspace_reserve(p, 4096, flags);
+        uint64_t b = addrspace_reserve(p, 100 * 4096, flags);
+        CHECK(a != 0 && b != 0, "two ranges can be asked for");
+        CHECK(a != b, "and they are different");
+        CHECK(b >= a + 4096 || a >= b + 100 * 4096, "and do not overlap");
+        CHECK(outstanding == empty,
+              "and a hundred and one pages of address space cost not one "
+              "page of memory -- which is what makes asking for a lot "
+              "reasonable rather than rude");
+
+        CHECK(addrspace_fault(p, b + 50 * 4096, true, false),
+              "touching the middle of one works");
+        CHECK(vmm_translate(p->pml4, b + 50 * 4096) != VMM_NO_MAPPING,
+              "and makes exactly that page");
+
+        /* a length that would not fit anywhere */
+        CHECK(addrspace_reserve(p, 0, flags) == 0, "asking for nothing gets nothing");
+
+        CHECK(addrspace_drop_region(p, b), "and it can be given back");
+        CHECK(!addrspace_fault(p, b + 50 * 4096, true, false),
+              "after which it is nobody's memory again");
+
+        addrspace_destroy(p);
+        CHECK(outstanding == level, "with nothing leaked");
+    }
+
+    /* ---- the records survive a fork ----
+     * a child whose stack cannot grow is a child that dies the first
+     * time it calls anything */
+    {
+        uint64_t level = outstanding;
+        struct addrspace *p = addrspace_create(kernel_space);
+        addrspace_add_region(p, 0x700000, 0x710000, PTE_USER | PTE_WRITE,
+                             VMA_ANON, NULL, 0, 0);
+
+        struct addrspace *c = addrspace_fork(p, kernel_space);
+        CHECK(c != NULL, "a space with a region can be forked");
+        CHECK(addrspace_fault(c, 0x707000, true, false),
+              "and the child can still grow into it");
+        CHECK(vmm_translate(c->pml4, 0x707000) != VMM_NO_MAPPING,
+              "getting a page of its own");
+        CHECK(vmm_translate(p->pml4, 0x707000) == VMM_NO_MAPPING,
+              "which the parent knows nothing about");
+
+        addrspace_destroy(c);
+        addrspace_destroy(p);
+        CHECK(outstanding == level, "and nothing leaked");
     }
 
     /* ---- a space with nothing in it ---- */

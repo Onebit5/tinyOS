@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.11** (**fork, and copy on write.** two processes sharing every page until one of them writes)
+**version: 0.2.12** (**demand paging.** stacks that grow, `mmap`, and programs that start without a byte of them having been read)
 
 ## what it does
 
@@ -49,6 +49,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a text editor that runs in ring 3 and paints its own screen
 - [x] job control: ctrl+z, `fg`, `bg`, `jobs`, and a terminal that talks to groups
 - [x] `fork` with copy on write -- the page fault handler stops being only an error path
+- [x] demand paging: growable stacks, `mmap`, and programs loaded a page at a time
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -157,6 +158,98 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## demand paging
+
+a fault could already mean *"copy this page"*. this is the other thing
+it can mean: **"there was never a page here yet, and there was always
+going to be one."**
+
+the whole of it hangs on one thing — a *record* saying which addresses
+are legitimately empty. without one there is no way to tell a stack that
+wants to grow from a program dereferencing nonsense, and a kernel that
+guesses wrong either kills good programs or conjures memory for bad
+ones. so each address space carries a small table:
+
+```c
+struct vma {
+    enum vma_kind kind;         /* zeroes, or bytes out of an image */
+    uint64_t start, end;
+    uint64_t flags;             /* what a page here is allowed to be */
+
+    const uint8_t *image;
+    uint64_t image_offset;
+    uint64_t file_end;          /* past here the page is zeroes */
+};
+```
+
+every not-present fault is answered out of that table or not at all.
+
+### a stack that grows
+
+before this, every program got four pages of stack whether it wanted
+them or not, and the fifth was a fault with nothing behind it. now the
+**range** is agreed to — a megabyte — and two pages of it exist, because
+the arguments have to be written somewhere before the program starts.
+everything below arrives as the program steps on it.
+
+a program that uses a few hundred bytes of stack costs one page. one
+that recurses gets more without anybody having decided in advance how
+much it would need. and the address below the range is nothing at all,
+which is **the guard page for free** — it costs no memory because there
+is nothing there to cost anything.
+
+### mmap
+
+```c
+void *room = mmap(4 * 1024 * 1024);
+```
+
+not one page of that is made. the range is agreed to and the pages
+arrive as they are touched, so asking for four megabytes and using three
+pages costs three pages. that is not an optimisation bolted on
+afterwards — it is the only thing that makes asking for a lot reasonable
+rather than rude.
+
+there is a limit on a single ask, and it exists for the same reason:
+because nothing is made until it is touched, without one a program could
+reserve more than the machine has and only find out halfway through
+using it.
+
+`munmap` takes a range back by **the address it was handed**, not by any
+address inside it. partial unmapping is a thing unix does and nothing
+here needs, and pretending to support it would be worse than saying so.
+
+### a program that starts without being read
+
+`elf_describe` hands back the segments instead of copying them, and each
+becomes a file-backed region pointing straight into the image. the
+program starts with no part of it in memory and gets its text a page at
+a time as it executes.
+
+one page can be both file and zeroes at once — that is exactly what the
+end of a segment looks like when the bss begins partway through it, and
+the same record describes both.
+
+this only works for an image that will **still be there** when the
+program runs. the ramdisk is a tar philemon handed over at boot; it
+never moves and is never freed, so a region can point into it forever. a
+program read off the disk is a copy on the heap that somebody has to
+free, and making it outlive the program and every fork of the program is
+a lifetime scheme demand paging does not need in order to be worth
+having. so that one is loaded the old way — and everything in
+`/boot/bin`, which is all of them, gets the new one.
+
+### seeing it
+
+```
+igor@velvet# tartarus
+climbing, a page of stack per floor...
+  reached floor 200 -- about 800kb of stack, none of which existed when I started
+asked for 4096kb and got it at once -- nothing was made
+touched three pages of it, and those three are all that exist
+gave it back
+```
 
 ## fork, and copy on write
 
@@ -1529,6 +1622,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.12** — demand paging, which is one idea and a lot of consequences: a **record** of which addresses are legitimately empty. without it there is no telling a stack that wants to grow from a program dereferencing nonsense, and a kernel that guesses either kills good programs or conjures memory for bad ones. so every space keeps a table of ranges it agreed to and every not-present fault is answered out of it or not at all. the stack is a megabyte of range with two pages in it — the arguments have to go somewhere before the program starts — and the address below it is nothing, which is the guard page for free: it costs no memory because there is nothing there to cost anything. `mmap` hands out ranges the same way, so asking for four megabytes and using three pages costs three pages; there is a cap on a single ask for exactly that reason, since without one a program could reserve more than the machine has and find out halfway through using it. `elf_describe` returns the segments instead of copying them, so a program starts with none of itself in memory — but only for an image that will still be there when it runs, which is the ramdisk and therefore everything in `/boot/bin`; a disk copy would have to outlive every fork of the program, and that is a lifetime scheme this does not need to be worth having. writing the tests turned up a real bug the hard way: making the fake allocator hand back *poisoned* frames instead of conveniently blank ones showed that `addrspace_create` had never zeroed its region table, so a fresh space started with whatever the slab had in it last — and a garbage region is a record saying a wild pointer is legitimate.
 - **0.2.11** — `fork`, with copy on write, and the page tables were the easy half. two things were not. **the parent's pages have to lose their write bit as well as the child's** — protect only the child and the parent quietly writes through the child's memory, which looks like it works; there is a test that fails on precisely that. and **a forked child has to return from a syscall it never made**, holding everything its parent held — including `rbx`, `rbp` and `r12`–`r15`, which the abi says are the callee's problem and which are therefore in the cpu at the moment of the call and buried under a C prologue a moment later. so the entry stub now writes the whole of ring 3 down on every call and hands the frame to the dispatcher; the child leaves through `fork_return`, which stands on a copy of that frame, zeroes `rax` and `sysret`s. `PTE_COW` is a software bit the cpu ignores, saying the read-only above it is a lie told on purpose — without it a shared page and a genuinely read-only one are indistinguishable at fault time, and the difference between them is copying a page and killing a program. frames gained a one-byte share count; a frame down to its last holder is not copied at all, which is what makes fork-then-exit free. a child inherits descriptors, cwd, uid and its parent's **process group**, that last one because a child outside it is a process no ctrl+c can reach. `gemini` exists to make it visible, since copy on write is invisible when it works.
 - **0.2.10** — job control, and the interesting part was getting stopping wrong first. a `THREAD_STOPPED` state next to `READY` and `BLOCKED` looks right and is not: a suspended thread may *also* be blocked on a pipe, and those answer different questions — what is it waiting for, against may it run at all. one enum for both means a stopped thread forgets it was stopped the moment anything wakes it, so `cat | wc` under ctrl+z would resume itself as soon as you typed. it is an orthogonal flag that `pick_next` skips, which also makes continuing a job one bit rather than a recovery, since it kept whatever it was halfway through. the terminal's front is a process group now rather than a pid — `cat x | grep y | wc -l` is one thing to whoever typed it, and interrupting only the last of three leaves the other two writing into a pipe nobody reads. with no signals, a suspended job announces itself by leaving a note the shell picks up in the poll it was already sitting in: waiting simply gained a second way to finish, and `fg` and `bg` differ by one argument. the job table lives in the shell because the kernel has pids and the shell has the line that was typed; jobs are recorded only when they survive the command (backgrounded or suspended), and anything that finished quietly is reported at the next prompt rather than over the top of whatever is being typed.
 - **0.2.9** — an editor, and the descriptor work it dragged in behind it. `margaret` is nano-shaped and paints its whole screen on every keystroke rather than tracking which cells changed; the clever version is a second model of the screen, and a second model of anything is a second thing that can be wrong. it needed four syscalls nothing had wanted before — one key, the screen size, the cursor, and clear — all refused to anyone who is not the foreground, since a background program repainting over whoever is being typed at is the one thing none of it may allow. `getkey` is also how raw mode arrives: there is no flag saying a terminal is raw, because asking for a line and asking for a key are different questions. `write` is deleted in favour of `echo hi > file`, which meant finally doing what 0.2.8 said it was deferring: **0, 1 and 2 became real descriptors**, tagged by what they point at, with redirection being nothing more than putting something else in a slot before the program starts. `>`, `>>` and `<` belong to a command rather than a line, are stripped from the arguments before the program sees them, and ask the same permission questions `open` and `create` do. `>` truncates by unlinking first, since `create` opens rather than empties. home, end, page up and page down had to be decoded on both the keyboard and the serial line — terminals send them in two different shapes and knowing one is not enough.
