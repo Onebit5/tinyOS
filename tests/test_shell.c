@@ -40,7 +40,21 @@ bool console_ready(void) { return true; }
 int input_getchar_blocking(void) { return '\n'; }
 uint64_t pit_uptime_ms(void) { return 12345; }
 uint64_t pit_ticks(void) { return 1234; }
-void reboot(void) { kprintf("<REBOOT>"); exit(0); }
+/* both of these are declared noreturn, and they mean it -- so a stub
+ * that simply returned would run straight into the trap the compiler
+ * puts after it. it jumps back to whoever asked instead.
+ *
+ * what it must *not* do is exit(0), which is what it did until 0.2.13.
+ * a stub that ends the process makes every assertion after it vacuous:
+ * the suite stops, the runner sees a zero exit code, and the whole
+ * thing reports success having run half of itself. that is a worse
+ * failure than any bug it could have found, and it hid behind the fact
+ * that nothing was testing reboot until something needed to */
+#include <setjmp.h>
+static jmp_buf stopped_here;
+static int reboots, poweroffs;
+
+void reboot(void) { kprintf("<REBOOT>"); reboots++; longjmp(stopped_here, 1); }
 uint64_t pmm_total_bytes(void) { return 2046ull * 1024 * 1024; }
 uint64_t pmm_used_bytes(void) { return 100ull * 1024; }
 uint64_t pmm_free_bytes(void) { return 2045ull * 1024 * 1024; }
@@ -108,6 +122,23 @@ bool disk_readdir(const char *path, size_t index, struct disk_entry *out) {
     }
     return false;
 }
+/* the cache, as far as the shell is concerned: something that can be
+ * dirty and can be told to stop being. what is under test here is that
+ * the two ways this machine stops both write first -- a reboot that
+ * does not sync throws away whatever had not reached the drive */
+static bool cache_dirty = true;
+static int  syncs;
+static bool sync_ok = true;
+
+bool disk_sync(void) { syncs++; if (sync_ok) cache_dirty = false; return sync_ok; }
+bool disk_dirty(void) { return cache_dirty; }
+void disk_cache_stats(struct bcache_stats *out) {
+    memset(out, 0, sizeof *out);
+    out->held = 3;
+    out->hits = 90;
+    out->misses = 10;
+}
+
 const char *disk_label(void) { return "TINYOS"; }
 const char *disk_model(void) { return "QEMU HARDDISK"; }
 uint64_t disk_bytes(void) { return 64ull * 1024 * 1024; }
@@ -247,7 +278,11 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
 size_t pipe_count(void) { return 0; }
 void vmm_dump(uint64_t v) { kprintf("<VMM %#lx>", v); }
 void kbacktrace(uint64_t rbp, uint64_t rip) { (void)rbp; (void)rip; kprintf("<BT>"); }
-void system_poweroff(void) { kprintf("<POWEROFF>"); exit(0); }
+void system_poweroff(void) {
+    kprintf("<POWEROFF>");
+    poweroffs++;
+    longjmp(stopped_here, 1);
+}
 uint64_t vmm_translate(uint64_t pml4, uint64_t v) { (void)pml4; (void)v; return v; }
 #include "drivers/rtc.h"
 void rtc_read(struct rtc_time *t) {
@@ -324,7 +359,11 @@ static void run(const char *line) {
     char buf[128];
     snprintf(buf, sizeof buf, "%s", line);
     out_reset();
-    run_line(buf);
+
+    /* somewhere for a command that never returns to come back to */
+    if (setjmp(stopped_here) == 0) {
+        run_line(buf);
+    }
 }
 
 int main(void) {
@@ -438,6 +477,53 @@ int main(void) {
     run("ps | grep hello");
     CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
     CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
+
+    /* ---- sync, and the two ways this machine stops ----------------
+     *
+     * before 0.2.13 a write reached the drive as it was made, so a
+     * reboot lost nothing by definition. it is a cache now: a reboot
+     * that does not write first throws away whatever had not reached
+     * the drive, which on this machine is usually the file somebody
+     * just spent a minute editing */
+
+    cache_dirty = true;
+    syncs = 0;
+    run("sync");
+    CHECK(syncs == 1, "sync writes what is waiting");
+    CHECK(strstr(out, "written") != NULL, "and says so");
+
+    run("sync");
+    CHECK(strstr(out, "nothing waiting") != NULL,
+          "and asking again says there is nothing to do");
+
+    cache_dirty = true;
+    sync_ok = false;
+    run("sync");
+    CHECK(strstr(out, "not what I believe") != NULL,
+          "a drive that refuses is reported, since the disk and the "
+          "machine now disagree and somebody should know");
+    sync_ok = true;
+
+    cache_dirty = true;
+    syncs = 0;
+    reboots = 0;
+    run("reboot");
+    CHECK(syncs == 1, "reboot writes first");
+    CHECK(reboots == 1 && strstr(out, "<REBOOT>") != NULL, "and then reboots");
+
+    cache_dirty = true;
+    syncs = 0;
+    poweroffs = 0;
+    run("poweroff");
+    CHECK(syncs == 1, "and so does poweroff");
+    CHECK(poweroffs == 1, "before going out");
+
+    cache_dirty = false;
+    syncs = 0;
+    run("reboot");
+    CHECK(syncs == 0,
+          "with nothing waiting, neither of them writes anything -- there "
+          "is no point spinning up a drive to say nothing");
 
     /* ---- jobs -----------------------------------------------------
      *

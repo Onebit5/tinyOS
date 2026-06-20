@@ -263,10 +263,19 @@ there is. one read off the disk is a copy on the heap somebody has to
 free, and making it outlive an unknown number of forks is a lifetime
 scheme demand paging does not need in order to be worth having.
 
-**0.2.13 a cache between the disk and everything else.** every read
+**0.2.13 a cache between the disk and everything else.** ~~every read
 goes to the drive today, one sector at a time, through a single bounce
 buffer. a cache of blocks, dirty ones written back later, and `sync` to
-mean it.
+mean it.~~ **done in 0.2.13.** it slots exactly where fat32's two
+function pointers already were, which is the whole reason it could be
+added without the filesystem knowing: fat32 was handed a way to move
+sectors and it is still handed a way to move sectors.
+
+the write-back half is a promise broken on purpose. until a sync, what
+is on the disk is not what the machine believes -- which is why unix
+has had the command since 1971, why reboot and poweroff call it, and
+why there is a flusher on a timer to turn "you might lose anything"
+into "you might lose the last few seconds".
 
 **0.2.14 a filesystem with opinions.** fat records no ownership and no
 permissions, which is why everything on the disk is 0644 by decree. a

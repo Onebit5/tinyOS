@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "fs/fat32.h"
+#include "fs/bcache.h"
 
 /* the disk, mounted.
  *
@@ -79,6 +80,20 @@ bool disk_unlink(const char *path);
 /* give a file another name, possibly in another directory. nothing is
  * copied -- a rename moves a name, not a file */
 bool disk_rename(const char *from, const char *to);
+
+/* ---- the cache ------------------------------------------------------
+ *
+ * writes do not reach the drive when they are made. they sit in memory
+ * until the block is evicted, the flusher comes round, or somebody says
+ * `sync` -- so between a write and one of those, the disk does not hold
+ * what the machine says it holds. that is the trade, and this is the
+ * half of it that puts things right */
+bool disk_sync(void);
+
+/* is there anything to lose? cheap enough to ask on a timer */
+bool disk_dirty(void);
+
+void disk_cache_stats(struct bcache_stats *out);
 
 /* what to tell the user about it */
 const char *disk_label(void);

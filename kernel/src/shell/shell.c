@@ -355,8 +355,51 @@ static void cmd_disk(int argc, char **argv) {
                 used / 1024, total / (1024 * 1024));
     }
 
-    kprintf("\ntry: ls, cat welcome.txt, write /notes.txt "
-            "something worth keeping\n");
+    struct bcache_stats c;
+    disk_cache_stats(&c);
+    uint64_t asked = c.hits + c.misses;
+    kprintf("\ncache      %lu of %d blocks held, %lu dirty\n",
+            (uint64_t)c.held, BCACHE_BLOCKS, (uint64_t)c.dirty);
+    if (asked > 0) {
+        /* the hit rate is the only honest measure of whether the cache
+         * was worth writing. a filesystem walking a cluster chain asks
+         * for the same table sectors over and over, so this number
+         * being high is the point rather than a surprise */
+        kprintf("           %lu of %lu reads answered without the drive "
+                "(%lu%%)\n", c.hits, asked, (c.hits * 100) / asked);
+    }
+    if (c.writes > 0) {
+        kprintf("           %lu writes became %lu trips to the drive\n",
+                c.writes, c.writebacks);
+    }
+
+    kprintf("\ntry: ls, cat welcome.txt, echo something worth keeping "
+            "> /notes.txt\n");
+}
+
+/* what a write-back cache costs, and the thing that pays it back.
+ *
+ * until this returns, the disk does not hold what the machine says it
+ * holds. unix has had this command since 1971 for that reason, and
+ * typing it three times before pulling the plug was folklore long
+ * before it was a joke */
+static void cmd_sync(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    if (!disk_ready()) {
+        kprintf("no disk, so there is nothing anywhere to lose\n");
+        return;
+    }
+    if (!disk_dirty()) {
+        kprintf("nothing waiting -- the disk already holds what I do\n");
+        return;
+    }
+    if (!disk_sync()) {
+        kprintf("the drive refused something. what is on it is not what I "
+                "believe\n");
+        return;
+    }
+    kprintf("written\n");
 }
 
 static void cmd_cd(int argc, char **argv) {
@@ -1241,8 +1284,24 @@ static void cmd_time(int argc, char **argv) {
     kprintf("[%lums]\n", pit_uptime_ms() - start);
 }
 
+/* both of the ways this machine stops have to write first.
+ *
+ * before 0.2.13 a write reached the drive as it was made, so a reboot
+ * lost nothing by definition. it is a cache now, and a reboot that does
+ * not sync throws away whatever had not been written yet -- which on
+ * this machine is usually the file somebody just spent a minute editing */
+static void settle(void) {
+    if (disk_ready() && disk_dirty()) {
+        kprintf("writing what is still in memory...\n");
+        if (!disk_sync()) {
+            kprintf("the drive refused. something is being lost here\n");
+        }
+    }
+}
+
 static void cmd_poweroff(int argc, char **argv) {
     (void)argc; (void)argv;
+    settle();
     system_poweroff();
 }
 
@@ -1260,6 +1319,7 @@ static void cmd_crash(int argc, char **argv) {
 
 static void cmd_reboot(int argc, char **argv) {
     (void)argc; (void)argv;
+    settle();
     reboot();
 }
 
@@ -1281,6 +1341,7 @@ static const struct command commands[] = {
     { "lspci",  "what is plugged into this machine",    cmd_lspci, false, NULL },
     { "slabs",  "the object caches, and what they hold", cmd_slabs, false, NULL },
     { "disk",   "the drive, and the filesystem on it",  cmd_disk, false, NULL },
+    { "sync",   "put what is in memory onto the disk",  cmd_sync, false, NULL },
     { "mount",  "which filesystem is where",            cmd_mount, false, NULL },
     { "cpus",   "the processors, and which are awake",  cmd_cpus, false, NULL },
     { "locks",  "what guards what, and what waits",     cmd_locks, false, NULL },

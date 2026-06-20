@@ -5,6 +5,7 @@
 #include "cpu/interrupts.h"
 #include "sched/spinlock.h"
 #include "drivers/rtc.h"
+#include "fs/bcache.h"
 
 /* the filesystem keeps one sector of scratch and every path through
  * it assumes nobody else is halfway through another. that was a
@@ -52,7 +53,12 @@ bool disk_mount(void) {
         if (!ahci_use_disk(i)) {
             continue;
         }
-        if (fat32_mount(&fs, ahci_read, ahci_write, NULL)) {
+        /* the filesystem is handed the cache rather than the drive.
+         * it was already being handed a way to move sectors and it
+         * still is -- which is the whole reason a cache can be put
+         * here without fat32 knowing anything about it */
+        bcache_init(ahci_read, ahci_write, NULL);
+        if (fat32_mount(&fs, bcache_read, bcache_write, NULL)) {
             fat32_set_clock(&fs, disk_now);
             ready = true;
             return true;
@@ -225,6 +231,42 @@ bool disk_rename(const char *from, const char *to) {
     bool ok = fat32_rename(&fs, below(from), below(to));
     leave(flags);
     return ok;
+}
+
+/* everything the cache is holding, onto the drive.
+ *
+ * takes the disk lock like everything else here, because the cache has
+ * none of its own -- it is protected by this one, and a sync arriving
+ * from a timer or from somebody typing `sync` is the only path into it
+ * that does not already come through a filesystem call */
+bool disk_sync(void) {
+    if (!ready) {
+        return true;    /* nothing to lose */
+    }
+    uint64_t flags = enter();
+    bool ok = bcache_sync();
+    leave(flags);
+    return ok;
+}
+
+bool disk_dirty(void) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool any = bcache_dirty();
+    leave(flags);
+    return any;
+}
+
+void disk_cache_stats(struct bcache_stats *out) {
+    memset(out, 0, sizeof *out);
+    if (!ready) {
+        return;
+    }
+    uint64_t flags = enter();
+    bcache_get_stats(out);
+    leave(flags);
 }
 
 /* ---- what to say about it ------------------------------------------ */

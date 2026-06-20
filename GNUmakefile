@@ -227,7 +227,8 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/keyboard bin/tests/serial \
              bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
              bin/tests/locks bin/tests/path bin/tests/args \
-             bin/tests/shell bin/tests/pipe bin/tests/switch
+             bin/tests/shell bin/tests/pipe bin/tests/bcache \
+             bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
                     kernel/src/sched/spinlock.c
@@ -285,6 +286,8 @@ bin/tests/locks:    LDLIBS = -pthread
 bin/tests/path:     tests/test_path.c     kernel/src/fs/path.c
 bin/tests/pipe:     tests/test_pipe.c     kernel/src/fs/pipe.c \
                     kernel/src/sched/spinlock.c kernel/src/lib/string.c
+bin/tests/bcache:   tests/test_bcache.c   kernel/src/fs/bcache.c \
+                    kernel/src/lib/string.c
 bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c

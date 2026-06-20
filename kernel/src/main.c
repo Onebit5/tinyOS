@@ -129,6 +129,30 @@ static void greet(void) {
 /* the shell runs here rather than on the boot thread, because this
  * stack came from the pmm. that is what lets the boot thread walk away
  * from the loader's stack and lets me hand the loader's memory back */
+/* the disk, kept roughly honest.
+ *
+ * a write-back cache means what is on the drive lags what the machine
+ * believes, and `sync` is how somebody closes that gap on purpose. this
+ * closes it on a timer instead, so the gap has a *size*: a few seconds
+ * of work rather than however long since the last time anybody thought
+ * about it.
+ *
+ * it is not a replacement for sync and does not pretend to be. it turns
+ * "you might lose anything" into "you might lose the last few seconds",
+ * which is the difference between a machine you cannot trust and one
+ * you should still type sync at before pulling the plug */
+#define FLUSH_EVERY_MS 3000
+
+static void flusher_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        sleep_ms(FLUSH_EVERY_MS);
+        if (disk_ready() && disk_dirty()) {
+            (void)disk_sync();
+        }
+    }
+}
+
 static void shell_thread(void *arg) {
     (void)arg;
 
@@ -251,6 +275,14 @@ void kmain(const struct ph_handoff *handoff) {
 
     if (thread_create("shell", shell_thread, NULL) == NULL) {
         panic("no memory for a shell. there is nobody left to talk to");
+    }
+
+    /* and something to keep the disk honest. it does not remove the
+     * need for `sync` -- it bounds what losing power costs, which is a
+     * different and smaller promise */
+    if (thread_create("flusher", flusher_thread, NULL) == NULL) {
+        kprintf("disk       : no flusher thread. `sync` is the only way "
+                "anything reaches the drive\n");
     }
 
     kprintf("threads     : the wheel turns, %ums quantum\n\n",

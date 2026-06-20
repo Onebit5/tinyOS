@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.12** (**demand paging.** stacks that grow, `mmap`, and programs that start without a byte of them having been read)
+**version: 0.2.13** (**a cache between the disk and everything else.** write-back, and `sync` to mean it)
 
 ## what it does
 
@@ -50,6 +50,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] job control: ctrl+z, `fg`, `bg`, `jobs`, and a terminal that talks to groups
 - [x] `fork` with copy on write -- the page fault handler stops being only an error path
 - [x] demand paging: growable stacks, `mmap`, and programs loaded a page at a time
+- [x] a write-back block cache, a flusher, and `sync`
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -158,6 +159,72 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## a cache between the disk and everything else
+
+every read went to the drive, one sector at a time, through a single
+bounce buffer. that is worse than it sounds because of *which* sectors:
+walking a cluster chain reads the same handful of table sectors over and
+over, and listing a directory reads the same entry sector once per name
+in it. the drive was being asked the same question hundreds of times and
+answering it identically.
+
+the cache slots in **exactly where fat32's two function pointers already
+were**:
+
+```c
+bcache_init(ahci_read, ahci_write, NULL);
+fat32_mount(&fs, bcache_read, bcache_write, NULL);
+```
+
+that is the whole reason it could be added without the filesystem
+knowing anything about it. fat32 was handed a way to move sectors, and
+it is still handed a way to move sectors.
+
+`disk` reports the hit rate, which is the only honest measure of whether
+any of it was worth writing.
+
+### write-back is a promise broken on purpose
+
+a written block is marked dirty and stays in memory. the drive finds out
+later — when the block is evicted, when the flusher comes round, or when
+somebody says `sync`. **until one of those, what is on the disk is not
+what the machine believes.**
+
+that is why unix has had `sync` since 1971, and why typing it three
+times before pulling the plug was folklore long before it was a joke.
+here it means:
+
+- `reboot` and `poweroff` sync first. before this, a write reached the
+  drive as it was made, so a reboot lost nothing *by definition*. it is a
+  cache now, and a reboot that skipped the sync would throw away
+  whatever had not been written — which on this machine is usually the
+  file somebody just spent a minute editing.
+- a **flusher thread** syncs every three seconds if anything is dirty.
+  that does not remove the need for `sync` and does not pretend to: it
+  turns "you might lose anything" into "you might lose the last few
+  seconds", which is the difference between a machine you cannot trust
+  and one you should still type `sync` at before pulling the plug.
+
+### two details that are not decoration
+
+**a write covering a whole block does not read it first.** fetching
+bytes that are about to be thrown away is what makes writing a large
+file cost two trips to the drive per block instead of one.
+
+**a partial write must read the block first**, and this is the one that
+goes wrong quietly: overwrite one sector of eight, evict the block, and
+the other seven are gone. nothing above ever finds out.
+
+### the cache has no lock
+
+deliberately, not by omission. every path into it comes through
+`disk.c`, which already holds one lock across the whole of every
+filesystem call — it has to, because fat32 keeps a single sector of
+scratch. a second lock at the same rank taken inside the first is
+exactly what the rank check exists to refuse. the one thing that can
+arrive from elsewhere — a sync, from the flusher or from somebody typing
+it — goes through `disk_sync`, which takes that same lock.
 
 ## demand paging
 
@@ -1622,6 +1689,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.13** — a block cache, slotted exactly where fat32's two function pointers already were, which is the whole reason the filesystem needed no changes at all: it was handed a way to move sectors and it still is. the win is in *which* sectors — walking a cluster chain asks for the same table sectors over and over, and `disk` now prints the hit rate. writes are write-back, which is a promise broken on purpose: until a sync, the disk does not hold what the machine believes. so `reboot` and `poweroff` sync first (before this, a write reached the drive as it was made and a reboot lost nothing by definition), and a flusher thread syncs every three seconds — which does not replace `sync` but turns "you might lose anything" into "you might lose the last few seconds". a whole-block write skips reading the block first, since fetching bytes about to be thrown away doubles the cost of writing a big file; a partial write must not, and that one fails quietly — overwrite one sector of eight, evict, and the other seven are gone. no lock of its own, because everything reaches it through the disk's, and a second lock at the same rank inside the first is what the rank check exists to refuse. writing the tests found something worse than a bug: the shell suite's `reboot` stub called `exit(0)`, so every assertion after it had been vacuous — nothing had tested reboot before, so nothing had noticed the suite was quietly running half of itself.
 - **0.2.12** — demand paging, which is one idea and a lot of consequences: a **record** of which addresses are legitimately empty. without it there is no telling a stack that wants to grow from a program dereferencing nonsense, and a kernel that guesses either kills good programs or conjures memory for bad ones. so every space keeps a table of ranges it agreed to and every not-present fault is answered out of it or not at all. the stack is a megabyte of range with two pages in it — the arguments have to go somewhere before the program starts — and the address below it is nothing, which is the guard page for free: it costs no memory because there is nothing there to cost anything. `mmap` hands out ranges the same way, so asking for four megabytes and using three pages costs three pages; there is a cap on a single ask for exactly that reason, since without one a program could reserve more than the machine has and find out halfway through using it. `elf_describe` returns the segments instead of copying them, so a program starts with none of itself in memory — but only for an image that will still be there when it runs, which is the ramdisk and therefore everything in `/boot/bin`; a disk copy would have to outlive every fork of the program, and that is a lifetime scheme this does not need to be worth having. writing the tests turned up a real bug the hard way: making the fake allocator hand back *poisoned* frames instead of conveniently blank ones showed that `addrspace_create` had never zeroed its region table, so a fresh space started with whatever the slab had in it last — and a garbage region is a record saying a wild pointer is legitimate.
 - **0.2.11** — `fork`, with copy on write, and the page tables were the easy half. two things were not. **the parent's pages have to lose their write bit as well as the child's** — protect only the child and the parent quietly writes through the child's memory, which looks like it works; there is a test that fails on precisely that. and **a forked child has to return from a syscall it never made**, holding everything its parent held — including `rbx`, `rbp` and `r12`–`r15`, which the abi says are the callee's problem and which are therefore in the cpu at the moment of the call and buried under a C prologue a moment later. so the entry stub now writes the whole of ring 3 down on every call and hands the frame to the dispatcher; the child leaves through `fork_return`, which stands on a copy of that frame, zeroes `rax` and `sysret`s. `PTE_COW` is a software bit the cpu ignores, saying the read-only above it is a lie told on purpose — without it a shared page and a genuinely read-only one are indistinguishable at fault time, and the difference between them is copying a page and killing a program. frames gained a one-byte share count; a frame down to its last holder is not copied at all, which is what makes fork-then-exit free. a child inherits descriptors, cwd, uid and its parent's **process group**, that last one because a child outside it is a process no ctrl+c can reach. `gemini` exists to make it visible, since copy on write is invisible when it works.
 - **0.2.10** — job control, and the interesting part was getting stopping wrong first. a `THREAD_STOPPED` state next to `READY` and `BLOCKED` looks right and is not: a suspended thread may *also* be blocked on a pipe, and those answer different questions — what is it waiting for, against may it run at all. one enum for both means a stopped thread forgets it was stopped the moment anything wakes it, so `cat | wc` under ctrl+z would resume itself as soon as you typed. it is an orthogonal flag that `pick_next` skips, which also makes continuing a job one bit rather than a recovery, since it kept whatever it was halfway through. the terminal's front is a process group now rather than a pid — `cat x | grep y | wc -l` is one thing to whoever typed it, and interrupting only the last of three leaves the other two writing into a pipe nobody reads. with no signals, a suspended job announces itself by leaving a note the shell picks up in the poll it was already sitting in: waiting simply gained a second way to finish, and `fg` and `bg` differ by one argument. the job table lives in the shell because the kernel has pids and the shell has the line that was typed; jobs are recorded only when they survive the command (backgrounded or suspended), and anything that finished quietly is reported at the next prompt rather than over the top of whatever is being typed.
