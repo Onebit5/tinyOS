@@ -64,11 +64,14 @@ static void from_disk(struct vfs_file *out, const struct disk_entry *e) {
     copy_name(out->name, e->name);
     out->size = e->size;
     out->is_dir = e->is_dir;
-    out->mode = DISK_MODE;
+    out->mode = e->mode;
     out->cluster = e->cluster;
     out->entry_sector = e->entry_sector;
     out->entry_offset = e->entry_offset;
     out->written = e->written;
+    out->uid = e->uid;
+    out->gid = e->gid;
+    out->is_symlink = e->is_symlink;
 }
 
 /* the disk's copy of a name, if there is a disk and it has one */
@@ -106,7 +109,10 @@ bool vfs_open(const char *path, struct vfs_file *out) {
         out->kind = VFS_DISK;
         copy_name(out->name, "/");
         out->is_dir = true;
-        out->mode = DISK_MODE;
+        /* the root is the place mounts hang from rather than a file on
+         * any of them, so its permissions are the layer's rather than a
+         * filesystem's: anyone may look, nobody may write to it */
+        out->mode = 0555;
         return true;
     }
 
@@ -308,6 +314,53 @@ bool vfs_rmdir(const char *path) {
     return disk_ready() && disk_rmdir(path);
 }
 
+bool vfs_chmod(const char *path, uint32_t mode) {
+    const char *rest;
+    if (path == NULL || path[0] == '\0' || under_boot(path, &rest)) {
+        return false;       /* a tar in read-only memory has no opinions */
+    }
+    return disk_ready() && disk_chmod(path, mode);
+}
+
+bool vfs_chown(const char *path, uint32_t uid, uint32_t gid) {
+    const char *rest;
+    if (path == NULL || path[0] == '\0' || under_boot(path, &rest)) {
+        return false;
+    }
+    return disk_ready() && disk_chown(path, uid, gid);
+}
+
+bool vfs_symlink(const char *path, const char *target) {
+    const char *rest;
+    if (path == NULL || target == NULL || path[0] == '\0'
+        || under_boot(path, &rest)) {
+        return false;
+    }
+    return disk_ready() && disk_symlink(path, target);
+}
+
+bool vfs_readlink(const char *path, char *out, size_t size) {
+    const char *rest;
+    if (path == NULL || under_boot(path, &rest)) {
+        return false;
+    }
+    return disk_ready() && disk_readlink(path, out, size);
+}
+
+bool vfs_open_nofollow(const char *path, struct vfs_file *out) {
+    const char *rest;
+    if (path != NULL && !under_boot(path, &rest) && disk_ready()) {
+        struct disk_entry e;
+        if (disk_lookup_nofollow(path, &e)) {
+            from_disk(out, &e);
+            return true;
+        }
+    }
+    /* not on the disk, or not a disk that has symlinks. the ordinary
+     * lookup is the same question then */
+    return vfs_open(path, out);
+}
+
 bool vfs_unlink(const char *path) {
     const char *rest;
     if (path == NULL || path[0] == '\0' || under_boot(path, &rest)) {
@@ -375,7 +428,25 @@ int64_t vfs_write(struct vfs_file *f, uint64_t offset, const void *buf,
 }
 
 bool vfs_may_read(const struct vfs_file *f, int uid) {
-    return uid == 0 || (f->mode & 0004) != 0;
+    if (uid == 0) {
+        return true;        /* the master may read anything */
+    }
+    if ((uint32_t)uid == f->uid) {
+        return (f->mode & 0400) != 0;
+    }
+    return (f->mode & 0004) != 0;
+
+    /* the owner half of that only became a real question in 0.2.14.
+     * before it, nothing on the disk had an owner -- everything was
+     * root's by decree -- so asking "are you the owner" always had the
+     * same answer and only the last line ever fired. a 0600 file was
+     * therefore unreadable by the person it belonged to, which nobody
+     * noticed because nobody could own anything.
+     *
+     * the group bits are deliberately not consulted. there is no notion
+     * of belonging to a group anywhere in this system, so checking them
+     * would be reading a number nobody ever sets and calling it a
+     * permission */
 }
 
 bool vfs_writable(const struct vfs_file *f) {
@@ -433,7 +504,9 @@ size_t vfs_mount_count(void) {
 bool vfs_mount_at(size_t index, struct vfs_mount *out) {
     if (index == 0) {
         out->at = "/";
-        out->what = "fat32";
+        /* whichever one answered. that this is a question at all is
+         * what 0.2.14 was for */
+        out->what = disk_kind_name();
         out->where = disk_ready() ? disk_model() : "nothing -- no disk found";
         out->writable = true;
         out->present = disk_ready();

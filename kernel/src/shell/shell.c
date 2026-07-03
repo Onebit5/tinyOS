@@ -345,9 +345,17 @@ static void cmd_disk(int argc, char **argv) {
     kprintf("drive      %s\n", disk_model());
     kprintf("capacity   %lu MiB (%lu sectors)\n",
             disk_bytes() / (1024 * 1024), disk_bytes() / AHCI_SECTOR);
-    kprintf("filesystem fat32, labelled \"%s\", mounted at /\n",
-            disk_label());
-    kprintf("clusters   %lu bytes each\n", (uint64_t)disk_cluster_bytes());
+    kprintf("filesystem %s, labelled \"%s\", mounted at /\n",
+            disk_kind_name(), disk_label());
+    if (disk_which() == DISK_FAT32) {
+        kprintf("           (fat records no owners and no permissions, so "
+                "everything on it\n");
+        kprintf("            is 0644 owned by root by decree. an ext2 disk "
+                "answers for itself)\n");
+    }
+    kprintf("%s   %lu bytes each\n",
+            disk_which() == DISK_EXT2 ? "blocks  " : "clusters",
+            (uint64_t)disk_cluster_bytes());
 
     uint64_t used = 0, total = 0;
     if (disk_usage(&used, &total)) {

@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "fs/fat32.h"
+#include "fs/ext2.h"
 #include "fs/bcache.h"
 
 /* the disk, mounted.
@@ -39,7 +40,30 @@ struct disk_entry {
      * six integers would only mean writing a function that converts
      * between two things that are the same */
     struct fat32_time written;
+
+    /* ---- what ext2 can say and fat cannot ----
+     *
+     * on a fat disk these are the mount's answer rather than the
+     * file's, because fat has nowhere to keep them and inventing a
+     * per-file answer would be a lie with a number in it. on an ext2
+     * one they come out of the inode, which is the entire reason 0.2.14
+     * happened */
+    uint32_t mode;              /* permissions, without the type bits */
+    uint32_t uid, gid;
+    bool     is_symlink;
+    uint32_t ino;               /* the identity. 0 where there is none */
 };
+
+/* which filesystem answered. a disk is not a filesystem and the vfs is
+ * finally a layer over more than one of them */
+enum disk_kind {
+    DISK_NONE = 0,
+    DISK_FAT32,
+    DISK_EXT2,
+};
+
+enum disk_kind disk_which(void);
+const char *disk_kind_name(void);
 
 /* find a controller, mount what is on it. safe to call when there is
  * neither */
@@ -80,6 +104,20 @@ bool disk_unlink(const char *path);
 /* give a file another name, possibly in another directory. nothing is
  * copied -- a rename moves a name, not a file */
 bool disk_rename(const char *from, const char *to);
+
+/* ---- the things fat had nowhere to write down -----------------------
+ *
+ * all of these answer false on a fat disk, and say so rather than
+ * pretending to have worked. a filesystem that cannot record an owner
+ * cannot be given one */
+bool disk_chmod(const char *path, uint32_t mode);
+bool disk_chown(const char *path, uint32_t uid, uint32_t gid);
+bool disk_symlink(const char *path, const char *target);
+
+/* where a symlink points, and looking one up *without* following it --
+ * which is what `ls -l` and `rm` want */
+bool disk_readlink(const char *path, char *out, size_t size);
+bool disk_lookup_nofollow(const char *path, struct disk_entry *out);
 
 /* ---- the cache ------------------------------------------------------
  *

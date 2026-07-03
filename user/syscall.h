@@ -35,6 +35,10 @@
 #define SYS_FORK   25
 #define SYS_MMAP   26
 #define SYS_MUNMAP 27
+#define SYS_CHMOD  28
+#define SYS_CHOWN  29
+#define SYS_SYMLINK 30
+#define SYS_READLINK 31
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -150,6 +154,8 @@ struct stat {
     uint64_t size;
     uint32_t mode;
     uint32_t is_dir;
+    uint32_t uid, gid;
+    uint32_t is_symlink;
     uint16_t year;
     uint8_t  month, day, hour, minute, second;
     uint8_t  pad;
@@ -157,6 +163,29 @@ struct stat {
 
 static inline long stat(const char *path, struct stat *out) {
     return syscall3(SYS_STAT, (long)path, (long)ustrlen(path), (long)out);
+}
+
+/* ---- what a filesystem with opinions can be told --------------------
+ *
+ * all of these fail on the ramdisk and on a fat disk, because neither
+ * has anywhere to record the answer. a chmod that quietly did nothing
+ * would be worse than one that says no */
+static inline long chmod(const char *path, long mode) {
+    return syscall3(SYS_CHMOD, (long)path, (long)ustrlen(path), mode);
+}
+static inline long chown(const char *path, long uid, long gid) {
+    return syscall5(SYS_CHOWN, (long)path, (long)ustrlen(path), uid, gid, 0);
+}
+
+/* the target is kept as text and meant wherever it is later read from,
+ * which is the difference between a link and a copy of an answer */
+static inline long symlink(const char *path, const char *target) {
+    return syscall5(SYS_SYMLINK, (long)path, (long)ustrlen(path),
+                    (long)target, (long)ustrlen(target), 0);
+}
+static inline long readlink(const char *path, char *out, long size) {
+    return syscall5(SYS_READLINK, (long)path, (long)ustrlen(path),
+                    (long)out, size, 0);
 }
 
 /* ---- other programs ----------------------------------------------- */

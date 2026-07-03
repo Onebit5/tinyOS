@@ -43,6 +43,7 @@ static const char *const call_names[SYSCALL_COUNT] = {
     "create", "chdir", "getcwd", "mkdir", "rmdir",
     "unlink", "rename", "stat",
     "getkey", "screen", "cursor", "clear", "fork", "mmap", "munmap",
+    "chmod", "chown", "symlink", "readlink",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -452,6 +453,91 @@ static int64_t sys_fork(struct user_regs *regs) {
     return pid;
 }
 
+/* ---- what a filesystem with opinions can be told --------------------
+ *
+ * all of these answer -1 on the ramdisk and on a fat disk, because
+ * neither has anywhere to record the answer. a chmod that quietly did
+ * nothing would be worse than one that refuses */
+static int64_t sys_chmod(uint64_t ptr, uint64_t len, uint64_t mode) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    /* only the owner or the master. otherwise anybody could hand
+     * themselves a file by making it world-writable first */
+    struct vfs_file f;
+    int uid = process_uid(caller_pid());
+    if (!vfs_open_nofollow(path, &f)) {
+        return -1;
+    }
+    if (uid != 0 && (uint32_t)uid != f.uid) {
+        kprintf("[kernel] pid %d (uid %d) does not own that\n",
+                caller_pid(), uid);
+        return -1;
+    }
+    return vfs_chmod(path, (uint32_t)(mode & 0xfff)) ? 0 : -1;
+}
+
+static int64_t sys_chown(uint64_t ptr, uint64_t len, uint64_t uid,
+                         uint64_t gid) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    /* giving a file away is the master's alone. if anybody could, then
+     * a quota is a suggestion and so is an owner */
+    if (process_uid(caller_pid()) != 0) {
+        kprintf("[kernel] pid %d (uid %d) may not give files away\n",
+                caller_pid(), process_uid(caller_pid()));
+        return -1;
+    }
+    return vfs_chown(path, (uint32_t)uid, (uint32_t)gid) ? 0 : -1;
+}
+
+static int64_t sys_symlink(uint64_t ptr, uint64_t len, uint64_t tptr,
+                           uint64_t tlen) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    if (tlen == 0 || tlen >= PATH_MAX || !user_range_ok(tptr, tlen)) {
+        return -1;
+    }
+    /* the target is *not* resolved. a symlink holds whatever text it
+     * was given and means it wherever it is later read from, which is
+     * the difference between a link and a copy of an answer */
+    char target[PATH_MAX];
+    memcpy(target, (const void *)tptr, tlen);
+    target[tlen] = '\0';
+
+    if (process_uid(caller_pid()) != 0) {
+        return -1;
+    }
+    return vfs_symlink(path, target) ? 0 : -1;
+}
+
+static int64_t sys_readlink(uint64_t ptr, uint64_t len, uint64_t out_ptr,
+                            uint64_t out_size) {
+    char path[PATH_MAX];
+    if (!copy_path_resolved(ptr, len, path, sizeof path)) {
+        return -1;
+    }
+    if (out_size == 0 || !user_range_ok(out_ptr, out_size)) {
+        return -1;
+    }
+    char target[PATH_MAX];
+    if (!vfs_readlink(path, target, sizeof target)) {
+        return -1;
+    }
+    uint64_t n = strlen(target);
+    if (n >= out_size) {
+        n = out_size - 1;
+    }
+    memcpy((void *)out_ptr, target, n);
+    ((char *)out_ptr)[n] = '\0';
+    return (int64_t)n;
+}
+
 /* ---- memory a program asked for -------------------------------------
  *
  * everything a program had until now was decided before it started: its
@@ -713,8 +799,11 @@ static int64_t sys_stat(uint64_t ptr, uint64_t len, uint64_t out_ptr) {
         return -1;
     }
 
+    /* without following a symlink at the end. `ls -l` wants the link
+     * rather than what it points at, and so does anything about to
+     * remove one */
     struct vfs_file f;
-    if (!vfs_open(path, &f)) {
+    if (!vfs_open_nofollow(path, &f)) {
         return -1;
     }
     if (!vfs_may_read(&f, process_uid(caller_pid()))) {
@@ -726,6 +815,9 @@ static int64_t sys_stat(uint64_t ptr, uint64_t len, uint64_t out_ptr) {
     st.size = f.size;
     st.mode = f.mode;
     st.is_dir = f.is_dir ? 1 : 0;
+    st.uid = f.uid;
+    st.gid = f.gid;
+    st.is_symlink = f.is_symlink ? 1 : 0;
     st.year = f.written.year;
     st.month = f.written.month;
     st.day = f.written.day;
@@ -895,6 +987,14 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_mmap(a0);
     case SYS_MUNMAP:
         return sys_munmap(a0);
+    case SYS_CHMOD:
+        return sys_chmod(a0, a1, a2);
+    case SYS_CHOWN:
+        return sys_chown(a0, a1, a2, a3);
+    case SYS_SYMLINK:
+        return sys_symlink(a0, a1, a2, a3);
+    case SYS_READLINK:
+        return sys_readlink(a0, a1, a2, a3);
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

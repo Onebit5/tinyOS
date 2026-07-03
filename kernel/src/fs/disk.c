@@ -12,8 +12,25 @@
  * promise of a race rather than a race, and this is it being kept */
 static struct spinlock disk_lock = SPINLOCK("disk", LOCK_RANK_DEVICE);
 
-static struct fat32 fs;
+/* one of these is live at a time, and `kind` says which. two
+ * filesystems behind one set of calls is what "the vfs has two things
+ * to be a layer over" means in practice -- and the interesting part is
+ * how much of what is above this did not have to change at all */
+static struct fat32 fat;
+static struct ext2 ext;
+static enum disk_kind kind;
 static bool ready;
+
+/* ext2 keeps seconds since 1970; fat keeps a broken-down date. the
+ * clock the machine has is broken-down, so this is the other direction */
+static uint32_t ext2_now(void) {
+    struct fat32_time t;
+    struct rtc_time r;
+    rtc_read(&r);
+    t.year = r.year; t.month = r.month; t.day = r.day;
+    t.hour = r.hour; t.minute = r.minute; t.second = r.second;
+    return ext2_time_to_unix(&t);
+}
 
 /* the filesystem keeps one sector of scratch and every path through it
  * assumes nobody else is halfway through another. two threads reading
@@ -38,8 +55,19 @@ static void disk_now(struct fat32_time *out) {
 
 bool disk_ready(void) { return ready; }
 
+enum disk_kind disk_which(void) { return ready ? kind : DISK_NONE; }
+
+const char *disk_kind_name(void) {
+    switch (disk_which()) {
+    case DISK_EXT2:  return "ext2";
+    case DISK_FAT32: return "fat32";
+    default:         return "none";
+    }
+}
+
 bool disk_mount(void) {
     ready = false;
+    kind = DISK_NONE;
     if (!ahci_init()) {
         return false;
     }
@@ -58,8 +86,19 @@ bool disk_mount(void) {
          * still is -- which is the whole reason a cache can be put
          * here without fat32 knowing anything about it */
         bcache_init(ahci_read, ahci_write, NULL);
-        if (fat32_mount(&fs, bcache_read, bcache_write, NULL)) {
-            fat32_set_clock(&fs, disk_now);
+
+        /* ext2 first, because it is the one that can answer every
+         * question. a disk with neither simply fails to mount and the
+         * next drive gets a go */
+        if (ext2_mount(&ext, bcache_read, bcache_write, NULL)) {
+            ext2_set_clock(&ext, ext2_now);
+            kind = DISK_EXT2;
+            ready = true;
+            return true;
+        }
+        if (fat32_mount(&fat, bcache_read, bcache_write, NULL)) {
+            fat32_set_clock(&fat, disk_now);
+            kind = DISK_FAT32;
             ready = true;
             return true;
         }
@@ -78,19 +117,49 @@ static const char *below(const char *path) {
     return path;
 }
 
-static void fill(struct disk_entry *out, const struct fat32_file *f) {
+static void copy_name(char *dst, const char *src) {
     size_t i = 0;
-    while (f->name[i] != '\0' && i < DISK_NAME_MAX - 1) {
-        out->name[i] = f->name[i];
+    while (src[i] != '\0' && i < DISK_NAME_MAX - 1) {
+        dst[i] = src[i];
         i++;
     }
-    out->name[i] = '\0';
+    dst[i] = '\0';
+}
+
+static void fill(struct disk_entry *out, const struct fat32_file *f) {
+    memset(out, 0, sizeof *out);
+    copy_name(out->name, f->name);
     out->size = f->size;
     out->cluster = f->first_cluster;
     out->is_dir = f->is_dir;
     out->entry_sector = f->entry_sector;
     out->entry_offset = f->entry_offset;
     out->written = f->written;
+
+    /* fat records no ownership and no permissions. rather than invent
+     * some per file, everything on it takes the mount's -- which is
+     * what 0.1.11 decided and what 0.2.14 exists to stop having to */
+    out->mode = 0644;
+    out->uid = 0;
+    out->gid = 0;
+}
+
+static void fill_ext2(struct disk_entry *out, const struct ext2_file *f) {
+    memset(out, 0, sizeof *out);
+    copy_name(out->name, f->name);
+    out->size = f->size;
+    out->is_dir = f->is_dir;
+    out->is_symlink = f->is_symlink;
+    out->written = f->modified;
+    out->mode = f->mode & 0xfff;
+    out->uid = f->uid;
+    out->gid = f->gid;
+    out->ino = f->ino;
+
+    /* an ext2 file is named by its inode rather than by where its
+     * directory entry happens to sit, so `cluster` carries the inode
+     * and the two `entry_` fields have nothing to say */
+    out->cluster = f->ino;
 }
 
 
@@ -101,11 +170,49 @@ bool disk_lookup(const char *path, struct disk_entry *out) {
         return false;
     }
     uint64_t flags = enter();
-    struct fat32_file f;
-    bool ok = fat32_lookup(&fs, below(path), &f);
-    if (ok) {
-        fill(out, &f);
+    bool ok;
+    if (kind == DISK_EXT2) {
+        struct ext2_file f;
+        ok = ext2_lookup(&ext, below(path), &f);
+        if (ok) fill_ext2(out, &f);
+    } else {
+        struct fat32_file f;
+        ok = fat32_lookup(&fat, below(path), &f);
+        if (ok) fill(out, &f);
     }
+    leave(flags);
+    return ok;
+}
+
+bool disk_lookup_nofollow(const char *path, struct disk_entry *out) {
+    if (!ready) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok;
+    if (kind == DISK_EXT2) {
+        struct ext2_file f;
+        ok = ext2_lookup_nofollow(&ext, below(path), &f);
+        if (ok) fill_ext2(out, &f);
+    } else {
+        /* fat has no symlinks, so there is nothing a lookup could
+         * follow and this is the same question */
+        struct fat32_file f;
+        ok = fat32_lookup(&fat, below(path), &f);
+        if (ok) fill(out, &f);
+    }
+    leave(flags);
+    return ok;
+}
+
+bool disk_readlink(const char *path, char *out, size_t size) {
+    if (!ready || kind != DISK_EXT2) {
+        return false;
+    }
+    uint64_t flags = enter();
+    struct ext2_file f;
+    bool ok = ext2_lookup_nofollow(&ext, below(path), &f)
+           && ext2_readlink(&ext, &f, out, size);
     leave(flags);
     return ok;
 }
@@ -116,13 +223,22 @@ bool disk_readdir(const char *path, size_t index, struct disk_entry *out) {
     }
     uint64_t flags = enter();
 
-    struct fat32_file dir;
-    bool ok = fat32_lookup(&fs, below(path), &dir) && dir.is_dir;
-    if (ok) {
-        struct fat32_file f;
-        ok = fat32_readdir(&fs, dir.first_cluster, index, &f);
+    bool ok;
+    if (kind == DISK_EXT2) {
+        struct ext2_file dir;
+        ok = ext2_lookup(&ext, below(path), &dir) && dir.is_dir;
         if (ok) {
-            fill(out, &f);
+            struct ext2_file f;
+            ok = ext2_readdir(&ext, dir.ino, index, &f);
+            if (ok) fill_ext2(out, &f);
+        }
+    } else {
+        struct fat32_file dir;
+        ok = fat32_lookup(&fat, below(path), &dir) && dir.is_dir;
+        if (ok) {
+            struct fat32_file f;
+            ok = fat32_readdir(&fat, dir.first_cluster, index, &f);
+            if (ok) fill(out, &f);
         }
     }
 
@@ -137,15 +253,25 @@ int64_t disk_read(uint32_t cluster, uint64_t size, uint64_t offset,
     }
     uint64_t flags = enter();
 
-    /* a descriptor remembers where a file starts and how big it is,
-     * which is all fat32_read needs to find any byte of it */
-    struct fat32_file f;
-    memset(&f, 0, sizeof f);
-    f.first_cluster = cluster;
-    f.size = (uint32_t)size;
-    f.is_dir = false;
-
-    int64_t n = fat32_read(&fs, &f, offset, buf, len);
+    int64_t n;
+    if (kind == DISK_EXT2) {
+        /* on ext2 a descriptor remembers the inode number, which is
+         * the file's identity rather than a place on the disk */
+        struct ext2_file f;
+        memset(&f, 0, sizeof f);
+        f.ino = cluster;
+        f.size = size;
+        n = ext2_read(&ext, &f, offset, buf, len);
+    } else {
+        /* a fat descriptor remembers where the file starts and how big
+         * it is, which is all fat32_read needs to find any byte of it */
+        struct fat32_file f;
+        memset(&f, 0, sizeof f);
+        f.first_cluster = cluster;
+        f.size = (uint32_t)size;
+        f.is_dir = false;
+        n = fat32_read(&fat, &f, offset, buf, len);
+    }
     leave(flags);
     return n;
 }
@@ -155,10 +281,15 @@ bool disk_create(const char *path, struct disk_entry *out) {
         return false;
     }
     uint64_t flags = enter();
-    struct fat32_file f;
-    bool ok = fat32_create(&fs, below(path), &f);
-    if (ok) {
-        fill(out, &f);
+    bool ok;
+    if (kind == DISK_EXT2) {
+        struct ext2_file f;
+        ok = ext2_create(&ext, below(path), 0644, 0, 0, &f);
+        if (ok) fill_ext2(out, &f);
+    } else {
+        struct fat32_file f;
+        ok = fat32_create(&fat, below(path), &f);
+        if (ok) fill(out, &f);
     }
     leave(flags);
     return ok;
@@ -166,7 +297,23 @@ bool disk_create(const char *path, struct disk_entry *out) {
 
 int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
                       uint64_t len) {
-    if (!ready || e->is_dir || e->entry_sector == 0) {
+    if (!ready || e->is_dir) {
+        return -1;
+    }
+    if (kind == DISK_EXT2) {
+        uint64_t flags = enter();
+        struct ext2_file f;
+        memset(&f, 0, sizeof f);
+        f.ino = e->cluster;
+        f.size = e->size;
+        int64_t n = ext2_write(&ext, &f, offset, buf, len);
+        if (n > 0) {
+            e->size = f.size;
+        }
+        leave(flags);
+        return n;
+    }
+    if (e->entry_sector == 0) {
         return -1;
     }
     uint64_t flags = enter();
@@ -183,7 +330,7 @@ int64_t disk_write_at(struct disk_entry *e, uint64_t offset, const void *buf,
     f.entry_sector = e->entry_sector;
     f.entry_offset = e->entry_offset;
 
-    int64_t n = fat32_write(&fs, &f, offset, buf, len);
+    int64_t n = fat32_write(&fat, &f, offset, buf, len);
     if (n > 0) {
         e->size = f.size;
         e->cluster = f.first_cluster;
@@ -198,7 +345,8 @@ bool disk_mkdir(const char *path) {
         return false;
     }
     uint64_t flags = enter();
-    bool ok = fat32_mkdir(&fs, below(path));
+    bool ok = (kind == DISK_EXT2) ? ext2_mkdir(&ext, below(path), 0755, 0, 0)
+                                  : fat32_mkdir(&fat, below(path));
     leave(flags);
     return ok;
 }
@@ -208,7 +356,8 @@ bool disk_rmdir(const char *path) {
         return false;
     }
     uint64_t flags = enter();
-    bool ok = fat32_rmdir(&fs, below(path));
+    bool ok = (kind == DISK_EXT2) ? ext2_rmdir(&ext, below(path))
+                                  : fat32_rmdir(&fat, below(path));
     leave(flags);
     return ok;
 }
@@ -218,7 +367,8 @@ bool disk_unlink(const char *path) {
         return false;
     }
     uint64_t flags = enter();
-    bool ok = fat32_unlink(&fs, below(path));
+    bool ok = (kind == DISK_EXT2) ? ext2_unlink(&ext, below(path))
+                                  : fat32_unlink(&fat, below(path));
     leave(flags);
     return ok;
 }
@@ -228,7 +378,45 @@ bool disk_rename(const char *from, const char *to) {
         return false;
     }
     uint64_t flags = enter();
-    bool ok = fat32_rename(&fs, below(from), below(to));
+    bool ok = (kind == DISK_EXT2)
+            ? ext2_rename(&ext, below(from), below(to))
+            : fat32_rename(&fat, below(from), below(to));
+    leave(flags);
+    return ok;
+}
+
+/* ---- the things fat had nowhere to write down ----------------------
+ *
+ * all three answer false on a fat disk, and say so rather than
+ * pretending. a filesystem that cannot record an owner cannot be given
+ * one, and a chmod that silently did nothing would be worse than a
+ * chmod that refuses */
+bool disk_chmod(const char *path, uint32_t mode) {
+    if (!ready || kind != DISK_EXT2) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok = ext2_chmod(&ext, below(path), mode);
+    leave(flags);
+    return ok;
+}
+
+bool disk_chown(const char *path, uint32_t uid, uint32_t gid) {
+    if (!ready || kind != DISK_EXT2) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok = ext2_chown(&ext, below(path), uid, gid);
+    leave(flags);
+    return ok;
+}
+
+bool disk_symlink(const char *path, const char *target) {
+    if (!ready || kind != DISK_EXT2) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool ok = ext2_symlink(&ext, below(path), target, 0, 0);
     leave(flags);
     return ok;
 }
@@ -271,15 +459,28 @@ void disk_cache_stats(struct bcache_stats *out) {
 
 /* ---- what to say about it ------------------------------------------ */
 
-const char *disk_label(void) { return ready ? fs.label : ""; }
+const char *disk_label(void) {
+    if (!ready) {
+        return "";
+    }
+    return (kind == DISK_EXT2) ? ext.label : fat.label;
+}
+
 const char *disk_model(void) { return ahci_model(); }
 
 uint64_t disk_bytes(void) {
     return ahci_sectors() * AHCI_SECTOR;
 }
 
+/* ext2 calls them blocks and fat calls them clusters. they are the same
+ * idea -- the smallest thing the filesystem allocates -- so this is one
+ * question with two names for it */
 uint32_t disk_cluster_bytes(void) {
-    return ready ? fat32_cluster_bytes(&fs) : 0;
+    if (!ready) {
+        return 0;
+    }
+    return (kind == DISK_EXT2) ? ext2_block_bytes(&ext)
+                               : fat32_cluster_bytes(&fat);
 }
 
 bool disk_usage(uint64_t *used_bytes, uint64_t *total_bytes) {
@@ -287,14 +488,20 @@ bool disk_usage(uint64_t *used_bytes, uint64_t *total_bytes) {
         return false;
     }
     uint64_t flags = enter();
-    uint32_t used, total;
-    bool ok = fat32_usage(&fs, &used, &total);
-    leave(flags);
+    bool ok;
 
-    if (ok) {
-        uint64_t per = fat32_cluster_bytes(&fs);
-        *used_bytes = (uint64_t)used * per;
-        *total_bytes = (uint64_t)total * per;
+    if (kind == DISK_EXT2) {
+        ok = ext2_usage(&ext, used_bytes, total_bytes);
+    } else {
+        uint32_t used, total;
+        ok = fat32_usage(&fat, &used, &total);
+        if (ok) {
+            uint64_t per = fat32_cluster_bytes(&fat);
+            *used_bytes = (uint64_t)used * per;
+            *total_bytes = (uint64_t)total * per;
+        }
     }
+
+    leave(flags);
     return ok;
 }

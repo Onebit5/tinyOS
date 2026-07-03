@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.13** (**a cache between the disk and everything else.** write-back, and `sync` to mean it)
+**version: 0.2.14** (**a filesystem with opinions.** ext2, read and written -- so a file can finally have an owner)
 
 ## what it does
 
@@ -51,6 +51,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] `fork` with copy on write -- the page fault handler stops being only an error path
 - [x] demand paging: growable stacks, `mmap`, and programs loaded a page at a time
 - [x] a write-back block cache, a flusher, and `sync`
+- [x] ext2, read and written: owners, permissions, symlinks, real timestamps
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -159,6 +160,92 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## a filesystem with opinions
+
+fat records no ownership and no permissions. that is not an oversight in
+fat, it is what fat is *for* — but it meant everything on the disk here
+was 0644 owned by root **by decree**, and `chmod` had nowhere to write
+an answer. so: ext2, read and written.
+
+### one sentence is the whole difference
+
+**in fat, a file *is* its directory entry. in ext2, a name and a file
+are different objects.**
+
+everything else follows from that. a directory entry points at an
+*inode*, and the inode holds the mode, the owner, the size and the
+times. so permissions belong to the file rather than to the name; so a
+file can have more than one name; so renaming moves a name and nothing
+else; and so `chmod` has somewhere to put its answer.
+
+```c
+struct ext2_file {
+    uint32_t ino;               /* the identity */
+    uint32_t mode;
+    uint32_t uid, gid;
+    ...
+};
+```
+
+twelve of the inode's fifteen block numbers are the first twelve blocks.
+the thirteenth points at a block *of block numbers*, the fourteenth at a
+block of those, the fifteenth one deeper again — so a small file costs
+nothing extra and a large one costs a walk. that was the trade every
+filesystem of the era made, and it is the reason ext4 has extents.
+
+### there is no e2fsck on this machine
+
+which matters more than it sounds. the formatter and the driver would
+otherwise be two programs by one author agreeing with each other, and
+that is not a check, it is an echo. this project has been caught by
+exactly that before: `mkfat.py` and the fat32 parser agreed on a cluster
+count that was wrong, and only a separately written reader found it.
+
+so `tools/readext2.py` is written from the on-disk layout — it imports
+nothing from the formatter and shares no line with the driver — and the
+test target runs it **after** the test suite has finished writing to the
+image. what it checks is therefore not what the formatter produced but
+what the *driver wrote*:
+
+```
+  ext2       ok
+  fsck       ok
+```
+
+it earned its place immediately. before the driver existed it found that
+every subdirectory was being built as though it were the root, and that
+a **fast symlink** — one short enough to be stored *in* its own block
+pointers — was having its target walked as a list of block numbers. that
+second one is the single sharpest edge in the format, and the driver
+would have hit it too.
+
+### two filesystems, one layer
+
+`disk.c` tries ext2 and then fat32, and everything above it changed
+almost not at all — which is the point of having had a vfs since 0.1.11.
+`disk` says which one answered, and a fat disk says plainly that it is
+the one that cannot record an owner.
+
+### what the new capability exposed
+
+`vfs_may_read` only ever checked the *other* read bits. that was fine
+while nothing had an owner — everything on the disk was root's, so "are
+you the owner" always had the same answer and the owner branch never
+fired. the moment files could be owned, a 0600 file was unreadable **by
+the person it belonged to**. group bits are still deliberately not
+consulted: there is no notion of belonging to a group anywhere here, and
+checking a number nobody sets and calling it a permission would be
+worse than not checking it.
+
+```
+igor@velvet# ls -l
+  -rw-r--r--    0       45  2026-03-01  14:30  hello.txt
+  lrwxrwxrwx    0        - 2026-03-01  14:30  shortcut -> notes/deep.txt
+igor@velvet# chmod 600 hello.txt
+igor@velvet# chown 1000 hello.txt
+igor@velvet# ln -s hello.txt greeting
+```
 
 ## a cache between the disk and everything else
 
@@ -1689,6 +1776,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.14** — ext2, read and written: superblock, block groups, bitmaps, inodes, and the twelve-direct-then-indirect block map every unix filesystem of the era used. the whole difference from fat is one sentence — in fat a file *is* its directory entry, and here a name and a file are different objects — and everything else follows: permissions belong to the file rather than the name, a rename moves nothing, and `chmod` finally has somewhere to write an answer. there is no e2fsck on this machine, so the formatter and the driver would have been two programs by one author agreeing with each other; `tools/readext2.py` is written from the on-disk layout and run by the test target *after* the suite has finished writing, so what it validates is what the driver wrote. it found two real bugs before the driver even existed: every subdirectory was being built as though it were the root, and a fast symlink — one stored *in* its own block pointers — was having its target walked as block numbers, which is the sharpest edge in the format. `disk.c` mounts ext2 or fat32 and almost nothing above it changed, which is what having a vfs since 0.1.11 was for. and the new capability exposed an old bug: `vfs_may_read` only ever checked the *other* bits, which was invisible while nothing had an owner and made a 0600 file unreadable by its owner the moment anything did.
 - **0.2.13** — a block cache, slotted exactly where fat32's two function pointers already were, which is the whole reason the filesystem needed no changes at all: it was handed a way to move sectors and it still is. the win is in *which* sectors — walking a cluster chain asks for the same table sectors over and over, and `disk` now prints the hit rate. writes are write-back, which is a promise broken on purpose: until a sync, the disk does not hold what the machine believes. so `reboot` and `poweroff` sync first (before this, a write reached the drive as it was made and a reboot lost nothing by definition), and a flusher thread syncs every three seconds — which does not replace `sync` but turns "you might lose anything" into "you might lose the last few seconds". a whole-block write skips reading the block first, since fetching bytes about to be thrown away doubles the cost of writing a big file; a partial write must not, and that one fails quietly — overwrite one sector of eight, evict, and the other seven are gone. no lock of its own, because everything reaches it through the disk's, and a second lock at the same rank inside the first is what the rank check exists to refuse. writing the tests found something worse than a bug: the shell suite's `reboot` stub called `exit(0)`, so every assertion after it had been vacuous — nothing had tested reboot before, so nothing had noticed the suite was quietly running half of itself.
 - **0.2.12** — demand paging, which is one idea and a lot of consequences: a **record** of which addresses are legitimately empty. without it there is no telling a stack that wants to grow from a program dereferencing nonsense, and a kernel that guesses either kills good programs or conjures memory for bad ones. so every space keeps a table of ranges it agreed to and every not-present fault is answered out of it or not at all. the stack is a megabyte of range with two pages in it — the arguments have to go somewhere before the program starts — and the address below it is nothing, which is the guard page for free: it costs no memory because there is nothing there to cost anything. `mmap` hands out ranges the same way, so asking for four megabytes and using three pages costs three pages; there is a cap on a single ask for exactly that reason, since without one a program could reserve more than the machine has and find out halfway through using it. `elf_describe` returns the segments instead of copying them, so a program starts with none of itself in memory — but only for an image that will still be there when it runs, which is the ramdisk and therefore everything in `/boot/bin`; a disk copy would have to outlive every fork of the program, and that is a lifetime scheme this does not need to be worth having. writing the tests turned up a real bug the hard way: making the fake allocator hand back *poisoned* frames instead of conveniently blank ones showed that `addrspace_create` had never zeroed its region table, so a fresh space started with whatever the slab had in it last — and a garbage region is a record saying a wild pointer is legitimate.
 - **0.2.11** — `fork`, with copy on write, and the page tables were the easy half. two things were not. **the parent's pages have to lose their write bit as well as the child's** — protect only the child and the parent quietly writes through the child's memory, which looks like it works; there is a test that fails on precisely that. and **a forked child has to return from a syscall it never made**, holding everything its parent held — including `rbx`, `rbp` and `r12`–`r15`, which the abi says are the callee's problem and which are therefore in the cpu at the moment of the call and buried under a C prologue a moment later. so the entry stub now writes the whole of ring 3 down on every call and hands the frame to the dispatcher; the child leaves through `fork_return`, which stands on a copy of that frame, zeroes `rax` and `sysret`s. `PTE_COW` is a software bit the cpu ignores, saying the read-only above it is a lie told on purpose — without it a shared page and a genuinely read-only one are indistinguishable at fault time, and the difference between them is copying a page and killing a program. frames gained a one-byte share count; a frame down to its last holder is not copied at all, which is what makes fork-then-exit free. a child inherits descriptors, cwd, uid and its parent's **process group**, that last one because a child outside it is a process no ctrl+c can reach. `gemini` exists to make it visible, since copy on write is invisible when it works.

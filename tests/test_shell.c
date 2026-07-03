@@ -103,6 +103,27 @@ bool disk_create(const char *path, struct disk_entry *out) {
 bool disk_mkdir(const char *path) { (void)path; return true; }
 bool disk_rmdir(const char *path) { (void)path; return true; }
 bool disk_unlink(const char *path) { (void)path; return true; }
+/* the things a filesystem with opinions can be told. every one of them
+ * answers false on a disk that has nowhere to record the answer, which
+ * is what the stub is standing in for here */
+bool disk_lookup_nofollow(const char *path, struct disk_entry *out) {
+    return disk_lookup(path, out);
+}
+bool disk_readlink(const char *p, char *o, size_t n) {
+    (void)p; (void)o; (void)n; return false;
+}
+bool disk_chmod(const char *p, uint32_t m) { (void)p; (void)m; return false; }
+/* which filesystem answered. the stub disk is not either of the real
+ * ones, and saying so is more honest than picking a name */
+const char *disk_kind_name(void) { return "stub"; }
+enum disk_kind disk_which(void) { return DISK_FAT32; }
+bool disk_chown(const char *p, uint32_t u, uint32_t g) {
+    (void)p; (void)u; (void)g; return false;
+}
+bool disk_symlink(const char *p, const char *t) {
+    (void)p; (void)t; return false;
+}
+
 bool disk_rename(const char *from, const char *to) {
     (void)from; (void)to; return true;
 }

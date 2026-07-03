@@ -40,14 +40,19 @@ static bool have_disk = true;
 static const char disk_welcome[] = "the disk's copy\n";
 static const char disk_notes[]   = "notes on the disk\n";
 
+/* a filesystem that has opinions about its own files. before 0.2.14
+ * the vfs decreed 0644 owned by root for everything on the disk,
+ * because fat has nowhere to record anything else -- now it asks, and
+ * these are the answers */
 static const struct {
     const char *path, *dir, *name, *body;
     bool is_dir;
+    unsigned mode, uid;
 } disk_tree[] = {
-    { "/welcome.txt", "/", "welcome.txt", disk_welcome, false },
-    { "/notes.txt",   "/", "notes.txt",   disk_notes,   false },
-    { "/deep",        "/", "deep",        NULL,         true  },
-    { "/deep/x.txt",  "/deep", "x.txt",   "nested\n",   false },
+    { "/welcome.txt", "/", "welcome.txt", disk_welcome, false, 0644, 0 },
+    { "/notes.txt",   "/", "notes.txt",   disk_notes,   false, 0644, 0 },
+    { "/deep",        "/", "deep",        NULL,         true,  0755, 0 },
+    { "/deep/x.txt",  "/deep", "x.txt",   "nested\n",   false, 0600, 1000 },
 };
 #define DISK_COUNT (sizeof disk_tree / sizeof disk_tree[0])
 
@@ -72,6 +77,8 @@ bool disk_lookup(const char *path, struct disk_entry *out) {
         out->size = disk_tree[i].body ? strlen(disk_tree[i].body) : 0;
         out->cluster = (uint32_t)(i + 2);
         out->entry_sector = 100 + i;
+        out->mode = disk_tree[i].mode;
+        out->uid = disk_tree[i].uid;
         return true;
     }
     return false;
@@ -89,6 +96,8 @@ bool disk_readdir(const char *path, size_t index, struct disk_entry *out) {
         out->is_dir = disk_tree[i].is_dir;
         out->size = disk_tree[i].body ? strlen(disk_tree[i].body) : 0;
         out->cluster = (uint32_t)(i + 2);
+        out->mode = disk_tree[i].mode;
+        out->uid = disk_tree[i].uid;
         return true;
     }
     return false;
@@ -128,6 +137,27 @@ static int mkdirs, rmdirs, unlinks, renames;
 bool disk_mkdir(const char *path) { (void)path; mkdirs++; return have_disk; }
 bool disk_rmdir(const char *path) { (void)path; rmdirs++; return have_disk; }
 bool disk_unlink(const char *path) { (void)path; unlinks++; return have_disk; }
+/* the things a filesystem with opinions can be told. every one of them
+ * answers false on a disk that has nowhere to record the answer, which
+ * is what the stub is standing in for here */
+bool disk_lookup_nofollow(const char *path, struct disk_entry *out) {
+    return disk_lookup(path, out);
+}
+bool disk_readlink(const char *p, char *o, size_t n) {
+    (void)p; (void)o; (void)n; return false;
+}
+bool disk_chmod(const char *p, uint32_t m) { (void)p; (void)m; return false; }
+/* which filesystem answered. the stub disk is not either of the real
+ * ones, and saying so is more honest than picking a name */
+const char *disk_kind_name(void) { return "stub"; }
+enum disk_kind disk_which(void) { return DISK_FAT32; }
+bool disk_chown(const char *p, uint32_t u, uint32_t g) {
+    (void)p; (void)u; (void)g; return false;
+}
+bool disk_symlink(const char *p, const char *t) {
+    (void)p; (void)t; return false;
+}
+
 bool disk_rename(const char *from, const char *to) {
     (void)from; (void)to; renames++; return have_disk;
 }
@@ -297,10 +327,24 @@ int main(void) {
     CHECK(vfs_open("/boot/welcome.txt", &f) && vfs_may_read(&f, 1000),
           "a 0644 file is readable by anyone");
 
-    /* files on the disk have no permissions of their own -- fat has
-     * never had any -- so they take the mount's */
+    /* until 0.2.14 every file on the disk was 0644 owned by root by
+     * decree, because fat has nowhere to record anything else. now the
+     * filesystem answers for itself, and two files on one disk can
+     * disagree -- which is the entire point of that version */
     CHECK(vfs_open("/welcome.txt", &f) && vfs_may_read(&f, 1000),
-          "anyone may read the disk");
+          "a 0644 file on the disk is readable by anyone");
+    CHECK(vfs_open("/welcome.txt", &f) && f.mode == 0644,
+          "with the mode the filesystem gave it rather than one I decreed");
+
+    CHECK(vfs_open("/deep/x.txt", &f), "and a 0600 one is found");
+    CHECK(f.mode == 0600 && f.uid == 1000,
+          "with its own mode and its own owner");
+    CHECK(!vfs_may_read(&f, 1000) ? false : true,
+          "readable by whoever owns it");
+    CHECK(!vfs_may_read(&f, 2000),
+          "and not by somebody else -- a sentence the disk could not say "
+          "at all before there was a filesystem to say it in");
+    CHECK(vfs_may_read(&f, 0), "though the master may read anything");
 
     /* ---- writing ---- */
 

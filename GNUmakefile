@@ -109,7 +109,8 @@ USER_PROGS := ramdisk/bin/hello ramdisk/bin/counter ramdisk/bin/fail \
               ramdisk/bin/mkdir ramdisk/bin/rmdir \
               ramdisk/bin/rm ramdisk/bin/cp ramdisk/bin/mv ramdisk/bin/touch \
               ramdisk/bin/head ramdisk/bin/wc ramdisk/bin/grep ramdisk/bin/sort \
-              ramdisk/bin/margaret ramdisk/bin/gemini \
+              ramdisk/bin/margaret ramdisk/bin/gemini ramdisk/bin/chmod \
+              ramdisk/bin/chown ramdisk/bin/ln \
               ramdisk/bin/tartarus
 
 # every program links the argument parser, so that what a program takes
@@ -199,8 +200,13 @@ run: $(BOOTIMG) $(DISK)
 # starts over when you want a clean one
 DISK := disk.img
 
-$(DISK): tools/mkfat.py $(shell find diskroot -type f 2>/dev/null)
-	@python3 tools/mkfat.py $@ diskroot 64
+# ext2 since 0.2.14, because it is the one that can record who owns
+# what. mkfat.py is still here and the kernel still mounts what it
+# makes -- swap the line below and everything works, one filesystem
+# poorer, which is the point of the vfs having two of them to be a
+# layer over
+$(DISK): tools/mkext2.py $(shell find diskroot -type f 2>/dev/null)
+	@python3 tools/mkext2.py $@ diskroot 64
 
 .PHONY: disk
 disk:
@@ -228,7 +234,7 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
              bin/tests/locks bin/tests/path bin/tests/args \
              bin/tests/shell bin/tests/pipe bin/tests/bcache \
-             bin/tests/switch
+             bin/tests/ext2 bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
                     kernel/src/sched/spinlock.c
@@ -288,6 +294,8 @@ bin/tests/pipe:     tests/test_pipe.c     kernel/src/fs/pipe.c \
                     kernel/src/sched/spinlock.c kernel/src/lib/string.c
 bin/tests/bcache:   tests/test_bcache.c   kernel/src/fs/bcache.c \
                     kernel/src/lib/string.c
+bin/tests/ext2:     tests/test_ext2.c     kernel/src/fs/ext2.c \
+                    kernel/src/lib/string.c
 bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c
@@ -340,7 +348,26 @@ fat32-image:
 	@rm -f bin/tests/fat32.img
 	@python3 tools/mkfat.py bin/tests/fat32.img diskroot 64 >/dev/null
 
-test: checkfmt $(USER_PROGS) $(RAMDISK) $(TEST_BINS) fat32-image
+# the ext2 suite gets a throwaway image too, and one with more in it
+# than diskroot has: a file past twelve blocks so the indirect block is
+# exercised, one past twelve plus two hundred and fifty six so the
+# double indirect one is, and symlinks of both kinds -- short enough to
+# live in the inode, and not
+.PHONY: ext2-image
+ext2-image:
+	@mkdir -p bin/tests/ext2root/sub bin/tests/ext2root/notes
+	@cp -r diskroot/. bin/tests/ext2root/ 2>/dev/null || true
+	@python3 -c "open('bin/tests/ext2root/indirect.bin','wb').write(bytes((i*7+3)&0xff for i in range(20000)))"
+	@python3 -c "open('bin/tests/ext2root/double.bin','wb').write(bytes((i*13+5)&0xff for i in range(400000)))"
+	@echo deep > bin/tests/ext2root/notes/deep.txt
+	@echo nested > bin/tests/ext2root/sub/nested.txt
+	@rm -f bin/tests/ext2root/sub/link bin/tests/ext2root/slowlink
+	@ln -s ../indirect.bin bin/tests/ext2root/sub/link
+	@ln -s /a/very/long/target/path/that/will/not/fit/in/sixty/bytes/at/all/no bin/tests/ext2root/slowlink
+	@rm -f bin/tests/ext2.img
+	@python3 tools/mkext2.py bin/tests/ext2.img bin/tests/ext2root 16 >/dev/null
+
+test: checkfmt $(USER_PROGS) $(RAMDISK) $(TEST_BINS) fat32-image ext2-image
 	@fail=0; \
 	for t in $(TEST_BINS); do \
 		printf '  %-10s ' "$$(basename $$t)"; \
@@ -351,7 +378,19 @@ test: checkfmt $(USER_PROGS) $(RAMDISK) $(TEST_BINS) fat32-image
 			echo 'FAILED'; echo "$$out" | sed 's/^/    /'; fail=1; \
 		fi; \
 	done; \
+	printf '  %-10s ' fsck; \
+	if out=$$(python3 tools/readext2.py bin/tests/ext2.img 2>&1); then \
+		echo 'ok'; \
+	else \
+		echo 'FAILED'; echo "$$out" | sed 's/^/    /'; fail=1; \
+	fi; \
 	if [ $$fail -eq 0 ]; then echo '  all suites passed'; else exit 1; fi
+
+# the ext2 image is checked *after* the suite has finished writing to
+# it, by a reader written from the on-disk layout rather than from the
+# driver or the formatter. there is no e2fsck on this machine, so that
+# separately written second opinion is the only thing standing between
+# "the driver agrees with itself" and "the driver is right"
 
 # gcc checks my format strings against real printf, which accepts far
 # more than my kprintf implements. this catches the difference.

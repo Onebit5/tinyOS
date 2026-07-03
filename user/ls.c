@@ -84,14 +84,34 @@ static bool join(char *out, long cap, const char *dir, const char *name) {
  * existed -- gets dashes rather than 1980-00-00, because a date fat
  * spells as zero means nobody knows and printing the epoch would be
  * claiming to */
+/* rwxr-xr-x, which is nine bits read straight off the page. octal says
+ * the same thing in three characters and this says it without
+ * arithmetic, which is why every ls prints both */
+static void write_mode(const struct stat *st) {
+    static const char bits[] = "rwx";
+    char out[11];
+
+    out[0] = st->is_symlink ? 'l' : (st->is_dir ? 'd' : '-');
+    for (int i = 0; i < 9; i++) {
+        out[1 + i] = (st->mode & (0400 >> i)) ? bits[i % 3] : '-';
+    }
+    out[10] = '\0';
+    write(out);
+}
+
 static void write_long(const char *dir, const char *name) {
     char full[256];
     struct stat st;
 
     if (!join(full, sizeof full, dir, name) || stat(full, &st) < 0) {
-        write("       ?  ------- --:--  ");
+        write("  ?????????  ?  ------- --:--  ");
         return;
     }
+
+    write("  ");
+    write_mode(&st);
+    write(" ");
+    write_num_wide((long)st.uid, 4);
 
     if (st.is_dir) {
         /* a directory's size is the size of its own list of entries,
@@ -162,6 +182,20 @@ void _start(int argc, char **argv) {
             write("  ");
         }
         write(name);
+
+        /* a symlink is worth seeing as one, and worth seeing where it
+         * points -- that is most of why anybody runs ls -l on one */
+        if (full) {
+            char joined[256];
+            struct stat st;
+            char target[256];
+            if (join(joined, sizeof joined, path, name)
+                && stat(joined, &st) == 0 && st.is_symlink
+                && readlink(joined, target, sizeof target) > 0) {
+                write(" -> ");
+                write(target);
+            }
+        }
         write("\n");
     }
 

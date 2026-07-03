@@ -277,10 +277,26 @@ has had the command since 1971, why reboot and poweroff call it, and
 why there is a flusher on a timer to turn "you might lose anything"
 into "you might lose the last few seconds".
 
-**0.2.14 a filesystem with opinions.** fat records no ownership and no
+**0.2.14 a filesystem with opinions.** ~~fat records no ownership and no
 permissions, which is why everything on the disk is 0644 by decree. a
 filesystem that has them -- ext2, or one of my own -- plus symlinks and
-proper timestamps. the vfs finally has two things to be a layer over.
+proper timestamps. the vfs finally has two things to be a layer
+over.~~ **done in 0.2.14.** ext2, read and written: superblock, block
+groups, bitmaps, inodes, and the twelve-direct-then-indirect block map
+that every unix filesystem of the era used.
+
+the difference from fat is one sentence: **a name and a file are
+different objects**. in fat a file *is* its directory entry, so it has
+exactly one name and ownership has nowhere to live. here a directory
+entry points at an inode, which is why permissions belong to the file
+rather than to the name, why a rename moves nothing, and why `chmod`
+finally has somewhere to write its answer.
+
+there is no e2fsck on this machine, so the formatter and the driver
+would otherwise be two programs by one author agreeing with each other.
+tools/readext2.py is the answer: a reader written from the on-disk
+layout, run by the test target *after* the driver has finished writing
+to the image. it found two real bugs before the driver existed.
 
 **0.2.15 partitions.** a disk is not a filesystem; it is a table saying
 where several of them are. mbr and gpt, and mounting by which partition

@@ -58,6 +58,8 @@ struct user_stat {
     uint64_t size;
     uint32_t mode;
     uint32_t is_dir;
+    uint32_t uid, gid;
+    uint32_t is_symlink;
     uint16_t year;
     uint8_t  month, day, hour, minute, second;
     uint8_t  pad;
@@ -66,8 +68,12 @@ struct user_stat {
 #define SYS_FORK   25   /* ()  -> the child's pid, or 0 if you are it   */
 #define SYS_MMAP   26   /* (len)              -> address, or 0          */
 #define SYS_MUNMAP 27   /* (address)          -> 0, or -1               */
+#define SYS_CHMOD  28   /* (path, len, mode)  -> 0, or -1               */
+#define SYS_CHOWN  29   /* (path, len, uid, gid) -> 0, or -1            */
+#define SYS_SYMLINK 30  /* (path,len,target,tlen) -> 0, or -1           */
+#define SYS_READLINK 31 /* (path,len,buf,size) -> length, or -1         */
 
-#define SYSCALL_COUNT 28
+#define SYSCALL_COUNT 32
 
 /* everything ring 3 was holding when it made the call, written down by
  * the entry stub in the order it pushes them.

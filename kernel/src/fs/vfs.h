@@ -45,11 +45,16 @@ struct vfs_file {
     uint64_t size;
     bool     is_dir;
 
-    /* the tar header's mode, for the ramdisk. files on the disk have no
-     * per-file permissions at all -- fat has never had any -- so they
-     * take the mount's, which is "the master may write, anyone may
-     * read" */
+    /* the tar header's mode for the ramdisk, and the inode's for a
+     * disk that has one.
+     *
+     * up to 0.2.13 the disk half of that sentence did not exist: fat
+     * records no permissions, so everything on it was 0644 owned by
+     * root by decree. an ext2 disk answers for itself, which is the
+     * whole reason 0.2.14 happened */
     uint32_t mode;
+    uint32_t uid, gid;
+    bool     is_symlink;
 
     /* where the bytes are: already in memory, or out on the disk */
     const void *data;
@@ -90,6 +95,20 @@ bool vfs_unlink(const char *path);
  * only -- a name cannot move from the ramdisk to the disk, because
  * that would be a copy wearing a rename's clothes */
 bool vfs_rename(const char *from, const char *to);
+
+/* ---- what a filesystem with opinions can be told ---------------------
+ *
+ * every one of these answers false on the ramdisk, and on a fat disk.
+ * a filesystem with nowhere to record an owner cannot be given one, and
+ * saying so beats a chmod that quietly did nothing */
+bool vfs_chmod(const char *path, uint32_t mode);
+bool vfs_chown(const char *path, uint32_t uid, uint32_t gid);
+bool vfs_symlink(const char *path, const char *target);
+
+/* where a symlink points, and finding one without following it -- which
+ * is what `ls -l` and `rm` want */
+bool vfs_readlink(const char *path, char *out, size_t size);
+bool vfs_open_nofollow(const char *path, struct vfs_file *out);
 
 int64_t vfs_read(const struct vfs_file *f, uint64_t offset, void *buf,
                  uint64_t len);
