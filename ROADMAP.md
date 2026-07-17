@@ -298,9 +298,24 @@ tools/readext2.py is the answer: a reader written from the on-disk
 layout, run by the test target *after* the driver has finished writing
 to the image. it found two real bugs before the driver existed.
 
-**0.2.15 partitions.** a disk is not a filesystem; it is a table saying
-where several of them are. mbr and gpt, and mounting by which partition
-rather than by which drive answered first.
+**0.2.15 partitions.** ~~a disk is not a filesystem; it is a table
+saying where several of them are. mbr and gpt, and mounting by which
+partition rather than by which drive answered first.~~ **done in
+0.2.15.** both tables, because a machine has to read both: mbr's four
+sixteen-byte entries from 1983, and gpt's checksummed header and array
+-- with the protective mbr a gpt disk carries so an old tool sees a
+full disk rather than an empty one.
+
+the crc is the interesting part. a gpt table that does not add up is
+*known* to be corrupt and is refused, where a corrupt mbr is simply
+followed. so the parser is judged by what it will not do: mounting a
+filesystem at an address nobody chose is worse than mounting nothing.
+
+the filesystem is handed a view of one partition rather than of the
+drive, so every address it uses is its own and it never finds out it is
+not alone. a drive with no table gets one entry covering the whole of
+itself -- an image written straight to sector zero is ordinary, and
+should not be a special case anywhere above.
 
 **0.2.16 more than one screen.** alt+f1 through f4, several sessions at
 once, each with its own foreground process and its own scrollback. the

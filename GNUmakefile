@@ -200,13 +200,20 @@ run: $(BOOTIMG) $(DISK)
 # starts over when you want a clean one
 DISK := disk.img
 
-# ext2 since 0.2.14, because it is the one that can record who owns
-# what. mkfat.py is still here and the kernel still mounts what it
-# makes -- swap the line below and everything works, one filesystem
-# poorer, which is the point of the vfs having two of them to be a
-# layer over
-$(DISK): tools/mkext2.py $(shell find diskroot -type f 2>/dev/null)
-	@python3 tools/mkext2.py $@ diskroot 64
+# partitioned since 0.2.15, because a disk is not a filesystem -- it is
+# a table saying where several of them are. two of them here, of
+# different kinds, so that `parts` and `mount <n>` have something real
+# to do and so that the two filesystems 0.2.14 left behind are both on
+# the machine at once.
+#
+# gpt rather than mbr because it is the one with checksums, and a table
+# that can be known to be corrupt is worth exercising. `mbr` in place of
+# `gpt` below builds the other kind and everything works the same.
+$(DISK): tools/mkext2.py tools/mkfat.py tools/mkdisk.py          $(shell find diskroot -type f 2>/dev/null)
+	@mkdir -p bin
+	@python3 tools/mkext2.py bin/velvet.img diskroot 32 >/dev/null
+	@python3 tools/mkfat.py  bin/compendium.img diskroot 24 >/dev/null
+	@python3 tools/mkdisk.py $@ gpt bin/velvet.img:linux bin/compendium.img:fat32
 
 .PHONY: disk
 disk:
@@ -234,7 +241,7 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
              bin/tests/locks bin/tests/path bin/tests/args \
              bin/tests/shell bin/tests/pipe bin/tests/bcache \
-             bin/tests/ext2 bin/tests/switch
+             bin/tests/ext2 bin/tests/part bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
                     kernel/src/sched/spinlock.c
@@ -296,6 +303,8 @@ bin/tests/bcache:   tests/test_bcache.c   kernel/src/fs/bcache.c \
                     kernel/src/lib/string.c
 bin/tests/ext2:     tests/test_ext2.c     kernel/src/fs/ext2.c \
                     kernel/src/lib/string.c
+bin/tests/part:     tests/test_part.c     kernel/src/drivers/part.c \
+                    kernel/src/lib/string.c
 bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c
@@ -353,6 +362,19 @@ fat32-image:
 # exercised, one past twelve plus two hundred and fifty six so the
 # double indirect one is, and symlinks of both kinds -- short enough to
 # live in the inode, and not
+# two partitioned disks for the partition suite: one of each scheme,
+# built by tools/mkdisk.py -- which was written from the specification
+# separately from the parser that reads them back
+.PHONY: part-images
+part-images: ext2-image
+	@mkdir -p bin/tests
+	@rm -f bin/tests/mbr.img bin/tests/gpt.img bin/tests/small.img
+	@python3 tools/mkext2.py bin/tests/small.img diskroot 4 >/dev/null
+	@python3 tools/mkdisk.py bin/tests/mbr.img mbr \
+		bin/tests/small.img:linux bin/tests/small.img:fat32 >/dev/null
+	@python3 tools/mkdisk.py bin/tests/gpt.img gpt \
+		bin/tests/small.img:linux bin/tests/small.img:linux >/dev/null
+
 .PHONY: ext2-image
 ext2-image:
 	@mkdir -p bin/tests/ext2root/sub bin/tests/ext2root/notes
@@ -367,7 +389,12 @@ ext2-image:
 	@rm -f bin/tests/ext2.img
 	@python3 tools/mkext2.py bin/tests/ext2.img bin/tests/ext2root 16 >/dev/null
 
-test: checkfmt $(USER_PROGS) $(RAMDISK) $(TEST_BINS) fat32-image ext2-image
+# the kernel itself is a prerequisite, and that is not decoration. twice
+# now every host suite has passed while the kernel did not link -- disk.c
+# and shell.c are compiled into no host test, so nothing but building
+# the real thing catches a missing function there
+test: checkfmt bin/tinyos $(USER_PROGS) $(RAMDISK) $(TEST_BINS) \
+      fat32-image ext2-image part-images
 	@fail=0; \
 	for t in $(TEST_BINS); do \
 		printf '  %-10s ' "$$(basename $$t)"; \

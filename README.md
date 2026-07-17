@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.14** (**a filesystem with opinions.** ext2, read and written -- so a file can finally have an owner)
+**version: 0.2.15** (**partitions.** a disk is not a filesystem; it is a table saying where several of them are)
 
 ## what it does
 
@@ -52,6 +52,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] demand paging: growable stacks, `mmap`, and programs loaded a page at a time
 - [x] a write-back block cache, a flusher, and `sync`
 - [x] ext2, read and written: owners, permissions, symlinks, real timestamps
+- [x] mbr and gpt, and mounting by which partition rather than which drive answered
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -160,6 +161,100 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## partitions
+
+**a disk is not a filesystem.** until this version the kernel believed
+otherwise: it asked each drive whether byte 1024 looked like an ext2
+superblock and mounted whichever answered first. that works exactly as
+long as every disk has one filesystem starting at sector zero, which is
+true of nothing anybody actually uses.
+
+a real disk begins with a *table* saying where several of them are, and
+there are two of those in circulation, so a machine reads both:
+
+- **mbr**, from 1983 — four sixteen-byte entries at offset 446 of the
+  first sector, each with a start and a length in 32-bit sectors. that
+  32 is where the two-terabyte limit everybody used to complain about
+  comes from.
+- **gpt** — a header at sector 1, an array of entries after it, 64-bit
+  addresses, names, and **crc32 over both**.
+
+a gpt disk still carries an mbr holding one entry of type `0xEE`
+spanning everything. that exists so an old tool sees a full disk rather
+than an empty one and declines to helpfully repartition it. finding one
+means the real table is elsewhere.
+
+### the checksum is the whole difference
+
+a corrupt mbr is simply *followed* — there is nothing in the format that
+could notice. a gpt that does not add up is **known** to be corrupt, and
+this refuses it:
+
+```c
+if (part_crc32(copy, header_size) != claimed) {
+    return 0;       /* a table known to be corrupt is not followed */
+}
+```
+
+so the parser is judged by what it will **not** do. mounting a
+filesystem at an address nobody chose is worse than mounting nothing,
+and the tests spend more effort on the refusals than on the happy path:
+a bad header crc, a bad *entry array* crc behind a good header, a
+protective mbr with nothing behind it, an entry size of zero, an entry
+that ends before it starts.
+
+### one partition, seen as a whole disk
+
+the filesystem is handed a view rather than the drive:
+
+```c
+static bool view_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
+    if (lba + count > view_sectors) {
+        return false;   /* past the end of the partition, which is not the
+                         * same as past the end of the drive */
+    }
+    return bcache_read(ctx, view_first + lba, count, buf);
+}
+```
+
+every address ext2 or fat32 uses is its own, and neither ever finds out
+it is not alone on the disk. the cache stays underneath, on *absolute*
+addresses, so it is per-drive and stays correct when the mount moves.
+
+a drive with no table at all gets one entry covering the whole of
+itself. an image written straight to sector zero is a perfectly ordinary
+thing and should not be a special case anywhere above this.
+
+### and mounting by which one you meant
+
+```
+igor@velvet# parts
+   #  drive  scheme  start        sectors      kind
+ * 0      1  gpt     2048         65536        linux  "velvet"  [ext2]
+   1      1  gpt     67584        49152        unknown  "compendium"  [fat32]
+
+a * is the one mounted at /. `mount <number>` moves it
+igor@velvet# mount 1
+```
+
+every partition is tried at boot, not just the first — an efi system
+partition in slot one and the real filesystem in slot two is the
+ordinary arrangement, not an unusual one. `make run` now builds a
+two-partition gpt disk with ext2 on one and fat32 on the other, so both
+filesystems from 0.2.14 are on the machine at once.
+
+moving the mount is deliberately blunt: whatever was open on the old one
+is stale, and it says so. there is no reference counting here that could
+do better, and pretending otherwise would be worse.
+
+### the checker had to learn about tables too
+
+`tools/readext2.py` — 0.2.14's independent second opinion — read the
+image from sector zero. the moment the disk was partitioned it saw a
+partition table and gave up, which would have quietly ended the only
+external validation this project has. it looks for a table first now,
+and reads the filesystem inside whichever partition has one.
 
 ## a filesystem with opinions
 
@@ -1776,6 +1871,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.15** — partitions, because a disk is not a filesystem: it is a table saying where several of them are, and the kernel had been asking each drive whether sector zero looked like a superblock. both tables — mbr's four sixteen-byte entries from 1983, and gpt's checksummed header and array, with the protective mbr a gpt disk carries so old tools see a full disk rather than an empty one. the crc is the whole difference between them: a corrupt mbr is simply followed because nothing in the format could notice, while a gpt that does not add up is *known* to be corrupt and is refused — so the parser is judged by what it will not do, and the tests spend more on the refusals than the happy path. the filesystem is handed a *view* of one partition rather than the drive, bounded at both ends, so it never finds out it is not alone; the cache stays underneath on absolute addresses so it remains correct when the mount moves. every partition is tried at boot rather than only the first, since an efi partition in slot one and the real filesystem in slot two is the ordinary arrangement. `parts` lists what each drive says it holds and what was actually found on it — a different question — and `mount <n>` moves the mount, bluntly and with a warning, because there is no reference counting here that could do better. `tools/readext2.py` had to learn about tables too: it read from sector zero, and the moment the disk was partitioned it would have quietly stopped being the only external check this project has.
 - **0.2.14** — ext2, read and written: superblock, block groups, bitmaps, inodes, and the twelve-direct-then-indirect block map every unix filesystem of the era used. the whole difference from fat is one sentence — in fat a file *is* its directory entry, and here a name and a file are different objects — and everything else follows: permissions belong to the file rather than the name, a rename moves nothing, and `chmod` finally has somewhere to write an answer. there is no e2fsck on this machine, so the formatter and the driver would have been two programs by one author agreeing with each other; `tools/readext2.py` is written from the on-disk layout and run by the test target *after* the suite has finished writing, so what it validates is what the driver wrote. it found two real bugs before the driver even existed: every subdirectory was being built as though it were the root, and a fast symlink — one stored *in* its own block pointers — was having its target walked as block numbers, which is the sharpest edge in the format. `disk.c` mounts ext2 or fat32 and almost nothing above it changed, which is what having a vfs since 0.1.11 was for. and the new capability exposed an old bug: `vfs_may_read` only ever checked the *other* bits, which was invisible while nothing had an owner and made a 0600 file unreadable by its owner the moment anything did.
 - **0.2.13** — a block cache, slotted exactly where fat32's two function pointers already were, which is the whole reason the filesystem needed no changes at all: it was handed a way to move sectors and it still is. the win is in *which* sectors — walking a cluster chain asks for the same table sectors over and over, and `disk` now prints the hit rate. writes are write-back, which is a promise broken on purpose: until a sync, the disk does not hold what the machine believes. so `reboot` and `poweroff` sync first (before this, a write reached the drive as it was made and a reboot lost nothing by definition), and a flusher thread syncs every three seconds — which does not replace `sync` but turns "you might lose anything" into "you might lose the last few seconds". a whole-block write skips reading the block first, since fetching bytes about to be thrown away doubles the cost of writing a big file; a partial write must not, and that one fails quietly — overwrite one sector of eight, evict, and the other seven are gone. no lock of its own, because everything reaches it through the disk's, and a second lock at the same rank inside the first is what the rank check exists to refuse. writing the tests found something worse than a bug: the shell suite's `reboot` stub called `exit(0)`, so every assertion after it had been vacuous — nothing had tested reboot before, so nothing had noticed the suite was quietly running half of itself.
 - **0.2.12** — demand paging, which is one idea and a lot of consequences: a **record** of which addresses are legitimately empty. without it there is no telling a stack that wants to grow from a program dereferencing nonsense, and a kernel that guesses either kills good programs or conjures memory for bad ones. so every space keeps a table of ranges it agreed to and every not-present fault is answered out of it or not at all. the stack is a megabyte of range with two pages in it — the arguments have to go somewhere before the program starts — and the address below it is nothing, which is the guard page for free: it costs no memory because there is nothing there to cost anything. `mmap` hands out ranges the same way, so asking for four megabytes and using three pages costs three pages; there is a cap on a single ask for exactly that reason, since without one a program could reserve more than the machine has and find out halfway through using it. `elf_describe` returns the segments instead of copying them, so a program starts with none of itself in memory — but only for an image that will still be there when it runs, which is the ramdisk and therefore everything in `/boot/bin`; a disk copy would have to outlive every fork of the program, and that is a lifetime scheme this does not need to be worth having. writing the tests turned up a real bug the hard way: making the fake allocator hand back *poisoned* frames instead of conveniently blank ones showed that `addrspace_create` had never zeroed its region table, so a fresh space started with whatever the slab had in it last — and a garbage region is a record saying a wild pointer is legitimate.

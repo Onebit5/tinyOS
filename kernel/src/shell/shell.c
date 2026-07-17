@@ -343,6 +343,23 @@ static void cmd_disk(int argc, char **argv) {
     }
 
     kprintf("drive      %s\n", disk_model());
+    {
+        /* which partition, rather than which drive answered first --
+         * which is the difference 0.2.15 made */
+        struct disk_part e;
+        int at = disk_mounted_part();
+        if (at >= 0 && disk_part_at((size_t)at, &e)) {
+            if (e.scheme == PART_NONE) {
+                kprintf("partition  none -- a filesystem written straight "
+                        "to sector zero\n");
+            } else {
+                kprintf("partition  %d of %lu, %s, starting at sector %lu\n",
+                        at, (uint64_t)disk_part_count(),
+                        e.scheme == PART_GPT ? "gpt" : "mbr",
+                        e.p.first_lba);
+            }
+        }
+    }
     kprintf("capacity   %lu MiB (%lu sectors)\n",
             disk_bytes() / (1024 * 1024), disk_bytes() / AHCI_SECTOR);
     kprintf("filesystem %s, labelled \"%s\", mounted at /\n",
@@ -383,6 +400,46 @@ static void cmd_disk(int argc, char **argv) {
 
     kprintf("\ntry: ls, cat welcome.txt, echo something worth keeping "
             "> /notes.txt\n");
+}
+
+/* what a drive says it holds.
+ *
+ * a disk is not a filesystem, and until 0.2.15 this kernel believed
+ * otherwise -- it asked each drive whether sector zero looked like a
+ * superblock and mounted whichever answered first. that works exactly
+ * as long as every disk has one filesystem starting at the beginning,
+ * which is true of nothing anybody uses */
+static void cmd_parts(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    size_t n = disk_part_count();
+    if (n == 0) {
+        kprintf("no drives, or none I could read a sector from\n");
+        return;
+    }
+
+    kprintf("  #  drive  scheme  start        sectors      kind\n");
+    for (size_t i = 0; i < n; i++) {
+        struct disk_part e;
+        if (!disk_part_at(i, &e)) {
+            continue;
+        }
+        const char *scheme = (e.scheme == PART_GPT) ? "gpt"
+                           : (e.scheme == PART_MBR) ? "mbr" : "-";
+
+        kprintf("%s%2lu  %5u  %-6s  %-11lu  %-11lu  %s",
+                (int)i == disk_mounted_part() ? " *" : "  ",
+                (uint64_t)i, e.p.drive, scheme,
+                e.p.first_lba, e.p.sectors, e.p.kind);
+        if (e.p.name[0] != '\0') {
+            kprintf("  \"%s\"", e.p.name);
+        }
+        if (e.fs[0] != '\0') {
+            kprintf("  [%s]", e.fs);
+        }
+        kprintf("\n");
+    }
+    kprintf("\na * is the one mounted at /. `mount <number>` moves it\n");
 }
 
 /* what a write-back cache costs, and the thing that pays it back.
@@ -508,7 +565,52 @@ static void cmd_cpus(int argc, char **argv) {
     kprintf("it, so `summon` a few and they land wherever there is room.\n");
 }
 
+/* mount a particular partition instead of whichever answered first.
+ *
+ * this is deliberately blunt: whatever was open on the old one is stale
+ * afterwards, because there is no reference counting here that could do
+ * better and pretending otherwise would be worse than saying so */
+static void cmd_mount_at(int argc, char **argv) {
+    size_t which = 0;
+    for (const char *p = argv[1]; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') {
+            kprintf("mount <number> -- `parts` lists them\n");
+            return;
+        }
+        which = which * 10 + (size_t)(*p - '0');
+    }
+
+    if (which >= disk_part_count()) {
+        kprintf("there is no partition %lu. `parts` lists them\n",
+                (uint64_t)which);
+        return;
+    }
+    if ((int)which == disk_mounted_part()) {
+        kprintf("partition %lu is already the one at /\n", (uint64_t)which);
+        return;
+    }
+
+    if (!disk_mount_part(which)) {
+        kprintf("nothing I recognise is on partition %lu -- the table says "
+                "what it\n", (uint64_t)which);
+        kprintf("is *meant* to hold, which is a different question from "
+                "what is there\n");
+        return;
+    }
+
+    kprintf("partition %lu is now at /, holding %s\n",
+            (uint64_t)which, disk_kind_name());
+    kprintf("anything that was open on the old one is stale. there is no "
+            "reference\n");
+    kprintf("counting here that could have done better, so this says so "
+            "instead\n");
+}
+
 static void cmd_mount(int argc, char **argv) {
+    if (argc > 1) {
+        cmd_mount_at(argc, argv);
+        return;
+    }
     (void)argc; (void)argv;
 
     kprintf("%-8s %-7s %-5s %s\n", "at", "kind", "write", "on");
@@ -1350,7 +1452,8 @@ static const struct command commands[] = {
     { "slabs",  "the object caches, and what they hold", cmd_slabs, false, NULL },
     { "disk",   "the drive, and the filesystem on it",  cmd_disk, false, NULL },
     { "sync",   "put what is in memory onto the disk",  cmd_sync, false, NULL },
-    { "mount",  "which filesystem is where",            cmd_mount, false, NULL },
+    { "mount",  "which filesystem is where; mount <n> moves it", cmd_mount, false, "mount [number]" },
+    { "parts",  "what each drive says it holds",        cmd_parts, false, NULL },
     { "cpus",   "the processors, and which are awake",  cmd_cpus, false, NULL },
     { "locks",  "what guards what, and what waits",     cmd_locks, false, NULL },
     { "cd",     "go somewhere; no argument means the root", cmd_cd, true, "cd [directory]" },

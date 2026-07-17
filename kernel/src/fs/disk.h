@@ -8,6 +8,7 @@
 #include "fs/fat32.h"
 #include "fs/ext2.h"
 #include "fs/bcache.h"
+#include "drivers/part.h"
 
 /* the disk, mounted.
  *
@@ -64,6 +65,34 @@ enum disk_kind {
 
 enum disk_kind disk_which(void);
 const char *disk_kind_name(void);
+
+/* ---- partitions ------------------------------------------------------
+ *
+ * a disk is not a filesystem, so "which disk" was never the right
+ * question. every drive is scanned at boot and what is found is kept
+ * here -- including drives with no table at all, which get one entry
+ * covering the whole of themselves, because an image written straight
+ * to sector zero is a perfectly ordinary thing and should not need a
+ * special case anywhere above this */
+
+struct disk_part {
+    struct partition p;
+    enum part_scheme scheme;    /* how it was found, or PART_NONE for a
+                                 * whole drive with no table */
+    bool     mountable;         /* something recognised a filesystem on it */
+    const char *fs;             /* what that was, or "" */
+};
+
+size_t disk_part_count(void);
+bool   disk_part_at(size_t index, struct disk_part *out);
+
+/* which one is mounted at /, or -1 */
+int disk_mounted_part(void);
+
+/* mount a particular one instead of whichever answered first. anything
+ * open on the old one is stale afterwards, so this syncs first and the
+ * shell warns -- there is no reference counting here to do better */
+bool disk_mount_part(size_t index);
 
 /* find a controller, mount what is on it. safe to call when there is
  * neither */

@@ -116,6 +116,30 @@ bool disk_chmod(const char *p, uint32_t m) { (void)p; (void)m; return false; }
 /* which filesystem answered. the stub disk is not either of the real
  * ones, and saying so is more honest than picking a name */
 const char *disk_kind_name(void) { return "stub"; }
+
+/* a drive with two partitions on it, so `parts` and `mount <n>` have
+ * something to say. what is under test is the shell's half: that it
+ * lists them, that it refuses a number nobody handed out, and that it
+ * says plainly what moving the mount costs */
+static struct disk_part fake_parts[2] = {
+    { { 2048, 8192, 0, 1, 0x83, true, "", "linux" }, PART_MBR, true, "ext2" },
+    { { 10240, 4096, 0, 2, 0x0c, false, "", "fat32" }, PART_MBR, false, "" },
+};
+static int mounted_part = 0;
+static bool mount_part_ok = true;
+
+size_t disk_part_count(void) { return 2; }
+bool disk_part_at(size_t i, struct disk_part *out) {
+    if (i >= 2) return false;
+    *out = fake_parts[i];
+    return true;
+}
+int disk_mounted_part(void) { return mounted_part; }
+bool disk_mount_part(size_t i) {
+    if (!mount_part_ok) return false;
+    mounted_part = (int)i;
+    return true;
+}
 enum disk_kind disk_which(void) { return DISK_FAT32; }
 bool disk_chown(const char *p, uint32_t u, uint32_t g) {
     (void)p; (void)u; (void)g; return false;
@@ -498,6 +522,53 @@ int main(void) {
     run("ps | grep hello");
     CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
     CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
+
+    /* ---- partitions ------------------------------------------------
+     *
+     * a disk is not a filesystem. until 0.2.15 this kernel asked each
+     * drive whether sector zero looked like a superblock and mounted
+     * whichever answered first, which works exactly as long as every
+     * disk has one filesystem starting at the beginning */
+
+    run("parts");
+    CHECK(strstr(out, "2048") != NULL, "parts lists where each one starts");
+    CHECK(strstr(out, "linux") && strstr(out, "fat32"),
+          "and what the table says each holds");
+    CHECK(strstr(out, "mbr") != NULL, "and which kind of table said so");
+    CHECK(strstr(out, "[ext2]") != NULL,
+          "and what was actually found on it, which is a different "
+          "question from what the table claims");
+    CHECK(strstr(out, "*") != NULL, "with a mark on the one that is mounted");
+
+    mounted_part = 0;
+    run("mount 1");
+    CHECK(mounted_part == 1, "mount <n> moves the mount");
+    CHECK(strstr(out, "stale") != NULL,
+          "and says what that costs -- there is no reference counting "
+          "here that could do better, so it says so instead");
+
+    run("mount 1");
+    CHECK(strstr(out, "already") != NULL, "mounting the one already there says so");
+
+    run("mount 9");
+    CHECK(strstr(out, "no partition 9") != NULL,
+          "a number nobody handed out is refused");
+    run("mount x");
+    CHECK(strstr(out, "parts") != NULL,
+          "and something that is not a number points at the list");
+
+    mount_part_ok = false;
+    mounted_part = 0;
+    run("mount 1");
+    CHECK(mounted_part == 0, "a partition with nothing on it is not mounted");
+    CHECK(strstr(out, "different question") != NULL,
+          "and the difference between what a table claims and what is "
+          "there is spelled out");
+    mount_part_ok = true;
+
+    /* the bare command still does what it always did */
+    run("mount");
+    CHECK(strstr(out, "/boot") != NULL, "and `mount` alone still lists them");
 
     /* ---- sync, and the two ways this machine stops ----------------
      *

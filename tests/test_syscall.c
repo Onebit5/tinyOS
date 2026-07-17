@@ -482,7 +482,7 @@ int main(void) {
      * console a moment ago now reaches the buffer instead */
     {
         static struct pipe pout, pin;
-        static char pbuf[64];
+        static _Alignas(4096) char pbuf[64];
         pipe_reset(&pout);
         pipe_reset(&pin);
 
@@ -647,7 +647,25 @@ int main(void) {
     CHECK(call(SYS_OPEN, kernel_page, 8) == -1,
           "and a path the caller does not own is refused before it is read");
 
-    char sink[64];
+    /* page aligned, and that is not fussiness.
+     *
+     * this stands in for a buffer in ring 3, and the fake page tables
+     * below mark exactly *one* page as user memory. a buffer that
+     * straddles two pages therefore has a second page nobody mapped,
+     * user_range_ok correctly refuses it, and a dozen unrelated
+     * assertions fail -- but only when the stack happens to land within
+     * sixty-four bytes of a boundary, which is to say sometimes.
+     *
+     * that cost an afternoon once. alignment makes it never */
+    /* page aligned, and that is not fussiness.
+     *
+     * this stands in for a buffer in ring 3, and the fake page tables
+     * below mark exactly *one* page as user memory. a buffer that
+     * straddles two pages therefore has a second page nobody mapped,
+     * user_range_ok correctly refuses it, and a dozen unrelated
+     * assertions fail -- but only when the stack happens to land within
+     * sixty-four bytes of a boundary, which is to say sometimes */
+    static _Alignas(4096) char sink[64];
     memset(sink, 0, sizeof sink);
     user_extra = (uint64_t)sink;
     CHECK(read_from(fd, (uint64_t)sink, 6) == 6, "a short read works");
@@ -731,7 +749,7 @@ int main(void) {
      * doing that by opening each one would mean a descriptor apiece for
      * something the directory entry already said */
     {
-        struct user_stat st;
+        static _Alignas(4096) struct user_stat st;
         user_extra = (uint64_t)&st;
         memset(&st, 0xaa, sizeof st);
 
@@ -768,7 +786,7 @@ int main(void) {
           "but not with a path in the kernel");
 
     {
-        char to[32];
+        static _Alignas(4096) char to[32];
         strcpy(to, "/there.txt");
         user_extra = (uint64_t)to;
         CHECK(call5(SYS_RENAME, (uint64_t)page, 9, (uint64_t)to, 10, 0) == 0,
@@ -806,7 +824,7 @@ int main(void) {
      * what -- so what is worth checking is the permission on them */
     {
         uint32_t c = 0, r = 0;
-        static uint32_t size_out[2];
+        static _Alignas(4096) uint32_t size_out[2];
         user_extra = (uint64_t)size_out;
         CHECK(call(SYS_SCREEN, (uint64_t)&size_out[0],
                    (uint64_t)&size_out[1]) == 0, "the screen has a size");

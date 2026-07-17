@@ -6,6 +6,7 @@
 #include "sched/spinlock.h"
 #include "drivers/rtc.h"
 #include "fs/bcache.h"
+#include "drivers/part.h"
 
 /* the filesystem keeps one sector of scratch and every path through
  * it assumes nobody else is halfway through another. that was a
@@ -65,45 +66,173 @@ const char *disk_kind_name(void) {
     }
 }
 
+/* ---- partitions ------------------------------------------------------
+ *
+ * what a drive said it holds, for every drive, gathered at boot. the
+ * filesystem is handed a view of *one* of these rather than of the
+ * drive -- so every address it uses is relative to its own partition
+ * and it never has to know it is not alone on the disk */
+
+#define DISK_PARTS_MAX 16
+
+static struct disk_part table[DISK_PARTS_MAX];
+static size_t table_count;
+static int mounted = -1;
+
+/* the partition the filesystem is looking through. every read and write
+ * it makes is shifted by this and bounded by it, which is the whole of
+ * what a partition is */
+static uint64_t view_first;
+static uint64_t view_sectors;
+
+static bool view_read(void *ctx, uint64_t lba, uint32_t count, void *buf) {
+    if (lba + count > view_sectors) {
+        /* past the end of the partition, which is *not* the same as past
+         * the end of the drive -- and letting one become the other is
+         * how a filesystem writes over its neighbour */
+        return false;
+    }
+    return bcache_read(ctx, view_first + lba, count, buf);
+}
+
+static bool view_write(void *ctx, uint64_t lba, uint32_t count,
+                       const void *buf) {
+    if (lba + count > view_sectors) {
+        return false;
+    }
+    return bcache_write(ctx, view_first + lba, count, buf);
+}
+
+/* try to put a filesystem on one of them. ext2 first, because it is the
+ * one that can answer every question */
+static bool try_mount(size_t index) {
+    struct disk_part *e = &table[index];
+    if (!ahci_use_disk(e->p.drive)) {
+        return false;
+    }
+
+    /* the cache holds absolute addresses and is therefore per drive, so
+     * changing drives means starting it again -- and anything still
+     * dirty in it belongs to the drive being left */
+    bcache_sync();
+    bcache_init(ahci_read, ahci_write, NULL);
+
+    view_first = e->p.first_lba;
+    view_sectors = e->p.sectors;
+
+    /* the filesystem is handed the view rather than the drive. it was
+     * already being handed a way to move sectors and it still is --
+     * which is why neither ext2 nor fat32 needed a line changed */
+    if (ext2_mount(&ext, view_read, view_write, NULL)) {
+        ext2_set_clock(&ext, ext2_now);
+        kind = DISK_EXT2;
+        ready = true;
+        mounted = (int)index;
+        e->mountable = true;
+        e->fs = "ext2";
+        return true;
+    }
+    if (fat32_mount(&fat, view_read, view_write, NULL)) {
+        fat32_set_clock(&fat, disk_now);
+        kind = DISK_FAT32;
+        ready = true;
+        mounted = (int)index;
+        e->mountable = true;
+        e->fs = "fat32";
+        return true;
+    }
+    return false;
+}
+
 bool disk_mount(void) {
     ready = false;
     kind = DISK_NONE;
+    table_count = 0;
+    mounted = -1;
+
     if (!ahci_init()) {
         return false;
     }
 
-    /* try each drive until one has a filesystem I recognise. the drive
-     * this machine booted from is a disk like any other, and the one
-     * with the files on it is not necessarily first -- so rather than
-     * guess, ask each in turn. a drive with no boot sector of the right
-     * shape simply fails to mount and the next one gets a go */
-    for (size_t i = 0; i < ahci_disk_count(); i++) {
+    /* every drive, and everything each of them says it holds. the drive
+     * this machine booted from is a disk like any other and the one
+     * with the files on it is not necessarily first, so rather than
+     * guess, ask all of them and then decide */
+    for (size_t i = 0; i < ahci_disk_count() && table_count < DISK_PARTS_MAX;
+         i++) {
         if (!ahci_use_disk(i)) {
             continue;
         }
-        /* the filesystem is handed the cache rather than the drive.
-         * it was already being handed a way to move sectors and it
-         * still is -- which is the whole reason a cache can be put
-         * here without fat32 knowing anything about it */
-        bcache_init(ahci_read, ahci_write, NULL);
 
-        /* ext2 first, because it is the one that can answer every
-         * question. a disk with neither simply fails to mount and the
-         * next drive gets a go */
-        if (ext2_mount(&ext, bcache_read, bcache_write, NULL)) {
-            ext2_set_clock(&ext, ext2_now);
-            kind = DISK_EXT2;
-            ready = true;
-            return true;
+        struct partition found[PART_MAX];
+        enum part_scheme scheme;
+        size_t n = part_scan(ahci_read, NULL, found, PART_MAX, &scheme);
+
+        if (n == 0) {
+            /* no table. an image written straight to sector zero is a
+             * perfectly ordinary thing, so it gets one entry covering
+             * the whole drive rather than a special case everywhere
+             * above this */
+            struct disk_part *e = &table[table_count++];
+            memset(e, 0, sizeof *e);
+            e->p.drive = (unsigned)i;
+            e->p.first_lba = 0;
+            e->p.sectors = ahci_sectors();
+            e->p.kind = "whole drive";
+            e->scheme = PART_NONE;
+            e->fs = "";
+            continue;
         }
-        if (fat32_mount(&fat, bcache_read, bcache_write, NULL)) {
-            fat32_set_clock(&fat, disk_now);
-            kind = DISK_FAT32;
-            ready = true;
+
+        for (size_t k = 0; k < n && table_count < DISK_PARTS_MAX; k++) {
+            struct disk_part *e = &table[table_count++];
+            memset(e, 0, sizeof *e);
+            e->p = found[k];
+            e->p.drive = (unsigned)i;
+            e->scheme = scheme;
+            e->fs = "";
+        }
+    }
+
+    /* and now the first one with something on it. every partition is
+     * tried rather than only the first -- an efi system partition in
+     * slot one and the real filesystem in slot two is the ordinary
+     * arrangement, not an unusual one */
+    for (size_t i = 0; i < table_count; i++) {
+        if (try_mount(i)) {
             return true;
         }
     }
     return false;
+}
+
+
+
+size_t disk_part_count(void) { return table_count; }
+
+bool disk_part_at(size_t index, struct disk_part *out) {
+    if (index >= table_count) {
+        return false;
+    }
+    *out = table[index];
+    return true;
+}
+
+int disk_mounted_part(void) { return mounted; }
+
+bool disk_mount_part(size_t index) {
+    if (index >= table_count) {
+        return false;
+    }
+    uint64_t flags = enter();
+    bool was_ready = ready;
+    ready = false;              /* nothing may reach the old one now */
+    bool ok = try_mount(index);
+    if (!ok) {
+        ready = was_ready;      /* put it back; nothing was disturbed */
+    }
+    leave(flags);
+    return ok;
 }
 
 /* ---- paths --------------------------------------------------------- */

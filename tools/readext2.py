@@ -19,10 +19,17 @@ filesystem is allowed to assume about itself:
   every directory has . and .., and .. really is its parent
   link counts match the number of names actually pointing at each inode
 
+a disk stopped being a filesystem in 0.2.15, so this looks for a
+partition table first and reads the filesystem inside whichever
+partition has one. an image written straight to sector zero still works
+exactly as it did -- that is a partition table of no entries as far as
+this is concerned.
+
 usage:
   readext2.py <image>            check it, and say what is wrong
   readext2.py <image> --tree     also print the tree it found
   readext2.py <image> --cat P    print the contents of one path
+  readext2.py <image> --part N   read partition N rather than guessing
 """
 
 import struct
@@ -34,6 +41,79 @@ S_IFMT, S_IFREG, S_IFDIR, S_IFLNK = 0xF000, 0x8000, 0x4000, 0xA000
 
 class Bad(Exception):
     pass
+
+
+# ---- finding the filesystem ----------------------------------------
+#
+# written the same way as everything else here: from the on-disk layout
+# rather than from tools/mkdisk.py, so that the two disagreeing is
+# something this can notice
+
+SECTOR = 512
+
+
+def partitions(raw):
+    """every partition the image says it has, as (first_byte, name)"""
+    if len(raw) < SECTOR or raw[510] != 0x55 or raw[511] != 0xAA:
+        return []
+
+    out = []
+    protective = False
+    for i in range(4):
+        e = raw[446 + i * 16: 446 + (i + 1) * 16]
+        kind = e[4]
+        first = struct.unpack_from("<I", e, 8)[0]
+        count = struct.unpack_from("<I", e, 12)[0]
+        if kind == 0xEE:
+            protective = True
+            break
+        if kind == 0 or count == 0:
+            continue
+        out.append((first * SECTOR, f"mbr entry {i + 1}, type {kind:#04x}"))
+
+    if not protective:
+        return out
+
+    # a gpt disk. the header is at sector 1 and the entries after it
+    h = raw[SECTOR:SECTOR * 2]
+    if h[0:8] != b"EFI PART":
+        return []
+    entries_lba = struct.unpack_from("<Q", h, 72)[0]
+    entry_count = struct.unpack_from("<I", h, 80)[0]
+    entry_size = struct.unpack_from("<I", h, 84)[0]
+
+    out = []
+    for i in range(min(entry_count, 128)):
+        at = entries_lba * SECTOR + i * entry_size
+        e = raw[at:at + entry_size]
+        if len(e) < 56 or e[0:16] == bytes(16):
+            continue
+        first = struct.unpack_from("<Q", e, 32)[0]
+        name = e[56:128].decode("utf-16-le", errors="replace").split("\0")[0]
+        out.append((first * SECTOR, f"gpt entry {i + 1} \"{name}\""))
+    return out
+
+
+def find_ext2(raw, want):
+    """the bytes of the filesystem, and how it was found"""
+    parts = partitions(raw)
+
+    if want is not None:
+        if want >= len(parts):
+            raise Bad(f"there is no partition {want} -- found {len(parts)}")
+        at, how = parts[want]
+        return raw[at:], how
+
+    if not parts:
+        return raw, "the whole image"
+
+    for at, how in parts:
+        chunk = raw[at:]
+        if len(chunk) > 2048 and struct.unpack_from("<H", chunk, 1024 + 56)[0] \
+                == EXT2_MAGIC:
+            return chunk, how
+
+    raise Bad(f"{len(parts)} partition(s), none of them holding ext2")
 
 
 class Ext2:
@@ -304,12 +384,19 @@ def main():
         raw = f.read()
 
     verbose = "--tree" in sys.argv
+    want = None
+    if "--part" in sys.argv:
+        want = int(sys.argv[sys.argv.index("--part") + 1])
 
     try:
+        raw, how = find_ext2(raw, want)
         fs = Ext2(raw)
     except Bad as e:
         print(f"not readable: {e}")
         return 1
+
+    if how != "the whole image":
+        print(f"reading {how}")
 
     if "--cat" in sys.argv:
         want = sys.argv[sys.argv.index("--cat") + 1]
