@@ -30,6 +30,14 @@
 #define KEY_CTRL_C 0x03
 #define KEY_CTRL_Z 0x1a
 
+/* alt+f1 through f4, and shift with the page keys. these are answered
+ * by the terminal itself rather than passed on to anything -- switching
+ * screens is the machine's business, not the business of whatever
+ * happens to be running */
+#define KEY_CONSOLE_1  0x110    /* .. 0x113 */
+#define KEY_SCROLL_UP  0x120
+#define KEY_SCROLL_DOWN 0x121
+
 /* called from irq handlers. wakes whoever is waiting */
 void input_push(int key);
 

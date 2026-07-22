@@ -18,6 +18,16 @@ void kvprintf(const char *fmt, va_list ap);
  * wall of driver chatter, and `dmesg` can still show you the chatter */
 void kprintf_to_console(bool on);
 
+/* whether what is being printed should also go down the serial line.
+ *
+ * the serial line is a second window onto whichever console is being
+ * looked at rather than a console of its own -- four shells writing
+ * down one wire is four conversations in one column of text, and the
+ * keyboard already hands its keys to the console on the screen. set
+ * once the consoles exist; before that there is one of everything and
+ * the question does not arise */
+void kprintf_serial_filter(bool (*fn)(void));
+
 /* everything kprintf has ever printed, oldest first, for `dmesg` */
 void klog_dump(void);
 

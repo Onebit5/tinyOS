@@ -1,5 +1,6 @@
 #include "serial.h"
 #include "drivers/input.h"
+#include "drivers/console.h"
 #include "cpu/io.h"
 #include "cpu/pic.h"
 #include "cpu/interrupts.h"
@@ -66,7 +67,17 @@ void serial_write(const char *s) {
 static int esc_state;
 static int esc_number;
 
+/* ctrl+backslash was pressed and the next byte says which console */
+static bool want_console;
+
 void serial_feed(uint8_t b) {
+    if (want_console) {
+        want_console = false;
+        if (b >= '1' && b <= '0' + VCONSOLE_COUNT) {
+            input_push(KEY_CONSOLE_1 + (b - '1'));
+        }
+        return;
+    }
     if (esc_state == 1) {
         esc_state = (b == '[') ? 2 : 0;
         esc_number = 0;
@@ -115,6 +126,14 @@ void serial_feed(uint8_t b) {
     }
 
     switch (b) {
+    case 0x1c:              /* ctrl+backslash: the next digit picks a console */
+        /* a serial line has no alt key and no function keys, so
+         * switching needs a sequence of ordinary bytes. ctrl+\ is
+         * chosen because nothing else here uses it and no shell binds
+         * it -- and `chvt` does the same thing for anyone who would
+         * rather type a word */
+        want_console = true;
+        return;
     case 0x1b:              /* ESC: might be an arrow, wait and see */
         esc_state = 1;
         return;

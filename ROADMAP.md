@@ -317,9 +317,27 @@ not alone. a drive with no table gets one entry covering the whole of
 itself -- an image written straight to sector zero is ordinary, and
 should not be a special case anywhere above.
 
-**0.2.16 more than one screen.** alt+f1 through f4, several sessions at
-once, each with its own foreground process and its own scrollback. the
-terminal layer has been one machine pretending to be one seat.
+**0.2.16 more than one screen.** ~~alt+f1 through f4, several sessions
+at once, each with its own foreground process and its own scrollback.
+the terminal layer has been one machine pretending to be one seat.~~
+**done in 0.2.16.** the console already kept a shadow of every cell --
+added in 0.1.x so a block cursor could put back the character it was
+sitting on -- and a console nobody is looking at turns out to be
+exactly that shadow with nothing painting it. most of the driver is the
+code it always was with one question in front of the parts that touch
+pixels.
+
+the harder half was the shell. its state was file-static, which was
+correct while there was one of it and became a bug the moment there
+were four: four shells sharing one working directory is one shell with
+four windows onto it. it is a session per console now, reached through
+the calling thread rather than passed in.
+
+and one rule the whole thing turns on: **output belongs to its writer,
+input belongs to the screen**. a shell on console 2 printing while
+console 1 is displayed must not scribble over console 1; a process at
+the front of console 3 is at the front of console 3 and is still not
+being typed at.
 
 **0.2.17 something to point with.** the ps/2 mouse, a cursor, and
 whatever it turns out to be good for. the first input that is not a

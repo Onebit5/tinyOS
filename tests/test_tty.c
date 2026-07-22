@@ -30,6 +30,21 @@ void kprintf(const char *fmt, ...) {
     va_end(ap);
 }
 
+/* which console the calling thread is on, and which is being looked at.
+ * the tty asks both on nearly every call now: a process may read the
+ * keyboard only if it is at the front of its own console *and* that
+ * console is the one on the screen */
+#include "sched/thread.h"
+static struct thread this_thread;
+struct thread *sched_current(void) { return &this_thread; }
+
+static unsigned shown;
+static int switches;
+unsigned console_active(void) { return shown; }
+void console_switch(unsigned n) { shown = n; switches++; }
+static int scrolled;
+void console_scroll_back(int lines) { scrolled += lines; }
+
 /* what the tty does to threads, recorded rather than done */
 static int woken_thread = -1;
 static int killed_thread = -1;
@@ -198,6 +213,87 @@ int main(void) {
     CHECK(tty_intercept(KEY_CTRL_Z),
           "ctrl+z at a prompt is swallowed rather than typed");
     CHECK(stopped_count == 0, "and stops nobody");
+
+    /* ---- four consoles, one screen ---------------------------------
+     *
+     * the terminal layer was one machine pretending to be one seat.
+     * every question it answers now has one answer per console, and the
+     * one that matters is: a process at the front of console 3 is at
+     * the front of console 3 and is still not being typed at */
+    {
+        this_thread.console = 0;
+        shown = 0;
+        switches = 0;
+
+        /* switching is answered by the terminal itself rather than
+         * passed on -- which screen is shown is the machine's business,
+         * not the business of whatever happens to be running */
+        CHECK(tty_intercept(KEY_CONSOLE_1 + 2), "alt+f3 is taken");
+        CHECK(shown == 2 && switches == 1, "and shows console 3");
+        CHECK(tty_intercept(KEY_CONSOLE_1), "alt+f1 too");
+        CHECK(shown == 0, "and comes back");
+
+        scrolled = 0;
+        CHECK(tty_intercept(KEY_SCROLL_UP), "shift+pageup is taken");
+        CHECK(scrolled > 0, "and looks back up the console");
+        CHECK(tty_intercept(KEY_SCROLL_DOWN), "shift+pagedown too");
+        CHECK(scrolled == 0, "and comes back down");
+
+        /* the foreground is per console */
+        int a = process_create("one", 0, 0, false, 0);
+        int b = process_create("two", 0, 0, false, 0);
+        process_set_thread(a, 41);
+        process_set_thread(b, 42);
+
+        this_thread.console = 0;
+        tty_set_foreground(a);
+        this_thread.console = 1;
+        tty_set_foreground(b);
+
+        this_thread.console = 0;
+        CHECK(tty_foreground() == a, "console 1 has its own foreground");
+        this_thread.console = 1;
+        CHECK(tty_foreground() == b, "and console 2 has another");
+
+        /* and only the console being *looked at* is the one the
+         * keyboard is talking to */
+        shown = 0;
+        this_thread.console = 0;
+        CHECK(tty_is_current(a), "the front of the shown console may read");
+        this_thread.console = 1;
+        CHECK(!tty_is_current(b),
+              "and the front of a console nobody is looking at may not -- "
+              "which is the whole point of there being more than one");
+
+        char buf[16];
+        CHECK(tty_read_line(b, buf, sizeof buf) == -1,
+              "so its read is refused rather than taking somebody else's "
+              "keys");
+
+        shown = 1;
+        CHECK(tty_is_current(b), "and it may once its console is shown");
+
+        /* ctrl+c goes to the console being looked at, not to whichever
+         * console the interrupted thread happened to be on */
+        shown = 0;
+        this_thread.console = 3;        /* an interrupt is on nobody's */
+        CHECK(tty_intercept(KEY_CTRL_C), "ctrl+c is taken");
+        CHECK(process_interrupt_pending(a),
+              "and reaches the front of the console on the screen");
+        CHECK(!process_interrupt_pending(b),
+              "and not the front of one that is not");
+        process_take_interrupt(a);
+
+        this_thread.console = 0;
+        tty_set_foreground(TTY_SHELL);
+        this_thread.console = 1;
+        tty_set_foreground(TTY_SHELL);
+        this_thread.console = 0;
+        shown = 0;
+
+        process_exited(a, 0, 0); process_collect(a, NULL);
+        process_exited(b, 0, 0); process_collect(b, NULL);
+    }
 
     /* ---- handing the terminal back ---- */
     tty_set_foreground(TTY_SHELL);

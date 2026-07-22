@@ -27,8 +27,25 @@ void kprintf_to_console(bool on) {
     to_console = on;
 }
 
+/* set once the consoles exist, so that this can ask which one is being
+ * looked at and which one is doing the writing. NULL before that, when
+ * there is exactly one of everything and the question does not arise */
+static bool (*serial_wants)(void);
+
+void kprintf_serial_filter(bool (*fn)(void)) { serial_wants = fn; }
+
 static void putc_both(char c) {
-    serial_putchar(c);
+    /* the serial line is a *second window onto the same seat*, not a
+     * fifth console. four shells all writing down one wire is four
+     * conversations in one column of text -- and since the keyboard
+     * already gives its keys to whichever console is being looked at,
+     * anything else would mean typing at one shell and reading another.
+     *
+     * this only became a question when there was more than one console.
+     * before that every writer was the only writer */
+    if (serial_wants == NULL || serial_wants()) {
+        serial_putchar(c);
+    }
 
     klog[klog_head] = c;
     klog_head = (klog_head + 1) % KLOG_SIZE;

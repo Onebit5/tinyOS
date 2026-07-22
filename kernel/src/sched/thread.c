@@ -109,6 +109,14 @@ static struct thread *create(const char *name, void (*entry)(void *),
     t->entry       = entry;
     t->arg         = arg;
     t->id          = next_id++;
+
+    /* whichever console the thread that made this one belongs to. the
+     * very first thread has nobody to inherit from and gets zero, which
+     * is the console the machine boots looking at */
+    {
+        struct thread *maker = sched_current();
+        t->console = (maker != NULL) ? maker->console : 0;
+    }
     t->next        = NULL;
     t->wait_next   = NULL;
     t->from_heap   = true;

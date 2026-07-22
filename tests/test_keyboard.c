@@ -31,12 +31,32 @@ void waitq_wake_all(struct waitq *q) { (void)q; }
 /* input_push offers every key to the tty first, so ctrl+c aimed at a
  * program becomes an interrupt rather than a character. nothing is in
  * the foreground here, so nothing is intercepted */
-bool tty_intercept(int key) { (void)key; return false; }
+
 
 #include "drivers/keyboard.h"
 #include "drivers/input.h"
 
+/* which console the reader belongs to, and which is being looked at.
+ * one input ring per console is the only arrangement in which a
+ * keypress has one reader -- gating a shared ring afterwards is a race
+ * with extra steps */
+static unsigned my_console_n, shown_console_n;
+unsigned tty_my_console(void) { return my_console_n; }
+unsigned console_active(void) { return shown_console_n; }
+
+/* the tty gets first refusal on every key and takes the ones that mean
+ * something to the machine rather than to whatever is running */
+static int intercepted = -1;
+bool tty_intercept(int key) {
+    intercepted = key;
+    return false;       /* let everything through to the ring as well */
+}
+
+
 static int failures = 0;
+#define CHECK(cond, msg) do { \
+    if (!(cond)) { printf("FAIL: %s\n", msg); failures++; } \
+} while (0)
 
 static void feed(const uint8_t *bytes, int n) {
     for (int i = 0; i < n; i++) keyboard_feed(bytes[i]);
@@ -140,6 +160,84 @@ int main(void) {
     if (n != 255) {
         printf("FAIL overflow: drained %d keys, want 255\n", n);
         failures++;
+    }
+
+    /* ---- one keypress, one reader ------------------------------------
+     *
+     * this is the bug 0.2.16 shipped with. with a single input ring,
+     * four shells all block on it and a keypress wakes every one of
+     * them -- whichever the scheduler happens to pick takes the
+     * character, and it picks the same one every time, so every
+     * keystroke went consistently to the wrong console.
+     *
+     * one ring per console is the only arrangement where the question
+     * has one answer. gating a shared ring afterwards is a race with
+     * extra steps: by then something has already been woken and
+     * something has already been consumed */
+    {
+        shown_console_n = 0;
+
+        /* typed at console 1 */
+        keyboard_feed(0x1e);            /* 'a' */
+        keyboard_feed(0x1e | 0x80);
+
+        my_console_n = 1;
+        CHECK(input_getchar() == -1,
+              "a key typed at console 1 is not there for console 2");
+        my_console_n = 2;
+        CHECK(input_getchar() == -1, "nor for console 3");
+
+        my_console_n = 0;
+        CHECK(input_getchar() == 'a',
+              "and console 1 has it -- exactly one reader, which is the "
+              "whole point of a ring each");
+        CHECK(input_getchar() == -1, "and only once");
+
+        /* the screen moves, and so do the keys */
+        shown_console_n = 2;
+        keyboard_feed(0x30);            /* 'b' */
+        keyboard_feed(0x30 | 0x80);
+
+        my_console_n = 0;
+        CHECK(input_getchar() == -1,
+              "a key typed after switching does not reach the console that "
+              "was showing");
+        my_console_n = 2;
+        CHECK(input_getchar() == 'b', "it reaches the one that is");
+
+        shown_console_n = 0;
+        my_console_n = 0;
+    }
+
+    /* ---- and the keys that switch ------------------------------------
+     *
+     * alt+f1..f4 is what every unix uses and is frequently unavailable
+     * on a machine running inside something else -- the host takes it
+     * first and switches its own console. so alt with the number row
+     * does the same thing, which is nobody's traditional binding and
+     * exactly why it survives */
+    {
+        intercepted = -1;
+        keyboard_feed(0x38);            /* alt down */
+        keyboard_feed(0x3d);            /* f3 */
+        CHECK(intercepted == KEY_CONSOLE_1 + 2,
+              "alt+f3 asks for console 3");
+
+        intercepted = -1;
+        keyboard_feed(0x04);            /* the digit 3 */
+        CHECK(intercepted == KEY_CONSOLE_1 + 2,
+              "and so does alt+3, for machines whose host eats the "
+              "function keys");
+        keyboard_feed(0x38 | 0x80);     /* alt up */
+
+        /* without alt they are the keys they have always been */
+        while (input_getchar() >= 0) { }
+        keyboard_feed(0x04);
+        keyboard_feed(0x04 | 0x80);
+        CHECK(input_getchar() == '3', "and without alt, 3 is just a three");
+
+        keyboard_feed(0x3d);
+        CHECK(input_getchar() == -1, "while f3 alone still means nothing here");
     }
 
     if (failures == 0) printf("all good\n");

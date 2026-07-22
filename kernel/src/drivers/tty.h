@@ -20,6 +20,18 @@
  * to whenever a program finishes */
 #define TTY_SHELL 0
 
+/* ---- and now there are four of them ---------------------------------
+ *
+ * every question below used to have one answer for the machine. each of
+ * them now has one answer *per console*: which group is at the front of
+ * console 2 is a different question from which is at the front of
+ * console 1, and only the console being looked at is the one the
+ * keyboard is talking to.
+ *
+ * which console a caller means is not passed in. it is whichever the
+ * calling thread belongs to -- because that is always the right answer
+ * and passing it would only be an opportunity to pass the wrong one */
+
 /* the front of the terminal is a *group*, not a process. `cat x | wc`
  * is three processes and one thing the person typing is thinking about,
  * and every question the terminal asks -- may you read these keys, does
@@ -37,6 +49,16 @@ bool tty_intercept(int key);
  * are no signals here, so a suspended job announces itself by the
  * waiting having a second reason to end */
 bool tty_take_stopped(int *pgid);
+
+/* may this process read the keyboard at all? it must be at the front of
+ * its own console *and* that console must be the one on the screen --
+ * a shell on console 3 is at the front of console 3 and is still not
+ * being typed at */
+bool tty_is_current(int pid);
+
+/* which console the calling thread belongs to. for the console driver's
+ * owner hook, and for anything that wants to say where it is */
+unsigned tty_my_console(void);
 
 /* read a line on behalf of a process, echoing it as it is typed.
  *

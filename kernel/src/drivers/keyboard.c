@@ -44,13 +44,21 @@ static const char keymap_shift[128] = {
 
 static bool lshift, rshift, caps;
 static bool lctrl, rctrl;
+static bool lalt, ralt;
 static bool e0_prefix;
+
+static bool shift(void) { return lshift || rshift; }
+static bool alt(void)   { return lalt || ralt; }
 
 /* the e0-prefixed keys I care about. everything else with an e0 in
  * front still gets quietly dropped */
 static void feed_extended(uint8_t code, bool release) {
     if (code == 0x1d) {         /* right ctrl is a modifier, not a key */
         rctrl = !release;
+        return;
+    }
+    if (code == 0x38) {         /* and so is right alt */
+        ralt = !release;
         return;
     }
     if (release) {
@@ -64,8 +72,8 @@ static void feed_extended(uint8_t code, bool release) {
     case 0x53: input_push(KEY_DELETE); break;
     case 0x47: input_push(KEY_HOME);   break;
     case 0x4f: input_push(KEY_END);    break;
-    case 0x49: input_push(KEY_PGUP);   break;
-    case 0x51: input_push(KEY_PGDN);   break;
+    case 0x49: input_push(shift() ? KEY_SCROLL_UP : KEY_PGUP);   break;
+    case 0x51: input_push(shift() ? KEY_SCROLL_DOWN : KEY_PGDN); break;
     default: break;
     }
 }
@@ -89,6 +97,30 @@ void keyboard_feed(uint8_t sc) {
     case 0x2a: lshift = !release; return;
     case 0x36: rshift = !release; return;
     case 0x1d: lctrl  = !release; return;
+    case 0x38: lalt   = !release; return;
+
+    /* "show me that console", two ways.
+     *
+     * alt+f1..f4 is what every unix uses, and on a machine running
+     * inside something else it is frequently not available: the host
+     * takes it first and switches *its* console, which is a confusing
+     * thing to have happen and not something this kernel can do
+     * anything about.
+     *
+     * so alt with the number row does the same thing. it is nobody's
+     * traditional binding and that is exactly why it survives being
+     * run inside a window */
+    case 0x3b: case 0x3c: case 0x3d: case 0x3e:     /* f1..f4 */
+        if (!release && alt()) {
+            input_push(KEY_CONSOLE_1 + (code - 0x3b));
+        }
+        return;
+    case 0x02: case 0x03: case 0x04: case 0x05:     /* 1..4 */
+        if (!release && alt()) {
+            input_push(KEY_CONSOLE_1 + (code - 0x02));
+            return;
+        }
+        break;      /* without alt they are just digits */
     case 0x3a:
         if (!release) {
             caps = !caps;

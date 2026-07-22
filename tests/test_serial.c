@@ -35,6 +35,15 @@ bool tty_intercept(int key) { (void)key; return false; }
 #include "drivers/serial.h"
 #include "drivers/input.h"
 
+/* which console the reader belongs to, and which is being looked at.
+ * one input ring per console is the only arrangement in which a
+ * keypress has one reader -- gating a shared ring afterwards is a race
+ * with extra steps */
+static unsigned my_console_n, shown_console_n;
+unsigned tty_my_console(void) { return my_console_n; }
+unsigned console_active(void) { return shown_console_n; }
+
+
 static int failures = 0;
 
 static void feed(const char *bytes) {
@@ -98,6 +107,31 @@ int main(void) {
     feed("\x1b[1~\x1b[4~\x1b[3~");
     expect_keys((int[]){KEY_HOME, KEY_END, KEY_DELETE}, 3,
                 "and home, end and delete are sent that way by some");
+
+    /* ---- switching consoles over a wire ----
+     *
+     * a serial line has no alt key and no function keys, so it needs a
+     * sequence of ordinary bytes. ctrl+backslash then a digit, because
+     * nothing else here uses it and no shell binds it */
+    /* octal rather than \x1c, which is not the same thing: a hex escape
+     * keeps eating hex digits, so "\x1c3" is one character numbered
+     * 0x1c3 rather than two. octal stops at three digits and cannot */
+    feed("\0343");
+    expect_keys((int[]){KEY_CONSOLE_1 + 2}, 1, "ctrl+\\ then 3 asks for console 3");
+
+    feed("\0341");
+    expect_keys((int[]){KEY_CONSOLE_1}, 1, "and 1 for the first");
+
+    /* the digit is swallowed either way -- a half-typed sequence must
+     * not leave a stray character in somebody's shell */
+    feed("\0349");
+    expect_keys(NULL, 0, "a console that does not exist asks for nothing");
+
+    feed("\034x");
+    expect_keys(NULL, 0, "and neither does something that is not a digit");
+
+    feed("3");
+    expect_keys((int[]){'3'}, 1, "while a digit on its own is still a digit");
 
     /* a CSI sequence I dont handle must vanish, not spray garbage */
     feed("\x1b[Z");

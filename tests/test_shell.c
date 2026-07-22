@@ -35,6 +35,19 @@ void kprintf(const char *fmt, ...) {
 /* ---- kernel stubs ---- */
 struct limine_framebuffer;
 void console_clear(void) { kprintf("<CLEAR>"); }
+
+/* which console this session is. every shell function reaches its own
+ * state through this, so the test drives it directly to check that four
+ * sessions really are four rather than one with four names */
+static unsigned my_console;
+unsigned tty_my_console(void) { return my_console; }
+
+static unsigned shown;
+static int switches;
+unsigned console_active(void) { return shown; }
+void console_switch(unsigned n) { shown = n; switches++; }
+void console_scroll_back(int lines) { (void)lines; }
+size_t console_scrollback_lines(void) { return 0; }
 void console_set_colors(uint32_t f, uint32_t b) { (void)f; (void)b; }
 bool console_ready(void) { return true; }
 int input_getchar_blocking(void) { return '\n'; }
@@ -414,6 +427,11 @@ static void run(const char *line) {
 int main(void) {
     auth_load(passwd_text, sizeof passwd_text - 1);
 
+    /* a session starts here rather than in a static initialiser, since
+     * there is one per console now and a zeroed struct is not a started
+     * session. shell_run does this on the real machine */
+    session_init();
+
     /* mount the archive the build just made, so completion is exercised
      * against the names the kernel really sees */
     {
@@ -522,6 +540,82 @@ int main(void) {
     run("ps | grep hello");
     CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
     CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
+
+    /* ---- four sessions, not one with four names --------------------
+     *
+     * the shell's state used to be file-static, which was correct while
+     * there was one shell and became a bug the moment there were four:
+     * four shells sharing one working directory is one shell with four
+     * windows onto it */
+
+    my_console = 0;
+    session_init();
+    run("cd /notes");
+    CHECK(strcmp(shell_cwd, "/notes") == 0, "console 1 goes somewhere");
+
+    my_console = 1;
+    session_init();
+    CHECK(strcmp(shell_cwd, "/") == 0,
+          "and console 2 is still at the root -- a separate session, not "
+          "a separate window onto the same one");
+    run("cd /notes");
+    run("cd ..");
+    CHECK(strcmp(shell_cwd, "/") == 0, "and can move on its own");
+
+    my_console = 0;
+    CHECK(strcmp(shell_cwd, "/notes") == 0,
+          "with console 1 exactly where it was left, having been nowhere "
+          "near any of that");
+
+    /* jobs are per session too, and so are their numbers */
+    my_console = 0;
+    run_stops = true;
+    job_is_alive = true;
+    run("cat");
+    CHECK(strstr(out, "[1]") != NULL, "console 1's first job is job 1");
+
+    my_console = 1;
+    run("cat");
+    CHECK(strstr(out, "[1]") != NULL,
+          "and so is console 2's -- the numbering starts again per "
+          "session, the way the history and the prompt do");
+
+    my_console = 0;
+    run("jobs");
+    CHECK(strstr(out, "[1]") != NULL, "console 1 still has its own");
+    run_stops = false;
+
+    /* and the prompt says which seat you are in, because four consoles
+     * that look identical is four chances to type in the wrong one */
+    my_console = 2;
+    session_init();
+    out_reset();
+    prompt();
+    CHECK(strstr(out, "[3]") != NULL, "the prompt says which console it is");
+
+    my_console = 0;
+    session_init();
+
+    /* ---- switching ---- */
+
+    shown = 0;
+    switches = 0;
+    run("chvt 3");
+    CHECK(shown == 2 && switches == 1, "chvt shows another console");
+    run("chvt 1");
+    CHECK(shown == 0, "and comes back");
+
+    run("chvt 9");
+    CHECK(strstr(out, "numbered from 1") != NULL,
+          "a console that does not exist is refused");
+    run("chvt x");
+    CHECK(strstr(out, "chvt <n>") != NULL, "and so is something that is not a number");
+
+    run("chvt");
+    CHECK(strstr(out, "console 1") != NULL,
+          "and with no argument it says which one you are on -- alt+f1 "
+          "does the same thing from a keyboard, and somebody on a serial "
+          "line has neither an alt key nor a function key");
 
     /* ---- partitions ------------------------------------------------
      *

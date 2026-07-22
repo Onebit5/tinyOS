@@ -60,6 +60,15 @@ struct thread {
     struct addrspace *space;
 
     int  id;
+
+    /* which screen this thread's output goes to, and which keyboard it
+     * may read. inherited from whoever created it, so a program started
+     * from the shell on console 2 prints on console 2 -- output belongs
+     * to its writer rather than to whichever console is being looked at,
+     * and that is the whole difference between four consoles and one
+     * console with four names */
+    unsigned console;
+
     char name[THREAD_NAME_MAX];
 
     /* which core this is on, or -1 for none. a thread in the ring marked

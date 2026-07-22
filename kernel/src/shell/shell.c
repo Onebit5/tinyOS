@@ -1,6 +1,7 @@
 #include "shell/shell.h"
 #include "drivers/input.h"
 #include "drivers/console.h"
+#include "drivers/tty.h"
 #include "drivers/pit.h"
 #include "cpu/system.h"
 #include "lib/kprintf.h"
@@ -58,7 +59,66 @@ static void run_argv(int argc, char **argv);
 /* where the shell is standing. declared here because looking a command
  * up has to read it, and that happens before the editing code that owns
  * the rest of the shell's state */
-static char shell_cwd[PATH_MAX];
+#define JOBS_MAX 8
+
+enum job_state { JOB_FREE = 0, JOB_RUNNING, JOB_STOPPED };
+
+struct shell_job {
+    int             number;         /* what you type after fg */
+    enum job_state  state;
+    struct job      j;
+    char            line[LINE_MAX];
+};
+
+/* ---- a session ------------------------------------------------------
+ *
+ * there are four consoles now, and a console with a shell on it is a
+ * session: somebody logged in, standing somewhere, with their own
+ * history and their own jobs. all of that used to be file-static, which
+ * was correct while there was one of them and became a bug the moment
+ * there were four -- four shells sharing one working directory is one
+ * shell with four windows onto it.
+ *
+ * so it is a struct, one per console, and every shell function reaches
+ * it through me(). which one is *not* passed in: it is whichever
+ * console the calling thread is on, because that is always the right
+ * answer and an argument would only be a chance to pass the wrong one */
+
+#define HISTORY_SESSION_MAX 16
+
+struct session {
+    char cwd[PATH_MAX];
+
+    int  uid;
+    char user[AUTH_NAME_MAX];
+
+    char history[HISTORY_SESSION_MAX][LINE_MAX];
+    int  hist_count;
+
+    struct shell_job jobs[JOBS_MAX];
+    int  next_job_number;
+    int  current_job;
+
+    /* the line as it was typed, kept so a job can be named later */
+    char typed_line[LINE_MAX];
+};
+
+static struct session sessions[VCONSOLE_COUNT];
+
+static struct session *me(void) {
+    unsigned n = tty_my_console();
+    return &sessions[n < VCONSOLE_COUNT ? n : 0];
+}
+
+#define shell_cwd       (me()->cwd)
+#define current_uid     (me()->uid)
+#define current_user    (me()->user)
+#define history         (me()->history)
+#define hist_count      (me()->hist_count)
+#define jobs            (me()->jobs)
+#define next_job_number (me()->next_job_number)
+#define current_job     (me()->current_job)
+#define typed_line      (me()->typed_line)
 
 /* where a bare command name is looked for, in order.
  *
@@ -117,15 +177,26 @@ static void launch(const char *path, int argc, char **argv, bool announce);
 
 /* who is at the keyboard. every program the shell starts inherits it,
  * and nothing in ring 3 can reach in and change it */
-static int current_uid;
-static char current_user[AUTH_NAME_MAX] = "nobody";
 
 /* it is a kernel thread rather than a process, so it keeps its own --
  * and hands it to everything it starts, which is what makes `cd`
  * somewhere and then running something mean what anybody would expect */
-static void shell_cwd_init(void) {
+/* a session starts here rather than in a static initialiser.
+ *
+ * that used to be the same thing: one shell, one set of globals, and
+ * `= 1` on the job counter was enough. with a session per console the
+ * struct starts zeroed, and a zero job number means "no job" everywhere
+ * else in this file -- so every session's first job was job zero, which
+ * is to say no job at all */
+static void session_init(void) {
     shell_cwd[0] = '/';
     shell_cwd[1] = '\0';
+    next_job_number = 1;
+    current_job = 0;
+    hist_count = 0;
+    for (int i = 0; i < JOBS_MAX; i++) {
+        jobs[i].state = JOB_FREE;
+    }
 }
 static size_t common_prefix(const char *a, const char *b);
 
@@ -832,23 +903,10 @@ static void missing(const char *what, const char *name) {
  * being suspended or being put in the background -- in both cases it is
  * still there and you will want to say so later. */
 
-#define JOBS_MAX 8
 
-enum job_state { JOB_FREE = 0, JOB_RUNNING, JOB_STOPPED };
-
-struct shell_job {
-    int             number;         /* what you type after fg */
-    enum job_state  state;
-    struct job      j;
-    char            line[LINE_MAX];
-};
-
-static struct shell_job jobs[JOBS_MAX];
-static int next_job_number = 1;
 
 /* the last one referred to, which is what a bare `fg` means. the same
  * one `+` marks in the listing */
-static int current_job;
 
 static struct shell_job *job_slot(int number) {
     for (int i = 0; i < JOBS_MAX; i++) {
@@ -920,7 +978,6 @@ static void jobs_reap(void) {
 
 /* the line as it was typed, kept so a job can be named later. it is
  * copied before the split chops it into words with NULs */
-static char typed_line[LINE_MAX];
 
 /* what to do with a job that came back from the foreground. either it
  * finished, in which case there is nothing to remember, or ctrl+z
@@ -1433,6 +1490,46 @@ static void cmd_reboot(int argc, char **argv) {
     reboot();
 }
 
+/* switch screens from the keyboard-less side of the machine.
+ *
+ * alt+f1..f4 does this from a keyboard, and a keyboard is the obvious
+ * way -- but somebody on the serial line has no alt key and no function
+ * keys, and telling them the feature is not for them would be a strange
+ * thing for a kernel to decide */
+static void cmd_chvt(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("this is console %u of %d.\n",
+                tty_my_console() + 1, VCONSOLE_COUNT);
+        kprintf("  chvt <n>        show another one\n");
+        kprintf("  alt+1 .. alt+4  the same, from a keyboard\n");
+        kprintf("  alt+f1 .. f4    also, where the host does not eat "
+                "them first\n");
+        kprintf("  ctrl+\\ then n   the same, over a serial line\n");
+        kprintf("  shift+pageup    look back up this one\n");
+        return;
+    }
+
+    int n = 0;
+    for (const char *p = argv[1]; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9') {
+            kprintf("chvt <n>, where n is 1 to %d\n", VCONSOLE_COUNT);
+            return;
+        }
+        n = n * 10 + (*p - '0');
+    }
+    if (n < 1 || n > VCONSOLE_COUNT) {
+        kprintf("there are %d consoles, numbered from 1\n", VCONSOLE_COUNT);
+        return;
+    }
+
+    console_switch((unsigned)(n - 1));
+
+    /* said on *this* console, which is the one nobody is looking at any
+     * more -- so it is there when they come back rather than printed
+     * over whatever they switched to */
+    kprintf("showing console %d\n", n);
+}
+
 static const struct command commands[] = {
     { "help",   "list what thou may command",           cmd_help, false, "help [name]" },
     { "clear",  "wipe the screen clean",                cmd_clear, false, NULL },
@@ -1454,6 +1551,7 @@ static const struct command commands[] = {
     { "sync",   "put what is in memory onto the disk",  cmd_sync, false, NULL },
     { "mount",  "which filesystem is where; mount <n> moves it", cmd_mount, false, "mount [number]" },
     { "parts",  "what each drive says it holds",        cmd_parts, false, NULL },
+    { "chvt",   "show another console; alt+f1..f4 too", cmd_chvt, false, "chvt [1-4]" },
     { "cpus",   "the processors, and which are awake",  cmd_cpus, false, NULL },
     { "locks",  "what guards what, and what waits",     cmd_locks, false, NULL },
     { "cd",     "go somewhere; no argument means the root", cmd_cd, true, "cd [directory]" },
@@ -1816,15 +1914,16 @@ static void prompt(void) {
     jobs_reap();
 
     console_set_colors(COLOR_PROMPT, 0x101018);
-    kprintf("%s@velvet:%s%s ", current_user, shell_cwd,
-            current_uid == 0 ? "#" : "$");
+    /* the console number is in the prompt because with four of them
+     * looking identical, knowing which one you are typing at is not a
+     * thing to have to remember */
+    kprintf("%s@velvet[%u]:%s%s ", current_user, tty_my_console() + 1,
+            shell_cwd, current_uid == 0 ? "#" : "$");
     console_set_colors(COLOR_TEXT, 0x101018);
 }
 
 /* ---- history -------------------------------------------------------- */
 
-static char history[HISTORY_MAX][LINE_MAX];
-static int  hist_count;     /* how many entries are real */
 
 static void history_add(const char *line) {
     if (line[0] == '\0') {
@@ -2359,7 +2458,7 @@ static void cmd_logout(int argc, char **argv) {
 }
 
 void shell_run(void) {
-    shell_cwd_init();
+    session_init();
 
     char line[LINE_MAX];
 

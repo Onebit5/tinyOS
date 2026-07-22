@@ -153,18 +153,51 @@ static void flusher_thread(void *arg) {
     }
 }
 
+/* which console the calling thread belongs to. the console driver asks
+ * this on every write, because output belongs to its writer rather than
+ * to whichever console is being looked at -- a shell on console 2
+ * printing while console 1 is displayed must not scribble over console
+ * 1, and that is the whole difference between four consoles and one
+ * console with four names */
+static unsigned which_console(void) {
+    struct thread *t = sched_current();
+    return (t != NULL) ? t->console : console_active();
+}
+
+/* and whether it should go down the wire as well. the serial line shows
+ * whichever console is on the screen -- it is a second window onto one
+ * seat rather than a fifth console, because the keyboard already gives
+ * its keys to the console being looked at and anything else would mean
+ * typing at one shell while reading another */
+static bool writing_to_the_shown_console(void) {
+    return which_console() == console_active();
+}
+
+/* the first shell, which also finishes the boot. the other three are
+ * plain sessions and skip all of this */
 static void shell_thread(void *arg) {
     (void)arg;
 
     uint64_t gained = pmm_reclaim_bootloader();
     kprintf("reclaimed %lu KiB of bootloader memory (%lu MiB usable now)\n",
             gained / 1024, pmm_total_bytes() / (1024 * 1024));
+    kprintf("four consoles: alt+1..4 (or alt+f1..f4, if your host does "
+            "not eat them),\n");
+    kprintf("             ctrl+\\ then a digit on serial, or `chvt`. "
+            "shift+pageup looks back\n");
     kprintf("boot complete, handing the screen to the shell\n\n");
-
-    /* the screen is the user's from here */
-    kprintf_to_console(true);
     greet();
 
+    shell_run();
+}
+
+/* the other consoles. each is its own session -- its own login, its own
+ * working directory, its own history and jobs -- and each sits waiting
+ * on a screen nobody is looking at until somebody presses alt and a
+ * function key */
+static void console_thread(void *arg) {
+    (void)arg;
+    greet();
     shell_run();
 }
 
@@ -273,8 +306,46 @@ void kmain(const struct ph_handoff *handoff) {
      * the loader's memory, because the page they start on is in it */
     smp_init(interrupts_acpi(), interrupts_timer_rate());
 
+    /* the console driver has to be able to ask who is writing before
+     * anything writes. set before the shells exist, because the first
+     * thing they do is print */
+    console_set_owner_hook(which_console);
+    kprintf_serial_filter(writing_to_the_shown_console);
+
+    /* the screen is the user's from here.
+     *
+     * this used to be done by the first shell, once it had finished
+     * reclaiming the loader's memory -- which was fine while it was the
+     * only shell. with four of them it is a race: the other three print
+     * their greeting and their login prompt as soon as they run, and
+     * anything printed before this line goes nowhere at all. the effect
+     * was three consoles sitting at an invisible "username:" waiting
+     * for an answer to a question nobody had been asked.
+     *
+     * so it happens here, before any of them exists. nothing runs until
+     * the sti at the end of this function anyway */
+    kprintf_to_console(true);
+
     if (thread_create("shell", shell_thread, NULL) == NULL) {
         panic("no memory for a shell. there is nobody left to talk to");
+    }
+
+    /* and one for each of the other screens. a thread inherits the
+     * console of whoever made it, so each of these is moved onto its
+     * own before it runs -- it is parked until then, so nothing of it
+     * has printed anywhere yet */
+    for (unsigned i = 1; i < VCONSOLE_COUNT; i++) {
+        char name[THREAD_NAME_MAX];
+        name[0] = 't'; name[1] = 't'; name[2] = 'y';
+        name[3] = (char)('0' + i); name[4] = '\0';
+
+        struct thread *t = thread_create_parked(name, console_thread, NULL);
+        if (t == NULL) {
+            kprintf("consoles   : no memory for console %u\n", i);
+            break;
+        }
+        t->console = i;
+        sched_wake_thread(t->id);
     }
 
     /* and something to keep the disk honest. it does not remove the

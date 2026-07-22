@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.15** (**partitions.** a disk is not a filesystem; it is a table saying where several of them are)
+**version: 0.2.16** (**more than one screen.** four consoles, four sessions, alt+f1 through f4)
 
 ## what it does
 
@@ -53,6 +53,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a write-back block cache, a flusher, and `sync`
 - [x] ext2, read and written: owners, permissions, symlinks, real timestamps
 - [x] mbr and gpt, and mounting by which partition rather than which drive answered
+- [x] four virtual consoles, each its own session, with scrollback
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -161,6 +162,123 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## more than one screen
+
+the terminal layer was one machine pretending to be one seat: one
+screen, one foreground process, one shell. every real system has had
+several since the eighties for the same reason — something is running
+and you want to do something else, and *suspending* it is not the same
+as putting it somewhere.
+
+**alt+1 through alt+4** switches. alt+f1..f4 does the same and is what
+every unix uses — but on a machine running inside something else it is
+frequently unavailable, because the host takes it first and switches
+*its* console. that is not something a kernel can do anything about, so
+there is a binding that nobody else claims. over a serial line, ctrl+`\`
+then a digit; or `chvt <n>`, which works anywhere. shift+pageup looks
+back up whichever console is showing.
+
+### the shadow buffer was already there
+
+the console has kept a copy of what is in every cell since 0.1.x — added
+so a block cursor could put back the character it was sitting on, since
+a framebuffer cannot tell you what used to be there.
+
+**a console nobody is looking at is exactly that shadow with nothing
+painting it.** so most of the driver is the code it always was with one
+question in front of the parts that touch pixels:
+
+```c
+static void put_cell(struct vconsole *c, size_t col, size_t row,
+                     unsigned char ch) {
+    c->cells[shadow_row(c, row)][col] = ch;
+    if (showing(c) && ready) {
+        blit(col, row, ch, c->fg, c->bg);
+    }
+}
+```
+
+switching consoles is a repaint from the shadow, which is the only place
+an off-screen console's contents have been living. scrollback is the
+same array made taller: the visible window is its last `rows` entries,
+and looking back is subtracting from where that window starts.
+
+**a cell has to remember its colour, not just its character.** that did
+not matter while the screen was only ever painted forwards — the colour
+in force at the time was the colour that went on the glass, and nothing
+ever went back. a console being switched away from and back *is* going
+back, and without it everything repaints in whatever colour happens to
+be current: switch away and return, and the console comes back one flat
+shade, prompt and all. a full colour per cell would be megabytes, so
+it is a palette index — one byte, and a shell uses about four colours.
+
+### one rule, stated twice
+
+**output belongs to its writer. input belongs to the screen.**
+
+a shell on console 2 printing while console 1 is displayed must not
+scribble over console 1 — that is the entire difference between four
+consoles and one console with four names. so every thread carries which
+console it belongs to, inherited from whoever made it, and the console
+driver *asks* on each write rather than being told.
+
+the other direction is the opposite: a process at the front of console 3
+is at the front of console 3 and **is still not being typed at**. so a
+read needs both — the front of its own console, and that console on the
+screen:
+
+```c
+bool tty_is_current(int pid) {
+    unsigned n = tty_my_console();
+    if (n != console_active()) {
+        return false;
+    }
+    return process_pgid(pid) == foreground[n];
+}
+```
+
+ctrl+c follows the same rule from the other side: it arrives from the
+keyboard, so it is aimed at whichever console is being *looked at*, not
+at whichever console the interrupted thread happened to be on.
+
+that rule is why there is **an input ring per console** rather than one
+shared one with a check in front of it. with a single ring, four shells
+all block on it and a keypress wakes every one of them — whichever the
+scheduler picks takes the character, and it picks the same one every
+time. gating afterwards is a race with extra steps, because by then
+something has already been woken and something has already been
+consumed. a shell on a console nobody is watching is not competing for
+keys; it is asleep on a queue nothing is filling.
+
+and the serial line is **a second window onto the same seat**, not a
+fifth console. four shells writing down one wire is four conversations
+in one column of text — and since the keyboard already gives its keys to
+the console on the screen, anything else would mean typing at one shell
+while reading another.
+
+### the shell was the harder half
+
+its state was file-static — working directory, user, history, jobs. that
+was correct while there was one shell and became a bug the moment there
+were four, because four shells sharing one working directory is one
+shell with four windows onto it. it is a `struct session` per console
+now, reached through the calling thread rather than passed in: that is
+always the right answer, and an argument would only be a chance to pass
+the wrong one.
+
+one thing that broke in the move is worth keeping: `next_job_number = 1`
+was a static initialiser, and a zeroed session doesn't get one — so
+every session's first job was job zero, which means "no job" everywhere
+else in that file. a session is started rather than merely allocated
+now.
+
+the prompt says which seat you are in, because four consoles that look
+identical is four chances to type in the wrong one:
+
+```
+igor@velvet[2]:/notes#
+```
 
 ## partitions
 
@@ -1871,6 +1989,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.16** — four virtual consoles, because the terminal layer was one machine pretending to be one seat. the console had kept a shadow of every cell since 0.1.x, added so a block cursor could put back the character underneath it — and a console nobody is looking at turns out to be exactly that shadow with nothing painting it, so most of the driver is the code it always was with one question in front of the parts that touch pixels. scrollback is the same array made taller. the whole thing turns on one rule stated twice: **output belongs to its writer** (a shell on console 2 must not scribble over console 1, so every thread carries its console and the driver asks on each write) and **input belongs to the screen** (a process at the front of console 3 is at the front of console 3 and is still not being typed at, so a read needs both conditions; ctrl+c arrives from the keyboard and is aimed at the console being looked at, not at whichever the interrupted thread was on). the shell was the harder half: its state was file-static, correct while there was one of it and a bug the moment there were four, so it is a session per console reached through the calling thread. that move broke something quietly — `next_job_number = 1` was a static initialiser and a zeroed session does not get one, so every session's first job was job zero, which means "no job" everywhere else in the file.
 - **0.2.15** — partitions, because a disk is not a filesystem: it is a table saying where several of them are, and the kernel had been asking each drive whether sector zero looked like a superblock. both tables — mbr's four sixteen-byte entries from 1983, and gpt's checksummed header and array, with the protective mbr a gpt disk carries so old tools see a full disk rather than an empty one. the crc is the whole difference between them: a corrupt mbr is simply followed because nothing in the format could notice, while a gpt that does not add up is *known* to be corrupt and is refused — so the parser is judged by what it will not do, and the tests spend more on the refusals than the happy path. the filesystem is handed a *view* of one partition rather than the drive, bounded at both ends, so it never finds out it is not alone; the cache stays underneath on absolute addresses so it remains correct when the mount moves. every partition is tried at boot rather than only the first, since an efi partition in slot one and the real filesystem in slot two is the ordinary arrangement. `parts` lists what each drive says it holds and what was actually found on it — a different question — and `mount <n>` moves the mount, bluntly and with a warning, because there is no reference counting here that could do better. `tools/readext2.py` had to learn about tables too: it read from sector zero, and the moment the disk was partitioned it would have quietly stopped being the only external check this project has.
 - **0.2.14** — ext2, read and written: superblock, block groups, bitmaps, inodes, and the twelve-direct-then-indirect block map every unix filesystem of the era used. the whole difference from fat is one sentence — in fat a file *is* its directory entry, and here a name and a file are different objects — and everything else follows: permissions belong to the file rather than the name, a rename moves nothing, and `chmod` finally has somewhere to write an answer. there is no e2fsck on this machine, so the formatter and the driver would have been two programs by one author agreeing with each other; `tools/readext2.py` is written from the on-disk layout and run by the test target *after* the suite has finished writing, so what it validates is what the driver wrote. it found two real bugs before the driver even existed: every subdirectory was being built as though it were the root, and a fast symlink — one stored *in* its own block pointers — was having its target walked as block numbers, which is the sharpest edge in the format. `disk.c` mounts ext2 or fat32 and almost nothing above it changed, which is what having a vfs since 0.1.11 was for. and the new capability exposed an old bug: `vfs_may_read` only ever checked the *other* bits, which was invisible while nothing had an owner and made a 0600 file unreadable by its owner the moment anything did.
 - **0.2.13** — a block cache, slotted exactly where fat32's two function pointers already were, which is the whole reason the filesystem needed no changes at all: it was handed a way to move sectors and it still is. the win is in *which* sectors — walking a cluster chain asks for the same table sectors over and over, and `disk` now prints the hit rate. writes are write-back, which is a promise broken on purpose: until a sync, the disk does not hold what the machine believes. so `reboot` and `poweroff` sync first (before this, a write reached the drive as it was made and a reboot lost nothing by definition), and a flusher thread syncs every three seconds — which does not replace `sync` but turns "you might lose anything" into "you might lose the last few seconds". a whole-block write skips reading the block first, since fetching bytes about to be thrown away doubles the cost of writing a big file; a partial write must not, and that one fails quietly — overwrite one sector of eight, evict, and the other seven are gone. no lock of its own, because everything reaches it through the disk's, and a second lock at the same rank inside the first is what the rank check exists to refuse. writing the tests found something worse than a bug: the shell suite's `reboot` stub called `exit(0)`, so every assertion after it had been vacuous — nothing had tested reboot before, so nothing had noticed the suite was quietly running half of itself.
