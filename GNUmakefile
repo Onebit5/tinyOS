@@ -241,7 +241,8 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/fat32 bin/tests/vfs bin/tests/philemon \
              bin/tests/locks bin/tests/path bin/tests/args \
              bin/tests/shell bin/tests/pipe bin/tests/bcache \
-             bin/tests/ext2 bin/tests/part bin/tests/switch
+             bin/tests/ext2 bin/tests/part bin/tests/console \
+             bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
                     kernel/src/sched/spinlock.c
@@ -305,6 +306,11 @@ bin/tests/ext2:     tests/test_ext2.c     kernel/src/fs/ext2.c \
                     kernel/src/lib/string.c
 bin/tests/part:     tests/test_part.c     kernel/src/drivers/part.c \
                     kernel/src/lib/string.c
+# the framebuffer is an array here, so what the screen shows can be read
+# back. every path that touches pixels ends up in one place, which is
+# the whole reason a console is testable without a machine
+bin/tests/console:  tests/test_console.c  kernel/src/drivers/console.c \
+                    kernel/src/drivers/font.c kernel/src/lib/string.c
 bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c
