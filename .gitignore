@@ -1,0 +1,8 @@
+# build junk
+bin/
+obj/
+iso_root/
+*.iso
+
+# limine binaries get pulled in by make, no point tracking them
+limine/
