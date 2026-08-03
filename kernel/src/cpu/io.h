@@ -16,4 +16,11 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
+/* tiny delay for ancient hardware that cant keep up with back to back
+ * port writes. port 0x80 is the post-code port, writing junk there is
+ * the traditional no-op */
+static inline void io_wait(void) {
+    outb(0x80, 0);
+}
+
 #endif
