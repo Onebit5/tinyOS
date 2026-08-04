@@ -10,8 +10,11 @@
 #include "drivers/keyboard.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
+#include "lib/string.h"
+#include "mm/pmm.h"
+#include "mm/kmalloc.h"
 
-#define VERSION "0.0.5"
+#define VERSION "0.0.6"
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a
@@ -36,6 +39,61 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 static void hcf(void) {
     for (;;) {
         asm volatile ("hlt");
+    }
+}
+
+/* the m4 demo: put the fresh allocators through their paces at boot.
+ * every failure panics, so reaching the prompt means it all held */
+static void memory_selftest(void) {
+    uint64_t free_before = pmm_free_bytes();
+
+    /* pmm round trip: 8 frames, distinct patterns, verify, return */
+    uint64_t frames[8];
+    for (int i = 0; i < 8; i++) {
+        frames[i] = pmm_alloc();
+        if (frames[i] == 0) {
+            panic("selftest: the pmm ran dry after %d pages", i);
+        }
+        memset(pmm_phys_to_virt(frames[i]), 0xa5 + i, PAGE_SIZE);
+    }
+    for (int i = 0; i < 8; i++) {
+        uint8_t *p = pmm_phys_to_virt(frames[i]);
+        for (int j = 0; j < PAGE_SIZE; j++) {
+            if (p[j] != (uint8_t)(0xa5 + i)) {
+                panic("selftest: frame %d forgot its pattern at byte %d", i, j);
+            }
+        }
+        pmm_free(frames[i]);
+    }
+    if (pmm_free_bytes() != free_before) {
+        panic("selftest: pmm books dont balance after round trip");
+    }
+
+    /* heap round trip: mixed sizes incl one bigger than a whole page,
+     * scribble, verify, free in shuffled order, books must balance */
+    uint64_t used_before = kheap_used_bytes();
+    size_t sizes[5] = { 24, 1000, 16384, 1, 512 };
+    uint8_t *ptrs[5];
+    for (int i = 0; i < 5; i++) {
+        ptrs[i] = kmalloc(sizes[i]);
+        if (ptrs[i] == NULL) {
+            panic("selftest: kmalloc(%zu) said no", sizes[i]);
+        }
+        memset(ptrs[i], 0x30 + i, sizes[i]);
+    }
+    for (int i = 0; i < 5; i++) {
+        for (size_t j = 0; j < sizes[i]; j++) {
+            if (ptrs[i][j] != (uint8_t)(0x30 + i)) {
+                panic("selftest: heap block %d got trampled at byte %zu", i, j);
+            }
+        }
+    }
+    int order[5] = { 2, 0, 4, 1, 3 };
+    for (int i = 0; i < 5; i++) {
+        kfree(ptrs[order[i]]);
+    }
+    if (kheap_used_bytes() != used_before) {
+        panic("selftest: heap books dont balance after round trip");
     }
 }
 
@@ -82,6 +140,14 @@ void kmain(void) {
     kprintf("pic         : 8259 remapped to vectors 32-47, ghosts filtered\n");
     kprintf("keyboard    : ps/2 on irq1, us layout, listening\n");
     kprintf("kernel      : loaded at %p\n\n", (void *)kmain);
+
+    pmm_init();
+    memory_selftest();
+    kprintf("  -> selftest: 8 frames + 5 heap blocks round-tripped, books balance\n");
+    kprintf("memory      : %lu MiB free of %lu MiB, heap warmed to %lu KiB\n\n",
+            pmm_free_bytes() / (1024 * 1024),
+            pmm_total_bytes() / (1024 * 1024),
+            kheap_total_bytes() / 1024);
 
     asm volatile ("sti");
 
