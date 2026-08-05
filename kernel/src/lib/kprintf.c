@@ -1,6 +1,7 @@
 #include "lib/kprintf.h"
 #include "drivers/serial.h"
 #include "drivers/console.h"
+#include "cpu/interrupts.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -116,8 +117,16 @@ void kvprintf(const char *fmt, va_list ap) {
 }
 
 void kprintf(const char *fmt, ...) {
+    /* one line at a time, please. without this two threads printing at
+     * once produce a lovely mess of interleaved half-words on screen.
+     * yes this means a slow framebuffer scroll can cost us a timer
+     * tick -- uptime drifts a hair, the alternative is unreadable */
+    uint64_t flags = irq_save();
+
     va_list ap;
     va_start(ap, fmt);
     kvprintf(fmt, ap);
     va_end(ap);
+
+    irq_restore(flags);
 }

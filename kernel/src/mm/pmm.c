@@ -1,5 +1,6 @@
 #include "mm/pmm.h"
 #include "lib/kprintf.h"
+#include "cpu/interrupts.h"
 #include <stdbool.h>
 #include "lib/panic.h"
 #include "lib/string.h"
@@ -128,6 +129,10 @@ uint64_t pmm_alloc_pages(size_t count) {
         return 0;
     }
 
+    /* same story as the heap: threads can be preempted mid-scan and the
+     * bitmap would hand the same frame to two of them */
+    uint64_t flags = irq_save();
+
     /* dumb linear scan for a run of free bits, starting at the hint.
      * two passes: hint..end, then 0..hint, so freed low memory gets
      * found again. o(n) and proud of it */
@@ -148,10 +153,12 @@ uint64_t pmm_alloc_pages(size_t count) {
                 }
                 free_frames -= count;
                 search_hint = f + 1;
+                irq_restore(flags);
                 return first * PAGE_SIZE;
             }
         }
     }
+    irq_restore(flags);
     return 0;   /* the well is dry */
 }
 
@@ -160,6 +167,7 @@ void pmm_free_pages(uint64_t phys, size_t count) {
         panic("pmm_free_pages: %016lx is not page aligned, what is this", phys);
     }
     uint64_t first = phys / PAGE_SIZE;
+    uint64_t flags = irq_save();
     for (uint64_t f = first; f < first + count; f++) {
         if (f >= bitmap_frames || !bit_test(f)) {
             panic("pmm: freeing frame %016lx which was never thine to free",
@@ -171,6 +179,7 @@ void pmm_free_pages(uint64_t phys, size_t count) {
     if (first < search_hint) {
         search_hint = first;
     }
+    irq_restore(flags);
 }
 
 uint64_t pmm_alloc(void)         { return pmm_alloc_pages(1); }

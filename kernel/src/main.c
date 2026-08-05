@@ -8,13 +8,16 @@
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "drivers/keyboard.h"
+#include "drivers/pit.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
+#include "sched/sched.h"
+#include "sched/thread.h"
 
-#define VERSION "0.0.6"
+#define VERSION "0.0.7"
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a
@@ -97,6 +100,35 @@ static void memory_selftest(void) {
     }
 }
 
+/* two personas of the Computer Arcana, summoned to prove that the cpu
+ * really is being taken away from them and handed back. they sleep
+ * between lines, so most of the time neither of them is runnable and
+ * the idle thread gets the cpu instead */
+
+static void pixie_thread(void *arg) {
+    uint64_t period = (uint64_t)(uintptr_t)arg;
+    for (uint64_t n = 1; ; n++) {
+        kprintf("[pixie]      count %lu, uptime %lums\n", n, pit_uptime_ms());
+        sleep_ms(period);
+    }
+}
+
+static void jack_frost_thread(void *arg) {
+    uint64_t period = (uint64_t)(uintptr_t)arg;
+    for (uint64_t n = 1; ; n++) {
+        kprintf("[jack-frost] hee-ho! %lu, uptime %lums\n", n, pit_uptime_ms());
+        sleep_ms(period);
+    }
+}
+
+/* a thread that does its business and leaves, so the reaper has
+ * something to clean up and you can watch it happen */
+static void herald_thread(void *arg) {
+    (void)arg;
+    sleep_ms(2000);
+    kprintf("[herald] my purpose is fulfilled. fare thee well\n");
+}
+
 void kmain(void) {
     /* too early to even panic() properly, so just park */
     if (LIMINE_BASE_REVISION_SUPPORTED == false) {
@@ -139,6 +171,8 @@ void kmain(void) {
     kprintf("idt         : 256 gates armed, exceptions get caught now\n");
     kprintf("pic         : 8259 remapped to vectors 32-47, ghosts filtered\n");
     kprintf("keyboard    : ps/2 on irq1, us layout, listening\n");
+    kprintf("timer       : pit channel 0 at %u hz, %ums per tick\n",
+            PIT_HZ, 1000 / PIT_HZ);
     kprintf("kernel      : loaded at %p\n\n", (void *)kmain);
 
     pmm_init();
@@ -148,6 +182,18 @@ void kmain(void) {
             pmm_free_bytes() / (1024 * 1024),
             pmm_total_bytes() / (1024 * 1024),
             kheap_total_bytes() / 1024);
+
+    /* from here on this function is a thread like any other */
+    sched_init();
+    pit_init();
+
+    thread_create("pixie",      pixie_thread,      (void *)(uintptr_t)700);
+    thread_create("jack-frost", jack_frost_thread, (void *)(uintptr_t)1300);
+    thread_create("herald",     herald_thread,     NULL);
+
+    kprintf("threads     : the wheel turns, %ums quantum\n", 5 * (1000 / PIT_HZ));
+    sched_dump();
+    kprintf("\n");
 
     asm volatile ("sti");
 
@@ -163,13 +209,14 @@ void kmain(void) {
     kprintf("The contract hath been sealed.\n");
     kprintf("Speak thy will, and it shall be written...\n\n");
     console_set_colors(0xc8c8d0, 0x101018);
-    kprintf("> ");
 
-    /* the m3 demo: echo whatever gets typed. hlt naps between keys so we
-     * arent spinning the cpu just to wait for a human. (yes, a key could
-     * sneak in between the check and the hlt and sit in the buffer until
-     * the next interrupt wakes us. the next keypress drains both. a real
-     * blocking getchar comes with the scheduler) */
+    /* the boot thread's day job: echo the keyboard. the other threads
+     * print over the top of us, which looks messy and is exactly the
+     * point -- three threads sharing one console is the demo.
+     *
+     * hlt parks us until *any* interrupt lands (a key, or the timer
+     * coming to preempt us). a properly blocking getchar needs a wait
+     * queue, which arrives with the shell in m6 */
     for (;;) {
         int c = keyboard_getchar();
         if (c >= 0) {

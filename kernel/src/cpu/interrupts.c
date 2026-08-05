@@ -73,12 +73,19 @@ void interrupt_dispatch(struct interrupt_frame *f) {
         if (pic_is_spurious(irq)) {
             return;
         }
+        /* eoi goes BEFORE the handler, which looks wrong until you
+         * remember the scheduler exists: the timer handler can switch
+         * threads and never come back on this stack. a freshly created
+         * thread has no half-finished irq frame to return through, so
+         * it would never send the eoi and the pic would go quiet
+         * forever. interrupts are off in here (interrupt gate), so
+         * nothing can nest before we iretq */
+        pic_send_eoi(irq);
         if (irq_handlers[irq]) {
             irq_handlers[irq](f);
         } else {
             kprintf("irq %u fired with nobody listening\n", irq);
         }
-        pic_send_eoi(irq);
         return;
     }
 
