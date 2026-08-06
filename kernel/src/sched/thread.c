@@ -13,9 +13,19 @@ const char *thread_state_name(enum thread_state s) {
     case THREAD_READY:    return "ready";
     case THREAD_RUNNING:  return "running";
     case THREAD_SLEEPING: return "sleeping";
+    case THREAD_BLOCKED:  return "blocked";
     case THREAD_DEAD:     return "dead";
     default:              return "???";
     }
+}
+
+void thread_set_name(struct thread *t, const char *name) {
+    size_t n = 0;
+    while (name[n] && n < THREAD_NAME_MAX - 1) {
+        t->name[n] = name[n];
+        n++;
+    }
+    t->name[n] = '\0';
 }
 
 /* where every new thread opens its eyes. we arrive here by `ret` out of
@@ -56,13 +66,9 @@ struct thread *thread_create(const char *name, void (*entry)(void *), void *arg)
     t->arg         = arg;
     t->id          = next_id++;
     t->next        = NULL;
+    t->wait_next   = NULL;
 
-    size_t n = 0;
-    while (name[n] && n < THREAD_NAME_MAX - 1) {
-        t->name[n] = name[n];
-        n++;
-    }
-    t->name[n] = '\0';
+    thread_set_name(t, name);
 
     /* fabricate a stack that looks exactly like a thread which is
      * sitting inside switch_context waiting to be resumed. the pops

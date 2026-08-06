@@ -130,6 +130,33 @@ void sched_yield(void) {
     irq_restore(flags);
 }
 
+void waitq_block(struct waitq *q) {
+    /* interrupts are already off -- see the contract in sched.h.
+     * we go on the queue and off the run queue in the same breath */
+    current->wait_next = q->head;
+    q->head = current;
+    current->state = THREAD_BLOCKED;
+    schedule();
+    /* somebody woke us and the scheduler picked us back up */
+}
+
+void waitq_wake_all(struct waitq *q) {
+    uint64_t flags = irq_save();
+
+    struct thread *t = q->head;
+    while (t != NULL) {
+        struct thread *next = t->wait_next;
+        t->wait_next = NULL;
+        if (t->state == THREAD_BLOCKED) {
+            t->state = THREAD_READY;
+        }
+        t = next;
+    }
+    q->head = NULL;
+
+    irq_restore(flags);
+}
+
 void sleep_ms(uint64_t ms) {
     uint64_t ticks = (ms * PIT_HZ) / 1000;
     if (ticks == 0 && ms > 0) {
@@ -191,6 +218,7 @@ void sched_init(void) {
     boot_thread.stack_phys = 0;     /* limine's, not ours to free */
     boot_thread.stack_pages = 0;
     boot_thread.next = &boot_thread;    /* a ring of one, for now */
+    boot_thread.wait_next = NULL;
 
     current = &boot_thread;
     quantum_left = QUANTUM_TICKS;
