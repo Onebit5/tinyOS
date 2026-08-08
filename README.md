@@ -1,6 +1,6 @@
 # tinyOS
 
-![ci](https://github.com/USERNAME/tinyOS/actions/workflows/ci.yml/badge.svg)
+![ci](https://github.com/Onebit5/tinyOS/actions/workflows/ci.yml/badge.svg)
 
 a tiny 64-bit hobby kernel for x86_64, written in C, booted with [Limine](https://github.com/limine-bootloader/limine).
 
