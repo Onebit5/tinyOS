@@ -79,6 +79,62 @@ run-uefi: iso
 	qemu-system-x86_64 -M q35 -m 2G -cdrom $(ISO) -serial stdio \
 		-drive if=pflash,unit=0,format=raw,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd
 
+# ---- host tests -----------------------------------------------------
+#
+# the testable guts of the kernel are deliberately split from the parts
+# that touch hardware: pmm_init_from_map() takes a memory map instead of
+# asking limine, keyboard_feed() takes a scancode instead of reading a
+# port, and so on. that lets all of this run as ordinary linux programs.
+# TINYOS_HOSTED turns irq_save/irq_restore into no-ops, since userspace
+# gets shot for saying cli.
+
+HOSTCC    := gcc
+HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src
+
+TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/keyboard \
+             bin/tests/serial bin/tests/shell bin/tests/switch
+
+bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c
+bin/tests/mm:       tests/test_mm.c       kernel/src/mm/pmm.c \
+                    kernel/src/mm/kmalloc.c kernel/src/lib/string.c
+bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
+                    kernel/src/drivers/input.c
+bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
+                    kernel/src/drivers/input.c
+bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c
+
+$(filter-out bin/tests/switch,$(TEST_BINS)):
+	@mkdir -p $(@D)
+	$(HOSTCC) $(HOSTFLAGS) $^ -o $@
+
+# the switch test calls into the real switch.asm, and needs -no-pie so
+# the `callq switch_context` in its inline asm resolves
+obj/tests/switch.asm.o: kernel/src/sched/switch.asm
+	@mkdir -p $(@D)
+	$(NASM) -f elf64 $< -o $@
+
+bin/tests/switch: tests/test_switch.c obj/tests/switch.asm.o
+	@mkdir -p $(@D)
+	$(HOSTCC) $(HOSTFLAGS) -no-pie $^ -o $@
+
+.PHONY: test
+test: $(TEST_BINS)
+	@fail=0; \
+	for t in $(TEST_BINS); do \
+		printf '  %-10s ' "$$(basename $$t)"; \
+		if out=$$(./$$t 2>&1); then \
+			echo 'ok'; \
+		else \
+			echo 'FAILED'; echo "$$out" | sed 's/^/    /'; fail=1; \
+		fi; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo '  all suites passed'; else exit 1; fi
+
+# boot the iso and drive the shell over serial. needs qemu
+.PHONY: boottest
+boottest: iso
+	./tools/boottest.sh $(ISO)
+
 clean:
 	rm -rf bin obj iso_root $(ISO)
 

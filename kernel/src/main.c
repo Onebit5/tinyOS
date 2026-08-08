@@ -8,6 +8,7 @@
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "drivers/keyboard.h"
+#include "drivers/input.h"
 #include "drivers/pit.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
@@ -18,7 +19,7 @@
 #include "sched/thread.h"
 #include "shell/shell.h"
 
-#define VERSION "0.0.8"
+#define VERSION "0.0.10"
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a
@@ -112,6 +113,7 @@ void kmain(void) {
     idt_init();
     pic_init();
     keyboard_init();
+    serial_input_init();
 
     if (framebuffer_request.response == NULL
         || framebuffer_request.response->framebuffer_count < 1) {
@@ -143,6 +145,7 @@ void kmain(void) {
     kprintf("idt         : 256 gates armed, exceptions get caught now\n");
     kprintf("pic         : 8259 remapped to vectors 32-47, ghosts filtered\n");
     kprintf("keyboard    : ps/2 on irq1, us layout, listening\n");
+    kprintf("serial in   : com1 on irq4, the shell answers over the wire too\n");
     kprintf("timer       : pit channel 0 at %u hz, %ums per tick\n",
             PIT_HZ, 1000 / PIT_HZ);
     kprintf("kernel      : loaded at %p\n\n", (void *)kmain);

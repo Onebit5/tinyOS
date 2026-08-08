@@ -36,6 +36,11 @@ void panic(const char *fmt, ...) {
                 system_reset();
             }
         }
+        /* and over the serial line, for anyone driving this headless */
+        if (inb(0x3f8 + 5) & 1) {
+            inb(0x3f8);
+            system_reset();
+        }
         asm volatile ("pause");
     }
 }

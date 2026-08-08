@@ -1,5 +1,5 @@
 #include "shell/shell.h"
-#include "drivers/keyboard.h"
+#include "drivers/input.h"
 #include "drivers/console.h"
 #include "drivers/pit.h"
 #include "cpu/system.h"
@@ -299,7 +299,7 @@ void shell_run(void) {
         prompt();
 
         for (;;) {
-            int c = keyboard_getchar_blocking();
+            int c = input_getchar_blocking();
 
             if (c == '\n') {
                 kprintf("\n");
