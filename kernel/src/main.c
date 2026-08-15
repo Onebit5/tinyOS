@@ -12,6 +12,7 @@
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "drivers/keyboard.h"
+#include "drivers/mouse.h"
 #include "drivers/input.h"
 #include "drivers/pit.h"
 #include "drivers/pci.h"
@@ -213,6 +214,7 @@ void kmain(const struct ph_handoff *handoff) {
     idt_init();
     pic_init();
     keyboard_init();
+    mouse_init();
     serial_input_init();
 
     const struct ph_framebuffer *fb = &boot_handoff()->fb;

@@ -339,9 +339,27 @@ console 1 is displayed must not scribble over console 1; a process at
 the front of console 3 is at the front of console 3 and is still not
 being typed at.
 
-**0.2.17 something to point with.** the ps/2 mouse, a cursor, and
+**0.2.17 something to point with.** ~~the ps/2 mouse, a cursor, and
 whatever it turns out to be good for. the first input that is not a
-stream of characters.
+stream of characters.~~ **done in 0.2.17.** what it turned out to be
+good for is what a pointer has been good for on a text console since
+gpm in 1993: drag over a path in an `ls`, press the middle button at a
+prompt, and it is typed for you. the characters go into the input queue
+as though somebody had pressed the keys, so nothing above knows a mouse
+exists -- the shell's line editor cannot tell and does not have to.
+
+and it really is a different shape of input. a queue is right for
+typing because typing *is* a sequence, and the order is the meaning. a
+mouse reports a change since last time and the interesting thing is
+never one report, it is where the pointer ended up -- so the driver
+keeps a position and the events are edges.
+
+the one hard part is that the 8042 has no framing. a packet is three
+bytes and nothing marks where one starts except a bit that is always
+set, so a single dropped byte puts every packet after it one out of
+step and the pointer flies off in a straight line. that looks like a
+hardware fault and is not, which is why the count of discarded bytes is
+something `mouse` prints.
 
 **0.2.18 variables, and scripts.** an environment inherited across
 spawn, `$PATH` meaning what it means everywhere else, and a shell that

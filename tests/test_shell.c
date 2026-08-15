@@ -19,6 +19,9 @@ void panic(const char *fmt, ...) {
 
 #include <stdbool.h>
 
+/* the mouse constants the stubs below hand back */
+#include "drivers/mouse.h"
+
 /* ---- captured output ---- */
 static char out[4096];
 static size_t out_len;
@@ -47,6 +50,21 @@ static int switches;
 unsigned console_active(void) { return shown; }
 void console_switch(unsigned n) { shown = n; switches++; }
 void console_scroll_back(int lines) { (void)lines; }
+
+/* a mouse the test can switch on and off. what is under test here is
+ * the shell's half: that it says something useful when there is one and
+ * something honest when there is not */
+static bool have_mouse = true;
+bool mouse_present(void) { return have_mouse; }
+bool mouse_has_wheel(void) { return true; }
+void mouse_position(size_t *col, size_t *row) {
+    if (col) *col = 12;
+    if (row) *row = 7;
+}
+uint8_t mouse_buttons(void) { return MOUSE_LEFT; }
+static uint64_t fake_resyncs;
+uint64_t mouse_packets(void) { return 42; }
+uint64_t mouse_resyncs(void) { return fake_resyncs; }
 size_t console_scrollback_lines(void) { return 0; }
 void console_set_colors(uint32_t f, uint32_t b) { (void)f; (void)b; }
 bool console_ready(void) { return true; }
@@ -540,6 +558,38 @@ int main(void) {
     run("ps | grep hello");
     CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
     CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
+
+    /* ---- the pointer ------------------------------------------------
+     *
+     * the resync count is the interesting number. the 8042 hands over
+     * one byte at a time with nothing marking where a packet begins, so
+     * a dropped byte puts every packet after it out of step -- and the
+     * symptom is a pointer flying off in straight lines, which looks
+     * like a hardware fault and is not */
+
+    have_mouse = true;
+    fake_resyncs = 0;
+    run("mouse");
+    CHECK(strstr(out, "column 12") != NULL, "mouse says where the pointer is");
+    CHECK(strstr(out, "left") != NULL, "and what is held");
+    CHECK(strstr(out, "middle button") != NULL,
+          "and what it is for, since a pointer on a text console is not "
+          "obvious");
+    CHECK(strstr(out, "flying off") == NULL,
+          "and says nothing about losing sync when it has not");
+
+    fake_resyncs = 900;
+    run("mouse");
+    CHECK(strstr(out, "flying off") != NULL,
+          "but explains the symptom when the count is climbing");
+
+    have_mouse = false;
+    run("mouse");
+    CHECK(strstr(out, "no mouse") != NULL,
+          "a machine with none says so plainly");
+    CHECK(strstr(out, "carries on") != NULL,
+          "and that it is not a problem");
+    have_mouse = true;
 
     /* ---- four sessions, not one with four names --------------------
      *

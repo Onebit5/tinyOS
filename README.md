@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.16** (**more than one screen.** four consoles, four sessions, alt+f1 through f4)
+**version: 0.2.17** (**something to point with.** a ps/2 mouse, and select-and-paste on a text console)
 
 ## what it does
 
@@ -54,6 +54,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] ext2, read and written: owners, permissions, symlinks, real timestamps
 - [x] mbr and gpt, and mounting by which partition rather than which drive answered
 - [x] four virtual consoles, each its own session, with scrollback
+- [x] a ps/2 mouse: drag to select, middle button to paste it back
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -162,6 +163,75 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## something to point with
+
+the first input here that is **not a stream of characters**, and that is
+a real difference rather than a bigger version of the same thing. a
+queue is the right shape for typing because typing *is* a sequence — the
+order is the meaning. a mouse reports a change since the last time it was
+asked, and the interesting thing is never one report, it is where the
+pointer ended up. so the driver keeps a position and the events are
+edges: it moved, a button went down, a button came up.
+
+### what it turned out to be good for
+
+what a pointer has been good for on a text console since gpm in 1993:
+
+```
+igor@velvet[1]:/# ls -1 /boot/bin
+...
+        drag over `margaret`, middle-click at the prompt
+igor@velvet[1]:/# margaret
+```
+
+drag to select, middle button types it back. the characters go into the
+input queue **as though somebody had pressed the keys**, which is why
+nothing above knows a mouse exists — the shell's line editor cannot tell
+the difference and does not have to. a newline stops the paste, because
+pasting one would submit the line and hand the rest to whatever ran.
+
+the wheel scrolls back, the same as shift+pageup. a wheel is a
+scrollback control on every terminal there has ever been and it would be
+strange for it not to be one here.
+
+the selection lives in the console rather than in the mouse driver,
+because what it is *for* is the cells and the cells are there. a
+highlight is the cell's own colours swapped rather than a colour of its
+own — it has to be visible whatever the text under it was written in.
+
+### the one genuinely hard part
+
+**the 8042 has no framing.** a packet is three bytes and nothing marks
+where one begins except a bit in the first byte that is always set:
+
+```c
+if (d->at == 0 && !(byte & FLAG_ALWAYS_1)) {
+    resyncs++;
+    return false;
+}
+```
+
+drop one byte — or start listening a byte late — and every packet after
+it is read one out of step. the symptom is a pointer that flies off in a
+straight line, which looks exactly like a hardware fault and is not. so
+`mouse` prints how many bytes have been discarded, because that count is
+the only symptom the condition has.
+
+a *truncated* packet is worse and cannot be fully fixed: the decoder is
+mid-packet, so the marker cannot help. it costs exactly one wrong packet
+and then it is back in step, which is the best framing this thin can do
+— and there is a test that says so.
+
+### the wheel handshake, which can only be historical
+
+```c
+/* set the sample rate to 200, then 100, then 80, and ask who you are */
+```
+
+a mouse that understands answers `3` instead of `0` and starts sending a
+fourth byte. nobody would design that; it was the only way to add a byte
+to a protocol with no version number.
 
 ## more than one screen
 
@@ -1989,6 +2059,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.17** — a ps/2 mouse, which is the first input here that is not a stream of characters. a queue is right for typing because typing *is* a sequence and the order is the meaning; a mouse reports a change since last time and the interesting thing is where the pointer ended up, so the driver keeps a position and the events are edges. what it turned out to be good for is what a pointer has been good for on a text console since gpm in 1993 — drag over a path, middle-click at a prompt, and it is typed for you, with the characters going into the input queue as though keys had been pressed so that nothing above knows a mouse exists. the wheel scrolls back. the one genuinely hard part is that the 8042 has no framing: a packet is three bytes and nothing marks where one starts but a bit that is always set, so a single dropped byte puts every packet after it out of step and the pointer flies off in a straight line — which looks like a hardware fault and is not, which is why `mouse` prints the count of discarded bytes. a truncated packet cannot be fully recovered and costs exactly one wrong packet before it is back in step, and there is a test that says so.
 - **0.2.16** — four virtual consoles, because the terminal layer was one machine pretending to be one seat. the console had kept a shadow of every cell since 0.1.x, added so a block cursor could put back the character underneath it — and a console nobody is looking at turns out to be exactly that shadow with nothing painting it, so most of the driver is the code it always was with one question in front of the parts that touch pixels. scrollback is the same array made taller. the whole thing turns on one rule stated twice: **output belongs to its writer** (a shell on console 2 must not scribble over console 1, so every thread carries its console and the driver asks on each write) and **input belongs to the screen** (a process at the front of console 3 is at the front of console 3 and is still not being typed at, so a read needs both conditions; ctrl+c arrives from the keyboard and is aimed at the console being looked at, not at whichever the interrupted thread was on). the shell was the harder half: its state was file-static, correct while there was one of it and a bug the moment there were four, so it is a session per console reached through the calling thread. that move broke something quietly — `next_job_number = 1` was a static initialiser and a zeroed session does not get one, so every session's first job was job zero, which means "no job" everywhere else in the file.
 - **0.2.15** — partitions, because a disk is not a filesystem: it is a table saying where several of them are, and the kernel had been asking each drive whether sector zero looked like a superblock. both tables — mbr's four sixteen-byte entries from 1983, and gpt's checksummed header and array, with the protective mbr a gpt disk carries so old tools see a full disk rather than an empty one. the crc is the whole difference between them: a corrupt mbr is simply followed because nothing in the format could notice, while a gpt that does not add up is *known* to be corrupt and is refused — so the parser is judged by what it will not do, and the tests spend more on the refusals than the happy path. the filesystem is handed a *view* of one partition rather than the drive, bounded at both ends, so it never finds out it is not alone; the cache stays underneath on absolute addresses so it remains correct when the mount moves. every partition is tried at boot rather than only the first, since an efi partition in slot one and the real filesystem in slot two is the ordinary arrangement. `parts` lists what each drive says it holds and what was actually found on it — a different question — and `mount <n>` moves the mount, bluntly and with a warning, because there is no reference counting here that could do better. `tools/readext2.py` had to learn about tables too: it read from sector zero, and the moment the disk was partitioned it would have quietly stopped being the only external check this project has.
 - **0.2.14** — ext2, read and written: superblock, block groups, bitmaps, inodes, and the twelve-direct-then-indirect block map every unix filesystem of the era used. the whole difference from fat is one sentence — in fat a file *is* its directory entry, and here a name and a file are different objects — and everything else follows: permissions belong to the file rather than the name, a rename moves nothing, and `chmod` finally has somewhere to write an answer. there is no e2fsck on this machine, so the formatter and the driver would have been two programs by one author agreeing with each other; `tools/readext2.py` is written from the on-disk layout and run by the test target *after* the suite has finished writing, so what it validates is what the driver wrote. it found two real bugs before the driver even existed: every subdirectory was being built as though it were the root, and a fast symlink — one stored *in* its own block pointers — was having its target walked as block numbers, which is the sharpest edge in the format. `disk.c` mounts ext2 or fat32 and almost nothing above it changed, which is what having a vfs since 0.1.11 was for. and the new capability exposed an old bug: `vfs_may_read` only ever checked the *other* bits, which was invisible while nothing had an owner and made a 0600 file unreadable by its owner the moment anything did.

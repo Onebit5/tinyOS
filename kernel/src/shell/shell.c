@@ -2,6 +2,7 @@
 #include "drivers/input.h"
 #include "drivers/console.h"
 #include "drivers/tty.h"
+#include "drivers/mouse.h"
 #include "drivers/pit.h"
 #include "cpu/system.h"
 #include "lib/kprintf.h"
@@ -1530,6 +1531,52 @@ static void cmd_chvt(int argc, char **argv) {
     kprintf("showing console %d\n", n);
 }
 
+/* what the pointer is doing, and whether it is doing it at all.
+ *
+ * the resync count is the interesting number. the 8042 hands over one
+ * byte at a time with nothing marking where a packet begins, so a
+ * dropped byte puts every packet after it one out of step -- and the
+ * symptom is a pointer that flies off in a straight line, which looks
+ * like a hardware fault and is not */
+static void cmd_mouse(int argc, char **argv) {
+    (void)argc; (void)argv;
+
+    if (!mouse_present()) {
+        kprintf("no mouse. qemu wants -device usb-mouse or the ps/2 one it\n");
+        kprintf("gives you by default; a machine with none carries on "
+                "perfectly well\n");
+        return;
+    }
+
+    size_t col = 0, row = 0;
+    mouse_position(&col, &row);
+    uint8_t held = mouse_buttons();
+
+    kprintf("ps/2 mouse%s\n", mouse_has_wheel() ? " with a wheel" : "");
+    kprintf("  at        column %lu, row %lu\n",
+            (uint64_t)col, (uint64_t)row);
+    kprintf("  held      %s%s%s%s\n",
+            (held & MOUSE_LEFT) ? "left " : "",
+            (held & MOUSE_MIDDLE) ? "middle " : "",
+            (held & MOUSE_RIGHT) ? "right" : "",
+            held ? "" : "nothing");
+    kprintf("  packets   %lu\n", mouse_packets());
+    kprintf("  out of step %lu\n", mouse_resyncs());
+
+    if (mouse_resyncs() > 0) {
+        kprintf("\nbytes arriving where a packet could not start. a few at "
+                "boot are\n");
+        kprintf("ordinary -- the controller had some queued before anybody "
+                "was listening.\n");
+        kprintf("a number that keeps climbing is a mouse losing sync, and "
+                "the pointer\n");
+        kprintf("will be flying off in straight lines.\n");
+    }
+
+    kprintf("\ndrag over text to select it, middle button types it back.\n");
+    kprintf("the wheel looks back up this console, same as shift+pageup.\n");
+}
+
 static const struct command commands[] = {
     { "help",   "list what thou may command",           cmd_help, false, "help [name]" },
     { "clear",  "wipe the screen clean",                cmd_clear, false, NULL },
@@ -1552,6 +1599,7 @@ static const struct command commands[] = {
     { "mount",  "which filesystem is where; mount <n> moves it", cmd_mount, false, "mount [number]" },
     { "parts",  "what each drive says it holds",        cmd_parts, false, NULL },
     { "chvt",   "show another console; alt+f1..f4 too", cmd_chvt, false, "chvt [1-4]" },
+    { "mouse",  "the pointer, and whether it is well",  cmd_mouse, false, NULL },
     { "cpus",   "the processors, and which are awake",  cmd_cpus, false, NULL },
     { "locks",  "what guards what, and what waits",     cmd_locks, false, NULL },
     { "cd",     "go somewhere; no argument means the root", cmd_cd, true, "cd [directory]" },

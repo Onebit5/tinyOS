@@ -242,7 +242,7 @@ TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/locks bin/tests/path bin/tests/args \
              bin/tests/shell bin/tests/pipe bin/tests/bcache \
              bin/tests/ext2 bin/tests/part bin/tests/console \
-             bin/tests/switch
+             bin/tests/mouse bin/tests/switch
 
 bin/tests/kprintf:  tests/test_kprintf.c  kernel/src/lib/kprintf.c \
                     kernel/src/sched/spinlock.c
@@ -311,6 +311,10 @@ bin/tests/part:     tests/test_part.c     kernel/src/drivers/part.c \
 # the whole reason a console is testable without a machine
 bin/tests/console:  tests/test_console.c  kernel/src/drivers/console.c \
                     kernel/src/drivers/font.c kernel/src/lib/string.c
+# only the decoder, which is the half with no hardware in it -- and the
+# half where losing sync looks like a hardware fault and is not
+bin/tests/mouse:    tests/test_mouse.c    kernel/src/drivers/mouse.c \
+                    kernel/src/lib/string.c
 bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c

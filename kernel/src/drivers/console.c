@@ -183,6 +183,35 @@ static void erase_cursor(struct vconsole *c) {
     }
 }
 
+
+/* ---- something to point with -----------------------------------------
+ *
+ * one mouse, however many consoles, so the pointer follows whichever is
+ * on the screen. declared up here because the repaint below has to know
+ * about the highlight, and a highlight is what a selection *is* */
+
+static bool ptr_on;
+static size_t ptr_col, ptr_row;
+
+/* a selection is a run in reading order, from where the button went
+ * down to wherever it is now. holding the two ends as linear positions
+ * rather than as points is what makes "is this cell in it" one
+ * comparison instead of four */
+static bool sel_on;
+static size_t sel_anchor, sel_end;
+
+static size_t linear(size_t col, size_t row) { return row * cols + col; }
+
+static bool selected(size_t col, size_t row) {
+    if (!sel_on) {
+        return false;
+    }
+    size_t at = linear(col, row);
+    size_t lo = (sel_anchor <= sel_end) ? sel_anchor : sel_end;
+    size_t hi = (sel_anchor <= sel_end) ? sel_end : sel_anchor;
+    return at >= lo && at <= hi;
+}
+
 /* paint a whole console from its shadow. the only way an off-screen
  * console's contents ever reach the glass */
 static void repaint(struct vconsole *c) {
@@ -194,13 +223,18 @@ static void repaint(struct vconsole *c) {
         for (size_t col = 0; col < cols; col++) {
             unsigned char ch = cell_at(c, col, r);
             unsigned p = pen_at(c, col, r);
+            bool invert = selected(col, r)
+                       || (ptr_on && col == ptr_col && r == ptr_row);
+            uint32_t f = invert ? palette[p].bg : palette[p].fg;
+            uint32_t b = invert ? palette[p].fg : palette[p].bg;
+
             if (ch != 0 && ch != ' ') {
                 /* in the colour it was written in, which is the whole
                  * reason a cell remembers one */
-                blit(col, r, ch, palette[p].fg, palette[p].bg);
-            } else if (palette[p].bg != palette[0].bg) {
+                blit(col, r, ch, f, b);
+            } else if (b != palette[0].bg) {
                 fill_rect(col * FONT_WIDTH, r * FONT_HEIGHT,
-                          FONT_WIDTH, FONT_HEIGHT, palette[p].bg);
+                          FONT_WIDTH, FONT_HEIGHT, b);
             }
         }
     }
@@ -383,12 +417,136 @@ void console_write(const char *s) {
     }
 }
 
+/* one cell, as it should look right now: its own colours, or swapped if
+ * it is selected or under the pointer. swapping rather than a colour of
+ * its own, because a highlight has to be visible whatever the text
+ * under it was written in */
+static void paint_cell(struct vconsole *c, size_t col, size_t row) {
+    if (!showing(c) || !ready) {
+        return;
+    }
+    unsigned char ch = cell_at(c, col, row);
+    unsigned p = pen_at(c, col, row);
+
+    bool invert = selected(col, row)
+               || (ptr_on && col == ptr_col && row == ptr_row);
+
+    uint32_t f = invert ? palette[p].bg : palette[p].fg;
+    uint32_t b = invert ? palette[p].fg : palette[p].bg;
+
+    if (ch == 0 || ch == ' ') {
+        fill_rect(col * FONT_WIDTH, row * FONT_HEIGHT,
+                  FONT_WIDTH, FONT_HEIGHT, b);
+    } else {
+        blit(col, row, ch, f, b);
+    }
+}
+
+void console_pointer(size_t col, size_t row, uint8_t buttons,
+                     uint8_t pressed, uint8_t released) {
+    struct vconsole *c = &vc[active];
+    if (!ready || col >= cols || row >= rows) {
+        return;
+    }
+
+    size_t was_col = ptr_col, was_row = ptr_row;
+    bool was_on = ptr_on;
+
+    ptr_col = col;
+    ptr_row = row;
+    ptr_on = true;
+
+    if (pressed & 0x1) {                /* left: start a selection */
+        sel_on = true;
+        sel_anchor = linear(col, row);
+        sel_end = sel_anchor;
+        repaint(c);
+        return;
+    }
+    if ((buttons & 0x1) && sel_on) {    /* dragging: extend it */
+        size_t now = linear(col, row);
+        if (now != sel_end) {
+            sel_end = now;
+            repaint(c);
+            return;
+        }
+    }
+    (void)released;
+
+    /* nothing but the pointer moved, so only the two cells it was in
+     * and is in need repainting. dragging repaints the screen and
+     * moving does not, which is the difference between a pointer that
+     * feels attached to the mouse and one that does not */
+    if (was_on && (was_col != col || was_row != row)) {
+        bool save = ptr_on;
+        ptr_on = false;
+        paint_cell(c, was_col, was_row);
+        ptr_on = save;
+    }
+    paint_cell(c, col, row);
+}
+
+bool console_pointer_visible(void) { return ptr_on; }
+
+size_t console_selection(char *out, size_t max) {
+    if (!sel_on || max == 0) {
+        return 0;
+    }
+    struct vconsole *c = &vc[active];
+
+    size_t lo = (sel_anchor <= sel_end) ? sel_anchor : sel_end;
+    size_t hi = (sel_anchor <= sel_end) ? sel_end : sel_anchor;
+
+    size_t n = 0;
+    size_t trailing = 0;    /* spaces held back until something follows */
+
+    for (size_t at = lo; at <= hi && n + 1 < max; at++) {
+        size_t col = at % cols;
+        size_t row = at / cols;
+        if (row >= rows) {
+            break;
+        }
+
+        if (col == 0 && at != lo) {
+            /* a new line. whatever spaces were being held back were
+             * padding to the edge of the screen and are dropped -- a
+             * terminal pads every line, and pasting eighty spaces is
+             * nobody's intention */
+            trailing = 0;
+            out[n++] = '\n';
+        }
+
+        unsigned char ch = cell_at(c, col, row);
+        if (ch == 0) {
+            ch = ' ';
+        }
+        if (ch == ' ') {
+            trailing++;
+            continue;
+        }
+
+        /* something real, so the spaces before it were real too */
+        while (trailing > 0 && n + 1 < max) {
+            out[n++] = ' ';
+            trailing--;
+        }
+        trailing = 0;
+        out[n++] = (char)ch;
+    }
+
+    out[n] = '\0';
+    return n;
+}
+
 /* ---- switching -------------------------------------------------------- */
 
 void console_switch(unsigned n) {
     if (n >= VCONSOLE_COUNT || n == active) {
         return;
     }
+    /* the selection belonged to the console being left. carrying it
+     * over would mean a highlight over text it was never made from */
+    sel_on = false;
     active = n;
     repaint(&vc[active]);
 }

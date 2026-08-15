@@ -80,4 +80,26 @@ void console_switch(unsigned n);
 void console_scroll_back(int lines);
 size_t console_scrollback_lines(void);
 
+/* ---- something to point with -----------------------------------------
+ *
+ * the pointer lives here rather than in the mouse driver because what
+ * it is *for* is the cells, and the cells are here. one mouse however
+ * many consoles there are, so it follows whichever is on the screen.
+ *
+ * what it is good for on a text console is what it has been good for
+ * since gpm in 1993: dragging over text to select it, and pressing the
+ * middle button to have it typed back. that is the whole of it, and it
+ * is genuinely useful -- copying a path out of an `ls` and into a `cat`
+ * without retyping it is the thing a pointer buys a terminal */
+void console_pointer(size_t col, size_t row, uint8_t buttons,
+                     uint8_t pressed, uint8_t released);
+
+/* whatever was last selected, as text. lines come back separated by
+ * newlines with their trailing spaces trimmed -- a terminal pads every
+ * line to the width of the screen and pasting eighty spaces is nobody's
+ * intention. returns how many bytes were written */
+size_t console_selection(char *out, size_t max);
+
+bool console_pointer_visible(void);
+
 #endif
