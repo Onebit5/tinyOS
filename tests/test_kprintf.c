@@ -53,6 +53,22 @@ int main(void) {
     check("a=1 b=02 c= 3", "a=%d b=%02d c=%2d", 1, 2, 3);
     check("4096", "%zu", (size_t)4096);
 
+    /* left justify. this is the flag whose absence once made the vmm
+     * print its own machine code and then page fault */
+    check("abc    |",  "%-7s|", "abc");
+    check("    abc|",  "%7s|",  "abc");
+    check("abc|",      "%-2s|", "abc");     /* too long for the field */
+    check("limine |",  "%-7s|", "limine");
+    check("42   |",    "%-5d|", 42);
+    check("-42  |",    "%-5d|", -42);
+    check("2a   |",    "%-5x|", 0x2au);
+    check("x    |",    "%-5c|", 'x');
+    check("    x|",    "%5c|",  'x');
+    /* '-' beats '0': you cannot zero-pad the right of a number */
+    check("42   |",    "%-05d|", 42);
+    check("(null) |",  "%-7s|", (char *)NULL);
+    check("a  b  |",   "%-3s%-3s|", "a", "b");
+
     if (failures == 0) {
         printf("all good\n");
     }

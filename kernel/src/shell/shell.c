@@ -7,9 +7,11 @@
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
+#include "mm/vmm.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 #define LINE_MAX 128
 #define ARGV_MAX 8
@@ -152,6 +154,89 @@ static void cmd_summon(int argc, char **argv) {
     kprintf("no persona by the name '%s' dwells here\n", argv[1]);
 }
 
+/* hex, with or without the 0x. returns false if its not a number */
+static bool parse_hex(const char *s, uint64_t *out) {
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+    if (*s == '\0') {
+        return false;
+    }
+    uint64_t v = 0;
+    for (; *s; s++) {
+        uint64_t d;
+        if (*s >= '0' && *s <= '9')      d = *s - '0';
+        else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+        else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+        else return false;
+        v = v * 16 + d;
+    }
+    *out = v;
+    return true;
+}
+
+static void cmd_vmm(int argc, char **argv) {
+    if (argc >= 2) {
+        uint64_t addr;
+        if (!parse_hex(argv[1], &addr)) {
+            kprintf("'%s' is not a hex address\n", argv[1]);
+            return;
+        }
+        vmm_dump(addr);
+        return;
+    }
+
+    /* no argument: show the shape of the address space by pointing at
+     * one thing of each kind. the permission column is the interesting
+     * part -- code is r-x, everything else is rw- */
+    kprintf("pml4 at %p\n", (void *)vmm_kernel_pml4());
+
+    kprintf("code (this very function):\n");
+    vmm_dump((uint64_t)(uintptr_t)cmd_vmm);
+
+    kprintf("a string constant:\n");
+    vmm_dump((uint64_t)(uintptr_t)"velvet");
+
+    void *heap = kmalloc(64);
+    if (heap != NULL) {
+        kprintf("the heap:\n");
+        vmm_dump((uint64_t)(uintptr_t)heap);
+        kfree(heap);
+    }
+
+    uint64_t rsp;
+    asm volatile ("mov %%rsp, %0" : "=r"(rsp));
+    kprintf("this thread's stack:\n");
+    vmm_dump(rsp);
+
+    kprintf("and somewhere nobody lives:\n");
+    vmm_dump(0x0000dead00000000ull);
+}
+
+/* recurse until the stack runs out. lands on the guard page the vmm
+ * left unmapped below every thread stack, which turns what would be
+ * silent corruption of the next thread's stack into a clean fault.
+ *
+ * yes gcc, we know its infinite recursion. thats the entire feature */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winfinite-recursion"
+static uint64_t eat_stack(uint64_t depth) {
+    volatile uint64_t padding[64];
+    for (int i = 0; i < 64; i++) {
+        padding[i] = depth;
+    }
+    return padding[0] + eat_stack(depth + 1);
+}
+#pragma GCC diagnostic pop
+
+static void cmd_stackoverflow(int argc, char **argv) {
+    (void)argc; (void)argv;
+    console_set_colors(COLOR_WARN, 0x101018);
+    kprintf("running off the end of this thread's stack on purpose...\n");
+    console_set_colors(COLOR_TEXT, 0x101018);
+    kprintf("returned %lu, which should have been impossible\n", eat_stack(0));
+}
+
 static void cmd_crash(int argc, char **argv) {
     (void)argc; (void)argv;
     console_set_colors(COLOR_WARN, 0x101018);
@@ -177,7 +262,9 @@ static const struct command commands[] = {
     { "uptime", "how long since the bond was formed",   cmd_uptime },
     { "ps",     "the threads that walk this realm",     cmd_ps     },
     { "summon", "call forth a persona thread",          cmd_summon },
+    { "vmm",    "what the page tables say about an address", cmd_vmm },
     { "crash",  "tempt fate with a wild pointer",       cmd_crash  },
+    { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow },
     { "reboot", "sever the bond and begin anew",        cmd_reboot },
     { NULL, NULL, NULL },
 };

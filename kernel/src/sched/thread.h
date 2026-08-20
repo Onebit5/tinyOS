@@ -46,6 +46,9 @@ void thread_set_name(struct thread *t, const char *name);
  * run queue ready to go. returns NULL if memory says no */
 struct thread *thread_create(const char *name, void (*entry)(void *), void *arg);
 
+/* hand a dead thread's stack back to the pmm, guard page and all */
+void thread_free_stack(struct thread *t);
+
 /* leave. never returns, obviously */
 void thread_exit(void) __attribute__((noreturn));
 

@@ -2,7 +2,9 @@
 #include "cpu/pic.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
+#include "mm/pmm.h"
 #include "drivers/console.h"
+#include "sched/sched.h"
 #include <stddef.h>
 
 /* if isr.asm and the frame struct ever drift apart, fail the build
@@ -98,7 +100,11 @@ void interrupt_dispatch(struct interrupt_frame *f) {
     /* cpu exception. print everything we know, then panic */
     console_set_colors(0xe64553, 0x101018);
 
+    struct thread *me = sched_current();
     kprintf("\n\ncpu exception %lu: %s\n", f->vector, exception_names[f->vector]);
+    if (me != NULL) {
+        kprintf("in thread %d (%s)\n", me->id, me->name);
+    }
 
     if (f->vector == 14) {
         uint64_t cr2 = read_cr2();
@@ -109,6 +115,16 @@ void interrupt_dispatch(struct interrupt_frame *f) {
                 (e & 16) ? "instruction fetch" : ((e & 2) ? "write" : "read"),
                 (e & 8) ? " (reserved bit set?!)" : "",
                 (e & 4) ? "user" : "kernel");
+
+        /* a fault just below a thread's stack is almost always the
+         * guard page doing its job rather than a wild pointer */
+        if (me != NULL && me->stack_phys != 0) {
+            uint64_t guard = (uint64_t)pmm_phys_to_virt(me->stack_phys);
+            if (cr2 >= guard && cr2 < guard + PAGE_SIZE) {
+                kprintf("that is this thread's stack guard page -- "
+                        "it ran out of stack\n");
+            }
+        }
     }
 
     dump_frame(f);

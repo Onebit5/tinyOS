@@ -37,6 +37,10 @@ uint64_t pmm_free_bytes(void) { return 2045ull * 1024 * 1024; }
 uint64_t kheap_total_bytes(void) { return 36 * 1024; }
 uint64_t kheap_used_bytes(void) { return 512; }
 void sched_dump(void) { kprintf("<PS>"); }
+void vmm_dump(uint64_t v) { kprintf("<VMM %#lx>", v); }
+uint64_t vmm_kernel_pml4(void) { return 0x1000; }
+void *kmalloc(size_t n) { return malloc(n); }
+void kfree(void *p) { free(p); }
 void sleep_ms(uint64_t ms) { (void)ms; }
 
 /* cmd_summon reads t->id off whatever we hand back, so hand back

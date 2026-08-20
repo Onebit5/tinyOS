@@ -58,9 +58,7 @@ static void reap_dead(void) {
     while (t != current) {
         if (t->state == THREAD_DEAD) {
             prev->next = t->next;
-            if (t->stack_phys != 0) {
-                pmm_free_pages(t->stack_phys, t->stack_pages);
-            }
+            thread_free_stack(t);
             kfree(t);
             t = prev->next;
         } else {

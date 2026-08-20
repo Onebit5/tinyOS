@@ -31,6 +31,7 @@ echo "booting $ISO and driving the shell over serial..."
     printf 'echo the bond endures\r'; sleep 1
     printf 'summon pixie\r'; sleep 3
     printf 'ps\r';     sleep 2
+    printf 'vmm\r';    sleep 2
 } | timeout 60 qemu-system-x86_64 \
         -M q35 -m 2G -cdrom "$ISO" \
         -display none -serial stdio -no-reboot \
@@ -52,6 +53,8 @@ check 'framebuffer found'  'framebuffer :'
 check 'idt armed'          '256 gates armed'
 check 'memory map parsed'  'memory map, as declared by limine'
 check 'memory selftest'    'books balance'
+check 'own page tables'    'cr3 is ours'
+check 'W^X applied'        'W^X on .text'
 check 'scheduler started'  'the wheel turns'
 check 'reached the prompt' 'velvet>'
 
@@ -63,6 +66,7 @@ check 'echo works'    'the bond endures'
 check 'ps works'      'idle'
 check 'summon works'  'has answered thy call'
 check 'thread ran'    '[pixie]'
+check 'vmm works'     'pml4 at'
 
 # and did it stay alive rather than falling over
 if grep -qF 'KERNEL PANIC' "$LOG"; then

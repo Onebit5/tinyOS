@@ -15,11 +15,12 @@
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
+#include "mm/vmm.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include "shell/shell.h"
 
-#define VERSION "0.0.10"
+#define VERSION "0.0.11"
 
 /* limine protocol stuff. these markers have to live in their own section
  * (see linker.ld) or the bootloader never finds us and we boot into a
@@ -157,6 +158,10 @@ void kmain(void) {
             pmm_free_bytes() / (1024 * 1024),
             pmm_total_bytes() / (1024 * 1024),
             kheap_total_bytes() / 1024);
+
+    kprintf("building our own page tables:\n");
+    vmm_init();
+    kprintf("\n");
 
     /* from here on this function is a thread like any other, and its
      * career is to be the shell */
