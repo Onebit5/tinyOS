@@ -39,6 +39,8 @@
 #define SYS_CHOWN  29
 #define SYS_SYMLINK 30
 #define SYS_READLINK 31
+#define SYS_GETENV 32
+#define SYS_SETENV 33
 
 /* the usual three, spoken for the way they are everywhere */
 #define STDIN   0
@@ -186,6 +188,30 @@ static inline long symlink(const char *path, const char *target) {
 static inline long readlink(const char *path, char *out, long size) {
     return syscall5(SYS_READLINK, (long)path, (long)ustrlen(path),
                     (long)out, size, 0);
+}
+
+/* ---- the environment ------------------------------------------------
+ *
+ * a program may read and change its own, and what it changes is
+ * inherited by anything it starts and by nothing else. a child cannot
+ * reach up into its parent, which is exactly why `export` is a shell
+ * builtin everywhere and has been since 1977: a command could only ever
+ * have changed its own */
+
+/* the value, or -1 if it is not set -- which is a different answer from
+ * being set to nothing, and both are worth being able to give */
+static inline long getenv(const char *name, char *out, long size) {
+    return syscall5(SYS_GETENV, (long)name, (long)ustrlen(name),
+                    (long)out, size, 0);
+}
+
+static inline long setenv(const char *name, const char *value) {
+    return syscall5(SYS_SETENV, (long)name, (long)ustrlen(name),
+                    (long)value, (long)ustrlen(value), 0);
+}
+
+static inline long unsetenv(const char *name) {
+    return syscall5(SYS_SETENV, (long)name, (long)ustrlen(name), 0, 0, 0);
 }
 
 /* ---- other programs ----------------------------------------------- */

@@ -2,6 +2,7 @@
 #define SCHED_USERMODE_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 /* how big a stack ring 3 may grow to, and how much of it exists before
@@ -45,6 +46,12 @@ struct pipe;
  * what a program run on its own gets. a pipeline fills in the pipes; a
  * `>` or a `<` fills in a path. it is the same struct either way,
  * because from the program's side there is no difference at all */
+/* the environment a program is born holding. NULL means an empty one */
+struct spawn_env {
+    const char *block;
+    size_t      len;
+};
+
 struct spawn_io {
     struct pipe *in;            /* a pipe to read from */
     struct pipe *out;           /* a pipe to write to */
@@ -63,6 +70,12 @@ int user_spawn(const char *path, int argc, const char *const argv[],
                const char *cwd,
                int parent, int uid, bool announce,
                const struct spawn_io *io, const char **error);
+
+/* what the next spawn should hand its child. set by the shell before
+ * starting anything, because the shell is a kernel thread with no
+ * process of its own to inherit from -- a program spawning a program
+ * needs none of this and gets its parent's */
+void user_spawn_env(const struct spawn_env *env);
 
 /* one command in a pipeline: already resolved to a path, with the
  * arguments it was typed with and whatever redirection was written
@@ -94,6 +107,14 @@ struct job {
     int  pids[PIPELINE_MAX];
     int  count;
     bool stopped;       /* suspended by ctrl+z rather than finished */
+
+    /* what the last of them exited with.
+     *
+     * the *last* rather than any of them, because that is what a
+     * pipeline's status has meant since sh: `cat missing | wc -l`
+     * succeeds, and it should -- wc did its job on an empty input.
+     * nothing needed this until there was an `if` to read it */
+    int  status;
 };
 
 /* wait for a job to end -- or to be stopped, which is the other way

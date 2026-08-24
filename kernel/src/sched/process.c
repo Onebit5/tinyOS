@@ -81,6 +81,12 @@ int process_create(const char *name, int parent, int uid, bool announce,
         p->fds[FD_STDOUT].kind = FD_CONSOLE;
         p->fds[FD_STDERR].kind = FD_CONSOLE;
 
+        /* an empty environment rather than no environment. the
+         * difference matters to every walk below, which stops at the
+         * first empty string */
+        p->env[0] = '\0';
+        p->env_len = 1;
+
         /* wherever the parent was standing. a process started from a
          * directory should be in that directory, which is the whole
          * reason `cd` then running something behaves as anyone expects */
@@ -400,6 +406,71 @@ void process_fd_advance(int pid, int fd, uint64_t n) {
     }
 
     spin_unlock_irq(&process_lock, flags);
+}
+
+/* ---- the environment -------------------------------------------------
+ *
+ * the block itself is pure arithmetic over a run of strings and lives
+ * in lib/env.c, because the shell needs exactly the same operations and
+ * has no process to perform them on -- it is a kernel thread, so its
+ * environment lives in its session. one implementation, two callers, and
+ * no chance of them disagreeing about what "already set" means */
+
+bool process_set_env(int pid, const char *block, size_t len) {
+    if (len > PROC_ENV_MAX) {
+        return false;
+    }
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    if (p != NULL) {
+        memcpy(p->env, block, len);
+        p->env_len = len;
+    }
+    spin_unlock_irq(&process_lock, flags);
+    return p != NULL;
+}
+
+size_t process_get_env(int pid, char *out, size_t max) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    size_t n = 0;
+    if (p != NULL && p->env_len <= max) {
+        memcpy(out, p->env, p->env_len);
+        n = p->env_len;
+    }
+    spin_unlock_irq(&process_lock, flags);
+
+    if (n == 0 && max > 0) {
+        out[0] = '\0';     /* an empty environment is still an environment */
+        n = 1;
+    }
+    return n;
+}
+
+bool process_env_get(int pid, const char *name, char *out, size_t max) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    bool ok = false;
+    if (p != NULL) {
+        ok = env_block_get(p->env, p->env_len, name, out, max);
+    }
+    spin_unlock_irq(&process_lock, flags);
+    return ok;
+}
+
+bool process_env_set(int pid, const char *name, const char *value) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    struct process *p = slot_for(pid);
+    bool ok = false;
+    if (p != NULL) {
+        if (p->env_len == 0) {
+            p->env[0] = '\0';
+            p->env_len = 1;
+        }
+        ok = env_block_set(p->env, &p->env_len, PROC_ENV_MAX, name, value);
+    }
+    spin_unlock_irq(&process_lock, flags);
+    return ok;
 }
 
 const char *process_name(int pid) {

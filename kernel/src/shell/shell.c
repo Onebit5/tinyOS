@@ -102,6 +102,21 @@ struct session {
 
     /* the line as it was typed, kept so a job can be named later */
     char typed_line[LINE_MAX];
+
+    /* ---- the environment -------------------------------------------
+     *
+     * the shell is a kernel thread with no process entry of its own, so
+     * its environment lives here rather than in the process table --
+     * and is copied into everything it starts, which is what makes it
+     * an environment rather than four variables in a struct.
+     *
+     * one per session, deliberately: two consoles are two people as far
+     * as this is concerned, and a `cd` on one does not move the other */
+    char env[PROC_ENV_MAX];
+    size_t env_len;
+
+    /* what the last thing exited with. `$?`, and what `if` looks at */
+    int status;
 };
 
 static struct session sessions[VCONSOLE_COUNT];
@@ -129,8 +144,64 @@ static struct session *me(void) {
  * become a command there. say `./name` if that is what you mean -- and
  * anything with a slash in it is taken as a path and looked for exactly
  * where it says. */
-static const char *const command_path[] = { "/bin", "/boot/bin", NULL };
+/* completion walks the same PATH execution does.
+ *
+ * it used to walk a fixed list, which was the same list -- and stopped
+ * being the same list the moment PATH became a variable that meant
+ * something. completion offering a program that cannot be run, or
+ * failing to offer one that can, is worse than no completion: it is
+ * completion that lies */
+static const char *const default_path = "/bin:/boot/bin";
 
+static const char *search_path(void) {
+    static char buf[ENV_VALUE_MAX];
+    if (env_block_get(me()->env, me()->env_len, "PATH", buf, sizeof buf)
+        && buf[0] != '\0') {
+        return buf;
+    }
+    return default_path;
+}
+
+/* the nth directory in PATH, or false once there are no more. an index
+ * rather than a callback, because two of the three callers want to
+ * break out of the middle of the walk and a callback makes that a
+ * flag */
+static bool path_dir(size_t n, char *out, size_t size) {
+    const char *path = search_path();
+    size_t which = 0;
+
+    while (*path != '\0') {
+        size_t len = 0;
+        const char *start = path;
+        while (*path != '\0' && *path != ':') {
+            path++;
+            len++;
+        }
+        while (*path == ':') {
+            path++;
+        }
+        if (len == 0) {
+            continue;       /* an empty element, which names nothing */
+        }
+        if (which++ == n) {
+            if (len >= size) {
+                return false;
+            }
+            memcpy(out, start, len);
+            out[len] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+/* what to look through for a bare command name.
+ *
+ * a fixed list until 0.2.18, which meant `$PATH` was a variable that
+ * looked like it did something and did not. it comes out of the
+ * environment now and falls back to the old list when nobody has set
+ * one -- a machine whose PATH is empty should still be able to run `ls`
+ * and be told how to fix it */
 /* turn a typed word into a program to run. `out` comes back holding an
  * absolute path. false means there is no such program anywhere I look */
 static bool find_program(const char *word, char *out, size_t size) {
@@ -153,12 +224,23 @@ static bool find_program(const char *word, char *out, size_t size) {
         return vfs_open(out, &f) && !f.is_dir;
     }
 
-    for (int i = 0; command_path[i] != NULL; i++) {
+    /* every directory in PATH, in the order it is written -- which is
+     * the whole reason PATH is a list rather than a set. a name earlier
+     * in it hides one later, and that is a feature people rely on */
+    const char *path = search_path();
+    while (*path != '\0') {
         char joined[PATH_MAX];
         size_t n = 0;
-        for (const char *p = command_path[i]; *p != '\0' && n < sizeof joined - 2; p++) {
-            joined[n++] = *p;
+        while (*path != '\0' && *path != ':' && n < sizeof joined - 2) {
+            joined[n++] = *path++;
         }
+        while (*path == ':') {
+            path++;
+        }
+        if (n == 0) {
+            continue;       /* an empty element, which names nothing */
+        }
+
         joined[n++] = '/';
         for (const char *p = word; *p != '\0' && n < sizeof joined - 1; p++) {
             joined[n++] = *p;
@@ -314,9 +396,10 @@ static void cmd_help(int argc, char **argv) {
     char shown[32][24];
     size_t count = 0;
 
-    for (int d = 0; command_path[d] != NULL; d++) {
+    char dir[PATH_MAX];
+    for (size_t d = 0; path_dir(d, dir, sizeof dir); d++) {
         struct vfs_file f;
-        for (size_t i = 0; vfs_readdir(command_path[d], i, &f); i++) {
+        for (size_t i = 0; vfs_readdir(dir, i, &f); i++) {
             if (f.is_dir || f.name[0] == '\0') {
                 continue;
             }
@@ -353,10 +436,14 @@ static void cmd_help(int argc, char **argv) {
             "that answer\ncomes from the program itself, so it cannot be "
             "out of date.\n");
     kprintf("looked for in");
-    for (int d = 0; command_path[d] != NULL; d++) {
-        kprintf(" %s", command_path[d]);
+    {
+        char dir[PATH_MAX];
+        for (size_t d = 0; path_dir(d, dir, sizeof dir); d++) {
+            kprintf(" %s", dir);
+        }
     }
     kprintf(", in that order; a name with a slash is a path.\n");
+    kprintf("that list is $PATH, and `set PATH ...` changes it.\n");
 }
 
 static void cmd_clear(int argc, char **argv) {
@@ -1001,6 +1088,12 @@ static void launch(const char *path, int argc, char **argv, bool announce) {
         argc--;
     }
 
+    /* what it is born holding. set before starting anything, because
+     * the shell is a kernel thread with no process of its own for a
+     * child to inherit from */
+    struct spawn_env env = { me()->env, me()->env_len };
+    user_spawn_env(&env);
+
     struct job j;
     const char *why = NULL;
     if (!user_run(path, argc, (const char *const *)argv, shell_cwd,
@@ -1010,6 +1103,7 @@ static void launch(const char *path, int argc, char **argv, bool announce) {
         } else {
             kprintf("cannot run %s: %s\n", path, why);
         }
+        me()->status = 127;     /* what every shell says for "no such" */
         return;
     }
 
@@ -1019,6 +1113,9 @@ static void launch(const char *path, int argc, char **argv, bool announce) {
             job_print(s, "running");
         }
         return;
+    }
+    if (!j.stopped) {
+        me()->status = j.status;
     }
     job_returned(&j);
 }
@@ -1577,6 +1674,411 @@ static void cmd_mouse(int argc, char **argv) {
     kprintf("the wheel looks back up this console, same as shift+pageup.\n");
 }
 
+/* ---- variables --------------------------------------------------------
+ *
+ * `set` rather than sh's bare `NAME=value`, because a bare assignment
+ * means the shell has to decide whether a word with an equals in it is
+ * an assignment or an argument -- and every shell that took that on has
+ * a page of rules about when it is which. one word at the front is
+ * unambiguous and reads no worse.
+ *
+ * there is no separate `export`. everything set here is inherited by
+ * everything started here, because a variable that was not would be a
+ * variable this shell could see and nothing else could, which is a
+ * feature nobody has asked for */
+static void cmd_set(int argc, char **argv) {
+    if (argc == 1) {
+        /* with nothing to set, say what is set. `env` does the same and
+         * exists because that is the name everybody reaches for */
+        size_t at = 0;
+        int shown = 0;
+        while (at < me()->env_len && me()->env[at] != '\0') {
+            kprintf("%s\n", &me()->env[at]);
+            while (me()->env[at] != '\0') {
+                at++;
+            }
+            at++;
+            shown++;
+        }
+        if (shown == 0) {
+            kprintf("nothing is set. `set NAME value`\n");
+        }
+        return;
+    }
+
+    if (argc == 2) {
+        /* one word: show that one, or say it is not set. those are
+         * different answers and both are worth giving */
+        char value[ENV_VALUE_MAX];
+        if (env_block_get(me()->env, me()->env_len, argv[1], value,
+                          sizeof value)) {
+            kprintf("%s\n", value);
+        } else {
+            kprintf("%s is not set\n", argv[1]);
+        }
+        return;
+    }
+
+    /* everything after the name, joined with spaces. `set GREETING hee
+     * ho` is one variable rather than a complaint about arguments */
+    char value[ENV_VALUE_MAX];
+    size_t n = 0;
+    for (int i = 2; i < argc && n + 1 < sizeof value; i++) {
+        if (i > 2) {
+            value[n++] = ' ';
+        }
+        for (const char *p = argv[i]; *p != '\0' && n + 1 < sizeof value; p++) {
+            value[n++] = *p;
+        }
+    }
+    value[n] = '\0';
+
+    for (const char *p = argv[1]; *p != '\0'; p++) {
+        if (*p == '=') {
+            kprintf("a name cannot have an equals in it -- that is what "
+                    "separates it\n");
+            kprintf("from its value, so one inside could never be looked "
+                    "up again\n");
+            return;
+        }
+    }
+
+    if (me()->env_len == 0) {
+        me()->env[0] = '\0';
+        me()->env_len = 1;
+    }
+    if (!env_block_set(me()->env, &me()->env_len, PROC_ENV_MAX, argv[1],
+                       value)) {
+        kprintf("no room. this session may hold about a kilobyte of "
+                "environment\n");
+    }
+}
+
+static void cmd_unset(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("unset <name>\n");
+        return;
+    }
+    for (int i = 1; i < argc; i++) {
+        env_block_set(me()->env, &me()->env_len, PROC_ENV_MAX, argv[i], NULL);
+    }
+}
+
+/* ---- test ------------------------------------------------------------
+ *
+ * a builtin rather than a program, and that is the whole reason `if`
+ * can do anything useful: without it a condition could only ever be
+ * "did that program succeed", which is a fine thing to ask and not
+ * enough to write anything with.
+ *
+ * the spellings are the ones test has had since v7 unix, because
+ * inventing new ones would mean everybody has to learn them twice */
+static bool test_says_yes(int argc, char **argv) {
+    if (argc == 2) {
+        return argv[1][0] != '\0';     /* a non-empty word is true */
+    }
+
+    if (argc == 3) {
+        if (strcmp(argv[1], "-n") == 0) return argv[2][0] != '\0';
+        if (strcmp(argv[1], "-z") == 0) return argv[2][0] == '\0';
+
+        struct vfs_file f;
+        char path[PATH_MAX];
+        if (!path_resolve(shell_cwd, argv[2], path, sizeof path)) {
+            return false;
+        }
+        if (strcmp(argv[1], "-e") == 0) return vfs_open(path, &f);
+        if (strcmp(argv[1], "-f") == 0) return vfs_open(path, &f) && !f.is_dir;
+        if (strcmp(argv[1], "-d") == 0) return vfs_open(path, &f) && f.is_dir;
+        return false;
+    }
+
+    if (argc == 4) {
+        if (strcmp(argv[2], "=") == 0)  return strcmp(argv[1], argv[3]) == 0;
+        if (strcmp(argv[2], "!=") == 0) return strcmp(argv[1], argv[3]) != 0;
+
+        /* the numeric ones. a word that is not a number compares as
+         * zero, which is what test has always done and is worth
+         * knowing rather than being surprised by */
+        long a = 0, b = 0;
+        for (const char *p = argv[1]; *p >= '0' && *p <= '9'; p++) {
+            a = a * 10 + (*p - '0');
+        }
+        for (const char *p = argv[3]; *p >= '0' && *p <= '9'; p++) {
+            b = b * 10 + (*p - '0');
+        }
+        if (strcmp(argv[2], "-eq") == 0) return a == b;
+        if (strcmp(argv[2], "-ne") == 0) return a != b;
+        if (strcmp(argv[2], "-lt") == 0) return a < b;
+        if (strcmp(argv[2], "-gt") == 0) return a > b;
+        if (strcmp(argv[2], "-le") == 0) return a <= b;
+        if (strcmp(argv[2], "-ge") == 0) return a >= b;
+    }
+    return false;
+}
+
+static void cmd_test(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("test <word>            true if it is not empty\n");
+        kprintf("test -n/-z <word>      not empty / empty\n");
+        kprintf("test -e/-f/-d <path>   exists / is a file / is a "
+                "directory\n");
+        kprintf("test <a> = / != <b>    the same text, or not\n");
+        kprintf("test <a> -eq -ne -lt -gt -le -ge <b>   as numbers\n");
+        kprintf("\nit says nothing and sets $? -- which is what `if` "
+                "reads\n");
+        me()->status = 2;
+        return;
+    }
+    me()->status = test_says_yes(argc, argv) ? 0 : 1;
+}
+
+static void run_line(char *line);
+
+/* ---- scripts ----------------------------------------------------------
+ *
+ * a file of commands, with `if` and `while` in it.
+ *
+ * the syntax is line-oriented and ends blocks with `end`, which is
+ * deliberately *not* sh's `fi` and `done`. borrowing those would claim
+ * a compatibility that does not exist -- there is no `case`, no
+ * functions, no `&&`, no quoting to speak of -- and a script that looks
+ * like sh and is not is worse than one that plainly is not.
+ *
+ *      if test -f notes.txt
+ *          echo it is there
+ *      else
+ *          echo it is not
+ *      end
+ *
+ *      while test $n -lt 5
+ *          echo $n
+ *          set n $((n))        # there is no arithmetic. see below
+ *      end
+ *
+ * a condition is a command, and true means it exited zero. that part
+ * *is* sh's, because it is the right answer: it makes every program on
+ * the machine into a usable condition without any of them knowing.
+ *
+ * there is no arithmetic and there are no functions. both are real
+ * languages hiding inside a shell, and this is a version about
+ * variables and scripts rather than about writing a language. */
+
+#define SCRIPT_MAX_LINES 512
+#define SCRIPT_MAX_DEPTH 8
+#define SCRIPT_MAX_STEPS 100000
+
+enum block_kind { BLOCK_IF, BLOCK_WHILE };
+
+struct block {
+    enum block_kind kind;
+    size_t at;              /* the line the block began on */
+    bool   running;         /* are the lines inside being executed */
+    bool   taken;           /* has a branch of this if already run */
+    bool   outer;           /* was anything running when it began */
+};
+
+/* run one line and say whether it succeeded. a condition is a command,
+ * so this is the whole of what a condition is */
+static bool line_succeeded(char *line) {
+    me()->status = 0;
+    run_line(line);
+    return me()->status == 0;
+}
+
+/* the first word of a line, without disturbing the line -- the
+ * interpreter has to look at it before deciding whether to run it, and
+ * running it needs the line intact */
+static void first_word(const char *line, char *out, size_t max) {
+    while (*line == ' ' || *line == '\t') {
+        line++;
+    }
+    size_t n = 0;
+    while (*line != '\0' && *line != ' ' && *line != '\t' && n + 1 < max) {
+        out[n++] = *line++;
+    }
+    out[n] = '\0';
+}
+
+/* everything after the first word, which for `if` and `while` is the
+ * command that decides */
+static char *rest_of(char *line) {
+    while (*line == ' ' || *line == '\t') {
+        line++;
+    }
+    while (*line != '\0' && *line != ' ' && *line != '\t') {
+        line++;
+    }
+    while (*line == ' ' || *line == '\t') {
+        line++;
+    }
+    return line;
+}
+
+static void run_script_text(char *text, const char *name) {
+    /* chop it into lines in place. a table of pointers rather than a
+     * walk, because `while` has to go back and a walk cannot */
+    static char *lines[SCRIPT_MAX_LINES];
+    size_t count = 0;
+
+    char *p = text;
+    lines[count++] = p;
+    for (; *p != '\0'; p++) {
+        if (*p == '\n') {
+            *p = '\0';
+            if (count >= SCRIPT_MAX_LINES) {
+                kprintf("%s: more than %d lines, which is more than I "
+                        "read\n", name, SCRIPT_MAX_LINES);
+                return;
+            }
+            lines[count++] = p + 1;
+        } else if (*p == '\r') {
+            *p = '\0';     /* written on another machine. drop them quietly */
+        }
+    }
+
+    struct block stack[SCRIPT_MAX_DEPTH];
+    int depth = 0;
+    bool running = true;
+
+    size_t pc = 0;
+    unsigned long steps = 0;
+
+    while (pc < count) {
+        /* a script may loop forever quite legitimately, so this is not
+         * a limit on what may be written -- it is a way out of one that
+         * was not meant to. ctrl+c is the other, and is the one for
+         * loops that were */
+        if (++steps > SCRIPT_MAX_STEPS) {
+            kprintf("%s: stopped after %d steps. if that was on purpose, "
+                    "it wants\n", name, SCRIPT_MAX_STEPS);
+            kprintf("a program rather than a script\n");
+            return;
+        }
+        if (input_peek() == KEY_CTRL_C) {
+            (void)input_getchar();
+            kprintf("%s: stopped\n", name);
+            return;
+        }
+
+        char *line = lines[pc];
+        char word[16];
+        first_word(line, word, sizeof word);
+
+        if (strcmp(word, "if") == 0) {
+            if (depth == SCRIPT_MAX_DEPTH) {
+                kprintf("%s: nested deeper than %d\n", name,
+                        SCRIPT_MAX_DEPTH);
+                return;
+            }
+            bool cond = running && line_succeeded(rest_of(line));
+            stack[depth].kind = BLOCK_IF;
+            stack[depth].at = pc;
+            stack[depth].outer = running;
+            stack[depth].taken = cond;
+            stack[depth].running = running && cond;
+            running = stack[depth].running;
+            depth++;
+
+        } else if (strcmp(word, "else") == 0) {
+            if (depth == 0 || stack[depth - 1].kind != BLOCK_IF) {
+                kprintf("%s: an else with no if\n", name);
+                return;
+            }
+            stack[depth - 1].running = stack[depth - 1].outer
+                                    && !stack[depth - 1].taken;
+            running = stack[depth - 1].running;
+
+        } else if (strcmp(word, "while") == 0) {
+            if (depth == SCRIPT_MAX_DEPTH) {
+                kprintf("%s: nested deeper than %d\n", name,
+                        SCRIPT_MAX_DEPTH);
+                return;
+            }
+            bool cond = running && line_succeeded(rest_of(line));
+            stack[depth].kind = BLOCK_WHILE;
+            stack[depth].at = pc;
+            stack[depth].outer = running;
+            stack[depth].taken = cond;
+            stack[depth].running = running && cond;
+            running = stack[depth].running;
+            depth++;
+
+        } else if (strcmp(word, "end") == 0) {
+            if (depth == 0) {
+                kprintf("%s: an end with nothing open\n", name);
+                return;
+            }
+            depth--;
+            if (stack[depth].kind == BLOCK_WHILE && stack[depth].running) {
+                /* back to the `while`, which will test again and open
+                 * the block again. going back to the *test* rather than
+                 * to the first line inside is the whole of why a loop
+                 * ever stops */
+                pc = stack[depth].at;
+                running = stack[depth].outer;
+                continue;
+            }
+            running = (depth > 0) ? stack[depth].outer : true;
+            if (depth > 0) {
+                running = stack[depth - 1].running;
+            }
+
+        } else if (word[0] != '\0' && running) {
+            run_line(line);
+        }
+
+        pc++;
+    }
+
+    if (depth != 0) {
+        kprintf("%s: the file ended with %d block(s) still open\n",
+                name, depth);
+    }
+}
+
+/* read a file and run it. the shell's own state is used throughout --
+ * a script's `cd` moves this session, and its `set` sets this session's
+ * variables. that is what makes a script worth having at login and is
+ * why sourcing and running are the same thing here */
+static bool run_script(const char *path) {
+    const void *data = NULL;
+    uint64_t size = 0;
+    bool owned = false;
+
+    if (!vfs_slurp(path, &data, &size, &owned)) {
+        return false;
+    }
+
+    static char text[16 * 1024];
+    if (size >= sizeof text) {
+        kprintf("%s: larger than %lu bytes, which is more than I read\n",
+                path, (uint64_t)sizeof text - 1);
+        vfs_release(data, owned);
+        return true;
+    }
+
+    memcpy(text, data, size);
+    text[size] = '\0';
+    vfs_release(data, owned);
+
+    run_script_text(text, path);
+    return true;
+}
+
+static void cmd_source(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("source <file> -- run a file of commands in this shell\n");
+        return;
+    }
+    char path[PATH_MAX];
+    if (!path_resolve(shell_cwd, argv[1], path, sizeof path)
+        || !run_script(path)) {
+        kprintf("no such file: %s\n", argv[1]);
+        me()->status = 127;
+    }
+}
+
 static const struct command commands[] = {
     { "help",   "list what thou may command",           cmd_help, false, "help [name]" },
     { "clear",  "wipe the screen clean",                cmd_clear, false, NULL },
@@ -1600,6 +2102,11 @@ static const struct command commands[] = {
     { "parts",  "what each drive says it holds",        cmd_parts, false, NULL },
     { "chvt",   "show another console; alt+f1..f4 too", cmd_chvt, false, "chvt [1-4]" },
     { "mouse",  "the pointer, and whether it is well",  cmd_mouse, false, NULL },
+    { "set",    "a variable, or all of them",           cmd_set, false, "set [NAME [value...]]" },
+    { "unset",  "forget one",                           cmd_unset, false, "unset <name>" },
+    { "env",    "what is set, and inherited by what I start", cmd_set, false, NULL },
+    { "test",   "answer a question in $?, for `if`",    cmd_test, false, "test <words...>" },
+    { "source", "run a file of commands in this shell", cmd_source, true, "source <file>" },
     { "cpus",   "the processors, and which are awake",  cmd_cpus, false, NULL },
     { "locks",  "what guards what, and what waits",     cmd_locks, false, NULL },
     { "cd",     "go somewhere; no argument means the root", cmd_cd, true, "cd [directory]" },
@@ -1720,6 +2227,21 @@ static void run_argv(int argc, char **argv) {
     {
         char path[PATH_MAX];
         if (find_program(argv[0], path, sizeof path)) {
+            /* a file beginning with #! is a script rather than a
+             * program, and is run by this shell rather than loaded.
+             * there is no /bin/sh to name after the #! -- the shell is
+             * a kernel thread -- so what follows it is read and
+             * ignored, which is honest: the line is there so the file
+             * says what it is, and this machine has only one answer */
+            char first[2] = { 0, 0 };
+            struct vfs_file f;
+            if (vfs_open(path, &f) && !f.is_dir && f.size >= 2
+                && vfs_read(&f, 0, first, 2) == 2
+                && first[0] == '#' && first[1] == '!') {
+                run_script(path);
+                return;
+            }
+
             /* typed by name rather than through `run`: they want the
              * program's output, not a commentary on it */
             launch(path, argc, argv, false);
@@ -1743,6 +2265,11 @@ static void run_argv(int argc, char **argv) {
             ties++;
         }
     }
+
+    /* 127 is what every shell says for a name that is not a command,
+     * and `if` reads it -- so a script can branch on whether something
+     * exists at all */
+    me()->status = 127;
 
     if (best >= 2 && ties == 1) {
         kprintf("'%s' means nothing to me. didst thou mean '%s'?\n",
@@ -1897,11 +2424,15 @@ static void run_pipeline(int argc, char **argv, bool background) {
         stages[i].path = paths[i];
     }
 
+    struct spawn_env env = { me()->env, me()->env_len };
+    user_spawn_env(&env);
+
     struct job j;
     const char *why = "";
     if (!user_pipeline(stages, count, shell_cwd, current_uid, background,
                        &j, &why)) {
         kprintf("cannot run it: %s\n", why);
+        me()->status = 127;
         return;
     }
 
@@ -1911,6 +2442,9 @@ static void run_pipeline(int argc, char **argv, bool background) {
             job_print(s, "running");
         }
         return;
+    }
+    if (!j.stopped) {
+        me()->status = j.status;
     }
     job_returned(&j);
 }
@@ -1928,17 +2462,121 @@ static bool needs_wiring(int argc, char **argv) {
     return false;
 }
 
+/* ---- $ ---------------------------------------------------------------
+ *
+ * expansion happens to the whole line before it is split into words,
+ * which is what sh does and is worth knowing about: a variable holding
+ * "a b" becomes two words, not one word with a space in it. that is
+ * occasionally infuriating and is the behaviour everybody expects,
+ * including the infuriating part.
+ *
+ * a name that is not set expands to nothing, which is also sh's answer
+ * and is the only one that lets `cat $MAYBE` mean "cat" rather than
+ * "cat, and also fail" */
+static void expand(const char *in, char *out, size_t max) {
+    size_t at = 0;
+
+    for (size_t i = 0; in[i] != '\0' && at + 1 < max; ) {
+        if (in[i] != '$') {
+            out[at++] = in[i++];
+            continue;
+        }
+        i++;
+
+        /* $? is what the last thing exited with, and is the only
+         * variable here that is not in the environment -- it belongs to
+         * the shell rather than to anything it starts */
+        if (in[i] == '?') {
+            i++;
+            char digits[16];
+            int n = 0;
+            int v = me()->status;
+            if (v < 0) {
+                out[at++] = '-';
+                v = -v;
+            }
+            if (v == 0) {
+                digits[n++] = '0';
+            }
+            while (v > 0 && n < 15) {
+                digits[n++] = (char)('0' + v % 10);
+                v /= 10;
+            }
+            while (n-- > 0 && at + 1 < max) {
+                out[at++] = digits[n];
+            }
+            continue;
+        }
+
+        bool braced = (in[i] == '{');
+        if (braced) {
+            i++;
+        }
+
+        char name[ENV_NAME_MAX];
+        size_t n = 0;
+        while (in[i] != '\0' && n + 1 < sizeof name
+               && ((in[i] >= 'a' && in[i] <= 'z')
+                   || (in[i] >= 'A' && in[i] <= 'Z')
+                   || (in[i] >= '0' && in[i] <= '9')
+                   || in[i] == '_')) {
+            name[n++] = in[i++];
+        }
+        name[n] = '\0';
+
+        if (braced && in[i] == '}') {
+            i++;
+        }
+
+        if (n == 0) {
+            /* a lone dollar is a dollar. `echo $` should print one
+             * rather than eating whatever follows */
+            out[at++] = '$';
+            continue;
+        }
+
+        char value[ENV_VALUE_MAX];
+        if (env_block_get(me()->env, me()->env_len, name, value,
+                          sizeof value)) {
+            for (size_t k = 0; value[k] != '\0' && at + 1 < max; k++) {
+                out[at++] = value[k];
+            }
+        }
+        /* and a name nobody set expands to nothing at all */
+    }
+
+    out[at] = '\0';
+}
+
 static void run_line(char *line) {
     char *argv[ARGV_MAX];
 
-    /* kept before the split, which chops the line into words with NULs
-     * written over the spaces. a job has to be able to say what it was */
+    /* kept before anything is done to it, which the split and the
+     * expansion both are. a job has to be able to say what was typed
+     * rather than what it turned into */
     size_t n = 0;
     while (line[n] != '\0' && n < LINE_MAX - 1) {
         typed_line[n] = line[n];
         n++;
     }
     typed_line[n] = '\0';
+
+    /* a comment is the rest of the line, and a line that is only a
+     * comment is nothing at all. this is here rather than in the script
+     * runner because a comment typed at a prompt should also be one */
+    for (size_t i = 0; line[i] != '\0'; i++) {
+        if (line[i] == '#' && (i == 0 || line[i - 1] == ' ')) {
+            line[i] = '\0';
+            break;
+        }
+    }
+
+    /* expansion, before the split. a variable holding "a b" becomes two
+     * words rather than one word with a space in it -- occasionally
+     * infuriating, universally expected, and the two are related */
+    static char expanded[LINE_MAX];
+    expand(line, expanded, sizeof expanded);
+    line = expanded;
 
     int argc = split(line, argv, ARGV_MAX);
 
@@ -2276,9 +2914,10 @@ static void gather(struct candidates *c, const char *line, size_t start,
         /* and the programs, because they are commands too now -- a
          * completion that offered only the builtins would be drawing a
          * line the rest of this version just spent its time rubbing out */
-        for (int d = 0; command_path[d] != NULL; d++) {
+        char dir[PATH_MAX];
+        for (size_t d = 0; path_dir(d, dir, sizeof dir); d++) {
             struct vfs_file f;
-            for (size_t i = 0; vfs_readdir(command_path[d], i, &f); i++) {
+            for (size_t i = 0; vfs_readdir(dir, i, &f); i++) {
                 if (f.is_dir || f.name[0] == '\0') {
                     continue;
                 }
@@ -2505,6 +3144,27 @@ static void cmd_logout(int argc, char **argv) {
     login();
 }
 
+/* what a session reads before it starts.
+ *
+ * this is what the whole version is *for*. a machine where PATH has to
+ * be typed every time is a machine where PATH is a variable that means
+ * nothing -- and there is nowhere else to say "here is what this
+ * session should look like" once and have it be true every time */
+static void read_profile(void) {
+    static const char *const places[] = {
+        "/etc/profile",         /* on the disk, if somebody has put one there */
+        "/boot/etc/profile",    /* and the one that ships with the machine */
+        NULL,
+    };
+    for (int i = 0; places[i] != NULL; i++) {
+        struct vfs_file f;
+        if (vfs_open(places[i], &f) && !f.is_dir) {
+            run_script(places[i]);
+            return;     /* the first one found, not both */
+        }
+    }
+}
+
 void shell_run(void) {
     session_init();
 
@@ -2512,6 +3172,7 @@ void shell_run(void) {
 
     console_set_colors(COLOR_TEXT, 0x101018);
     login();
+    read_profile();
 
     for (;;) {
         size_t len = 0;     /* characters in the line */

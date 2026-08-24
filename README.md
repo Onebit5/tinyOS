@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.17** (**something to point with.** a ps/2 mouse, and select-and-paste on a text console)
+**version: 0.2.18** (**variables, and scripts.** an environment that is inherited, `$PATH` that means it, and `if`/`while`)
 
 ## what it does
 
@@ -55,6 +55,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] mbr and gpt, and mounting by which partition rather than which drive answered
 - [x] four virtual consoles, each its own session, with scrollback
 - [x] a ps/2 mouse: drag to select, middle button to paste it back
+- [x] an environment inherited across spawn, `$PATH`, and scripts with `if` and `while`
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -164,6 +165,108 @@ cancelling them with ctrl+c is cooperative, not forceful -- I have no signals an
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
 
+## variables, and scripts
+
+### the environment is a block, not a table
+
+```c
+char env[PROC_ENV_MAX];     /* "NAME=value\0NAME=value\0\0" */
+size_t env_len;
+```
+
+one run of NUL-terminated strings, ended by an empty one. that shape is
+not nostalgia: **inheriting it is one memcpy**, and inheriting is most of
+what an environment is for. a table of pointers would need every one of
+them rewritten on the way into a child.
+
+it belongs to the *process*, which is why `export` in every shell there
+has ever been is a builtin rather than a command — a command could only
+ever have changed its own. a program reads and writes its own with
+`getenv`/`setenv`, and what it changes is inherited by anything it
+starts and by nothing else. that is not a limitation, it is the
+definition.
+
+the shell's own environment lives in its session, because the shell is a
+kernel thread with no process entry — so the block operations live in
+`lib/env.c` and both callers use the same ones. one implementation, and
+one fewer chance of them disagreeing about what "already set" means.
+
+### `$PATH`, including where it was quietly a lie
+
+```
+igor@velvet[1]:/# set PATH /bin:/boot/bin
+igor@velvet[1]:/# echo $PATH
+```
+
+what caught my eye doing this: **completion had been walking a fixed
+list.** it was the same list, so nothing was wrong — until PATH became a
+variable that meant something, at which point completion would offer
+programs that could not be run and miss ones that could. completion that
+lies is worse than no completion, so it walks PATH too.
+
+expansion happens to the whole line *before* it is split into words,
+which is sh's behaviour and worth knowing: a variable holding `a b`
+becomes two words, not one word with a space in it. occasionally
+infuriating, universally expected, and those two facts are related. a
+name nobody set expands to nothing, which is the only answer that lets
+`cat $MAYBE` mean `cat` rather than "cat, and also fail".
+
+`$?` is what the last thing exited with — 127 for a name that is not a
+command, as everywhere else — and it is what `if` reads.
+
+### scripts
+
+```
+if test -f notes.txt
+    echo it is there
+else
+    echo it is not
+end
+
+set N 0
+while test $N -lt 3
+    echo counting
+    set N 3
+end
+```
+
+blocks end with `end` rather than `fi` and `done`, **deliberately**.
+borrowing sh's spellings would claim a compatibility that does not exist
+— there are no functions, no arithmetic, no `&&`, no quoting to speak of
+— and a script that looks like sh and is not is worse than one that
+plainly is not.
+
+a condition *is* sh's rule, because it is the right one: a condition is a
+command and true means it exited zero. that makes every program on the
+machine into a usable condition without any of them knowing about it.
+`test` is a builtin because without it a condition could only ever be
+"did that program succeed", which is a fine thing to ask and not enough
+to write anything with.
+
+the subtle part is that **a condition inside a block that is not running
+must not be evaluated at all**. checking only that the body is skipped
+misses it — the body is skipped anyway — but `if grep x file` in a
+skipped branch would still read the file, and `if rm -f x` would still
+remove one. there is a test that fails on precisely that and passes on
+everything else.
+
+a script may loop forever quite legitimately, so there is a step limit
+and a ctrl+c check between lines. the limit is a way out of a loop that
+was not meant to be one; ctrl+c is for the ones that were.
+
+### and what it is all for
+
+`/boot/etc/profile` is read by every session on every console before the
+first prompt. a machine where `PATH` has to be typed every time is a
+machine where `PATH` is a variable that means nothing, and there was
+nowhere to say "here is what a session looks like" once and have it be
+true every time.
+
+a file beginning with `#!` is run by the shell rather than loaded. there
+is no `/bin/sh` to name after it — the shell is a kernel thread — so
+what follows is read and ignored. the line is there so the file says
+what it is, and this machine has only one answer to give.
+
 ## something to point with
 
 the first input here that is **not a stream of characters**, and that is
@@ -222,6 +325,30 @@ a *truncated* packet is worse and cannot be fully fixed: the decoder is
 mid-packet, so the marker cannot help. it costs exactly one wrong packet
 and then it is back in step, which is the best framing this thin can do
 — and there is a test that says so.
+
+### one port, two devices, and a 2 nobody typed
+
+the keyboard and the mouse share one controller, one data port and one
+output buffer. bit 5 of the status byte says which of them a waiting
+byte belongs to, and **both handlers have to ask**.
+
+the mouse handler asked from the day it was written. the keyboard
+handler did not, and the symptom was a `2` sitting in the username box
+at every boot: a wheel mouse answers *"which device are you"* with a
+**3**, that byte was still in the buffer when interrupts came on, and
+`0x03` is the scancode for the 2 key.
+
+two things had to change together. the wheel handshake now runs with
+reporting **off** — with it on, movement packets interleave with the
+acknowledgements and the whole conversation goes out of step, which is
+what left a byte behind in the first place. and whatever remains is
+drained before interrupts are enabled, because after that it is read as
+a keystroke by whichever handler fires first.
+
+that part reads io ports and is not testable on a host, which is worth
+saying plainly. what *is* in the suite is the coincidence — scancode 3
+is the 2 key — so the next person to see a stray character at a prompt
+recognises it.
 
 ### the wheel handshake, which can only be historical
 
@@ -2059,6 +2186,8 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.18a** — the keyboard handler was reading bytes that belonged to the mouse. they share one controller, one data port and one output buffer, and bit 5 of the status byte says whose a waiting byte is — the mouse handler asked, the keyboard handler did not. a wheel mouse answers its device-id query with a **3**, `0x03` is the scancode for the 2 key, and so every boot came up with a `2` already typed in the username box. the wheel handshake also runs with reporting off now, since movement packets otherwise interleave with the acknowledgements and put the conversation out of step, and whatever is left is drained before interrupts come on.
+- **0.2.18** — an environment, `$PATH`, and scripts. the environment is one block of NUL-separated `NAME=value` strings on the process rather than a table of pointers, because that shape makes inheriting it a single memcpy and inheriting is most of what an environment is *for*; it belongs to the process, which is why `export` has been a shell builtin everywhere since 1977 — a command could only ever change its own. the shell's lives in its session since it is a kernel thread with no process, so the block operations moved to `lib/env.c` and both callers share them. doing `$PATH` turned up something quietly wrong: **completion had been walking a fixed list** that happened to be the same one, and stopped being the same the moment PATH could be set — completion that offers a program which cannot be run is worse than none. scripts get `if`, `else`, `while` and `end` — `end` rather than `fi`/`done` deliberately, since borrowing sh's spellings would claim a compatibility that does not exist. a condition is a command and true means it exited zero, which is sh's rule and the right one; the subtle part is that a condition inside a *skipped* block must not be evaluated at all, because `if grep x file` would still read the file — checking only that the body is skipped misses it entirely, and there is a test that does not. `/boot/etc/profile` runs before every prompt on every console, which is the whole point: a PATH that must be typed every time is a PATH that means nothing.
 - **0.2.17** — a ps/2 mouse, which is the first input here that is not a stream of characters. a queue is right for typing because typing *is* a sequence and the order is the meaning; a mouse reports a change since last time and the interesting thing is where the pointer ended up, so the driver keeps a position and the events are edges. what it turned out to be good for is what a pointer has been good for on a text console since gpm in 1993 — drag over a path, middle-click at a prompt, and it is typed for you, with the characters going into the input queue as though keys had been pressed so that nothing above knows a mouse exists. the wheel scrolls back. the one genuinely hard part is that the 8042 has no framing: a packet is three bytes and nothing marks where one starts but a bit that is always set, so a single dropped byte puts every packet after it out of step and the pointer flies off in a straight line — which looks like a hardware fault and is not, which is why `mouse` prints the count of discarded bytes. a truncated packet cannot be fully recovered and costs exactly one wrong packet before it is back in step, and there is a test that says so.
 - **0.2.16** — four virtual consoles, because the terminal layer was one machine pretending to be one seat. the console had kept a shadow of every cell since 0.1.x, added so a block cursor could put back the character underneath it — and a console nobody is looking at turns out to be exactly that shadow with nothing painting it, so most of the driver is the code it always was with one question in front of the parts that touch pixels. scrollback is the same array made taller. the whole thing turns on one rule stated twice: **output belongs to its writer** (a shell on console 2 must not scribble over console 1, so every thread carries its console and the driver asks on each write) and **input belongs to the screen** (a process at the front of console 3 is at the front of console 3 and is still not being typed at, so a read needs both conditions; ctrl+c arrives from the keyboard and is aimed at the console being looked at, not at whichever the interrupted thread was on). the shell was the harder half: its state was file-static, correct while there was one of it and a bug the moment there were four, so it is a session per console reached through the calling thread. that move broke something quietly — `next_job_number = 1` was a static initialiser and a zeroed session does not get one, so every session's first job was job zero, which means "no job" everywhere else in the file.
 - **0.2.15** — partitions, because a disk is not a filesystem: it is a table saying where several of them are, and the kernel had been asking each drive whether sector zero looked like a superblock. both tables — mbr's four sixteen-byte entries from 1983, and gpt's checksummed header and array, with the protective mbr a gpt disk carries so old tools see a full disk rather than an empty one. the crc is the whole difference between them: a corrupt mbr is simply followed because nothing in the format could notice, while a gpt that does not add up is *known* to be corrupt and is refused — so the parser is judged by what it will not do, and the tests spend more on the refusals than the happy path. the filesystem is handed a *view* of one partition rather than the drive, bounded at both ends, so it never finds out it is not alone; the cache stays underneath on absolute addresses so it remains correct when the mount moves. every partition is tried at boot rather than only the first, since an efi partition in slot one and the real filesystem in slot two is the ordinary arrangement. `parts` lists what each drive says it holds and what was actually found on it — a different question — and `mount <n>` moves the mount, bluntly and with a warning, because there is no reference counting here that could do better. `tools/readext2.py` had to learn about tables too: it read from sector zero, and the moment the disk was partitioned it would have quietly stopped being the only external check this project has.

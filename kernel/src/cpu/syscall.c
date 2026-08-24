@@ -43,7 +43,7 @@ static const char *const call_names[SYSCALL_COUNT] = {
     "create", "chdir", "getcwd", "mkdir", "rmdir",
     "unlink", "rename", "stat",
     "getkey", "screen", "cursor", "clear", "fork", "mmap", "munmap",
-    "chmod", "chown", "symlink", "readlink",
+    "chmod", "chown", "symlink", "readlink", "getenv", "setenv",
 };
 
 uint64_t syscall_times_called(unsigned nr) {
@@ -451,6 +451,71 @@ static int64_t sys_fork(struct user_regs *regs) {
     /* and the two answers. the parent's is the return value below; the
      * child's is the zero fork_return writes into rax */
     return pid;
+}
+
+/* ---- the environment ------------------------------------------------
+ *
+ * a program may read and change its own, and what it changes is
+ * inherited by anything it starts and by nothing else. that is not a
+ * limitation, it is the definition: a child cannot reach up into its
+ * parent, which is exactly why `export` is a shell builtin everywhere
+ * and has been since 1977 -- a command could only ever have changed
+ * its own */
+static int64_t sys_getenv(uint64_t ptr, uint64_t len, uint64_t out_ptr,
+                          uint64_t out_size) {
+    if (len == 0 || len >= ENV_NAME_MAX || !user_range_ok(ptr, len)) {
+        return -1;
+    }
+    if (out_size == 0 || !user_range_ok(out_ptr, out_size)) {
+        return -1;
+    }
+
+    char name[ENV_NAME_MAX];
+    memcpy(name, (const void *)ptr, len);
+    name[len] = '\0';
+
+    char value[ENV_VALUE_MAX];
+    if (!process_env_get(caller_pid(), name, value, sizeof value)) {
+        return -1;      /* not set, which is not the same as set to nothing */
+    }
+
+    uint64_t n = strlen(value);
+    if (n >= out_size) {
+        n = out_size - 1;
+    }
+    memcpy((void *)out_ptr, value, n);
+    ((char *)out_ptr)[n] = '\0';
+    return (int64_t)n;
+}
+
+static int64_t sys_setenv(uint64_t ptr, uint64_t len, uint64_t vptr,
+                          uint64_t vlen) {
+    if (len == 0 || len >= ENV_NAME_MAX || !user_range_ok(ptr, len)) {
+        return -1;
+    }
+    char name[ENV_NAME_MAX];
+    memcpy(name, (const void *)ptr, len);
+    name[len] = '\0';
+
+    /* a name with an equals in it would make an entry that could never
+     * be looked up again, since the first equals ends the name */
+    for (uint64_t i = 0; i < len; i++) {
+        if (name[i] == '=') {
+            return -1;
+        }
+    }
+
+    if (vptr == 0) {
+        return process_env_set(caller_pid(), name, NULL) ? 0 : -1;
+    }
+    if (vlen >= ENV_VALUE_MAX || !user_range_ok(vptr, vlen)) {
+        return -1;
+    }
+    char value[ENV_VALUE_MAX];
+    memcpy(value, (const void *)vptr, vlen);
+    value[vlen] = '\0';
+
+    return process_env_set(caller_pid(), name, value) ? 0 : -1;
 }
 
 /* ---- what a filesystem with opinions can be told --------------------
@@ -900,9 +965,19 @@ static int64_t sys_spawn(uint64_t ptr, uint64_t len) {
     if (pid == 0) {
         return -1;
     }
-    /* nothing to settle for a child spawned by a program -- it inherits
-     * its parent's group and keeps the descriptors it was born with --
-     * so it goes straight away */
+
+    /* the environment goes with it. that is the whole of what an
+     * environment is: a thing a child is born holding, which is why
+     * setting one is worth doing at all */
+    {
+        static char block[PROC_ENV_MAX];
+        size_t n = process_get_env(caller_pid(), block, sizeof block);
+        process_set_env(pid, block, n);
+    }
+
+    /* nothing else to settle for a child spawned by a program -- it
+     * inherits its parent's group and keeps the descriptors it was born
+     * with -- so it goes straight away */
     user_start(pid);
     return pid;
 }
@@ -995,6 +1070,10 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return sys_symlink(a0, a1, a2, a3);
     case SYS_READLINK:
         return sys_readlink(a0, a1, a2, a3);
+    case SYS_GETENV:
+        return sys_getenv(a0, a1, a2, a3);
+    case SYS_SETENV:
+        return sys_setenv(a0, a1, a2, a3);
     case SYS_GETUID:
         return process_uid(caller_pid());
     case SYS_UPTIME:

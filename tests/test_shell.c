@@ -69,6 +69,11 @@ size_t console_scrollback_lines(void) { return 0; }
 void console_set_colors(uint32_t f, uint32_t b) { (void)f; (void)b; }
 bool console_ready(void) { return true; }
 int input_getchar_blocking(void) { return '\n'; }
+
+/* a script checks between lines for a ctrl+c, because a loop may
+ * legitimately run forever and stopping one has to be possible */
+static int pending_key = -1;
+int input_peek(void) { return pending_key; }
 uint64_t pit_uptime_ms(void) { return 12345; }
 uint64_t pit_ticks(void) { return 1234; }
 /* both of these are declared noreturn, and they mean it -- so a stub
@@ -247,7 +252,7 @@ const char *syscall_name(unsigned n) { (void)n; return "x"; }
 bool input_haskey(void) { return true; }
 bool interrupts_on_apic(void) { return false; }
 bool interrupts_use_ioapic(void) { return false; }
-int input_getchar(void) { return 'q'; }
+int input_getchar(void) { int c = pending_key; pending_key = -1; return c; }
 void klog_dump(void) { kprintf("<DMESG>"); }
 static bool run_ok = true;
 static const char *ran_path;
@@ -276,6 +281,7 @@ static bool ran_announce;
 /* what the fake job comes back as: finished, or suspended by a ctrl+z
  * that the test says happened */
 static bool run_stops;
+static int run_status;      /* what the fake program exits with */
 
 bool user_run(const char *path, int argc, const char *const argv[],
               const char *cwd,
@@ -294,6 +300,7 @@ bool user_run(const char *path, int argc, const char *const argv[],
     out->pids[0] = 42;
     out->count = 1;
     out->stopped = run_stops && !background;
+    out->status = run_status;
 
     if (run_ok) return true;
     *error = run_error;
@@ -304,6 +311,12 @@ bool user_run(const char *path, int argc, const char *const argv[],
 static bool job_is_alive;
 static int  continued_pgid, continued_foreground;
 static int  waits;
+
+/* what the shell handed the next thing it starts. an environment is a
+ * thing inherited rather than asked for, so what is under test is that
+ * the shell passes its own */
+static const struct spawn_env *handed_env;
+void user_spawn_env(const struct spawn_env *env) { handed_env = env; }
 
 bool user_job_alive(const struct job *j) { (void)j; return job_is_alive; }
 void user_job_collect(struct job *j) { (void)j; }
@@ -337,6 +350,7 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
     out->pids[0] = 7;
     out->count = count;
     out->stopped = run_stops && !background;
+    out->status = run_status;
     pipe_count_seen = count;
     pipe_background = background;
     for (int i = 0; i < count && i < PIPELINE_MAX; i++) {
@@ -558,6 +572,315 @@ int main(void) {
     run("ps | grep hello");
     CHECK(pipe_count_seen == 0, "a builtin in a pipeline runs nothing");
     CHECK(strstr(out, "builtin") != NULL, "and is told it is a builtin");
+
+    /* ---- variables ---------------------------------------------------
+     *
+     * an environment is a thing inherited rather than asked for, which
+     * is why `export` is a shell builtin everywhere and has been since
+     * 1977: a command could only ever have changed its own */
+
+    my_console = 0;
+    session_init();
+
+    run("set");
+    CHECK(strstr(out, "nothing is set") != NULL, "a new session has none");
+
+    run("set GREETING hee-ho");
+    run("set");
+    CHECK(strstr(out, "GREETING=hee-ho") != NULL, "one can be set");
+    run("set GREETING");
+    CHECK(strstr(out, "hee-ho") != NULL, "and read back by name");
+
+    /* everything after the name, joined -- `set X a b` is one variable
+     * rather than a complaint about arguments */
+    run("set PHRASE the bond endures");
+    run("set PHRASE");
+    CHECK(strstr(out, "the bond endures") != NULL,
+          "and a value may have spaces in it");
+
+    /* setting twice replaces rather than leaving two of it, which a
+     * walk would then find whichever came first */
+    run("set GREETING different");
+    out_reset();
+    run("set");
+    CHECK(strstr(out, "hee-ho") == NULL, "setting one again replaces it");
+    CHECK(strstr(out, "GREETING=different") != NULL, "with the new value");
+
+    run("set BAD=NAME x");
+    CHECK(strstr(out, "equals") != NULL,
+          "a name with an equals in it is refused -- the first equals is "
+          "what separates the name from the value, so one inside could "
+          "never be looked up again");
+
+    run("unset GREETING");
+    run("set GREETING");
+    CHECK(strstr(out, "not set") != NULL, "and one can be forgotten");
+
+    /* not set and set-to-nothing are different answers */
+    run("set EMPTY");
+    CHECK(strstr(out, "not set") != NULL, "a name nobody set is not set");
+
+    /* ---- $ ---- */
+
+    run("set NAME velvet");
+    ran_arg1 = NULL;
+    run("echo $NAME");
+    CHECK(ran_arg1 && strcmp(ran_arg1, "velvet") == 0, "$NAME expands");
+
+    ran_arg1 = NULL;
+    run("echo ${NAME}room");
+    CHECK(ran_arg1 && strcmp(ran_arg1, "velvetroom") == 0,
+          "and braces say where the name stops");
+
+    ran_argc = 0;
+    run("echo $NOTHING");
+    CHECK(ran_argc == 1,
+          "a name nobody set expands to nothing at all, which is what "
+          "lets `cat $MAYBE` mean `cat` rather than fail");
+
+    /* expansion happens before the split, so a value with a space in it
+     * becomes two words. occasionally infuriating, universally
+     * expected, and the two are related */
+    ran_argc = 0;
+    run("echo $PHRASE");
+    CHECK(ran_argc == 4, "a value with spaces becomes several words");
+
+    ran_arg1 = NULL;
+    run("echo $");
+    CHECK(ran_arg1 && strcmp(ran_arg1, "$") == 0,
+          "and a lone dollar is a dollar rather than eating what follows");
+
+    /* ---- $? ---- */
+
+    run_status = 0;
+    run("echo hello");
+    ran_arg1 = NULL;
+    run("echo $?");
+    CHECK(ran_arg1 && strcmp(ran_arg1, "0") == 0,
+          "$? is what the last thing exited with");
+
+    run_status = 3;
+    run("echo hello");
+    ran_arg1 = NULL;
+    run("echo $?");
+    CHECK(ran_arg1 && strcmp(ran_arg1, "3") == 0, "whatever that was");
+    run_status = 0;
+
+    run("nosuchcommand");
+    ran_arg1 = NULL;
+    run("echo $?");
+    CHECK(ran_arg1 && strcmp(ran_arg1, "127") == 0,
+          "and 127 for a name that is not a command, as everywhere else");
+
+    /* ---- test, which is what makes `if` worth having ---- */
+
+    run("test a = a");
+    CHECK(me()->status == 0, "test says yes by exiting zero");
+    run("test a = b");
+    CHECK(me()->status == 1, "and no by exiting one");
+    run("test -z ''");
+    run("test 3 -lt 5");
+    CHECK(me()->status == 0, "numbers compare as numbers");
+    run("test 30 -lt 5");
+    CHECK(me()->status == 1, "rather than as text -- 30 is not less than 5");
+    run("test -f /hello.txt");
+    CHECK(me()->status == 0, "and a file can be asked about");
+    run("test -f /nosuchfile");
+    CHECK(me()->status == 1, "including one that is not there");
+    run("test -d /notes");
+    CHECK(me()->status == 0, "and a directory");
+
+    /* ---- $PATH ---- */
+
+    run("set PATH /boot/bin");
+    ran_path = NULL;
+    run("echo hi");
+    CHECK(ran_path && strcmp(ran_path, "/boot/bin/echo") == 0,
+          "a program is found through PATH");
+
+    run("set PATH /nowhere");
+    run("echo hi");
+    CHECK(strstr(out, "means nothing to me") != NULL,
+          "and a PATH with nothing in it finds nothing -- which is the "
+          "point of it being a variable rather than a decree");
+
+    run("unset PATH");
+    ran_path = NULL;
+    run("echo hi");
+    CHECK(ran_path != NULL,
+          "with no PATH at all it falls back, so a machine whose PATH is "
+          "empty can still run `ls` and be told how to fix it");
+
+    /* the environment is handed to whatever is started, because that is
+     * the whole of what an environment is */
+    run("set NAME velvet");
+    handed_env = NULL;
+    run("echo hi");
+    CHECK(handed_env != NULL && handed_env->len > 0,
+          "and the session's environment goes with what it starts");
+
+    /* ---- scripts ------------------------------------------------------
+     *
+     * the interpreter is where the real logic is, so it is driven
+     * directly rather than through a file. a condition is a command and
+     * true means it exited zero, which is sh's rule and the right one:
+     * it makes every program on the machine a usable condition without
+     * any of them knowing */
+    {
+        static char script[2048];
+        #define SCRIPT(text) do { \
+            strcpy(script, text); \
+            out_reset(); \
+            run_script_text(script, "<test>"); \
+        } while (0)
+
+        SCRIPT("set A one\nset B two\n");
+        run("set A");
+        CHECK(strstr(out, "one") != NULL, "a script runs its lines");
+
+        /* and in this session, which is what makes one worth having at
+         * login: a script's `set` sets *these* variables */
+        run("set B");
+        CHECK(strstr(out, "two") != NULL, "in the session that ran it");
+
+        /* ---- if ---- */
+
+        SCRIPT("if test 1 -eq 1\n"
+               "  set TAKEN yes\n"
+               "end\n");
+        run("set TAKEN");
+        CHECK(strstr(out, "yes") != NULL, "a true if runs its body");
+
+        run("unset TAKEN");
+        SCRIPT("if test 1 -eq 2\n"
+               "  set TAKEN yes\n"
+               "end\n");
+        run("set TAKEN");
+        CHECK(strstr(out, "not set") != NULL, "and a false one does not");
+
+        SCRIPT("if test 1 -eq 2\n"
+               "  set WHICH then\n"
+               "else\n"
+               "  set WHICH else\n"
+               "end\n");
+        run("set WHICH");
+        CHECK(strstr(out, "else") != NULL, "else runs when the if did not");
+
+        SCRIPT("if test 1 -eq 1\n"
+               "  set WHICH then\n"
+               "else\n"
+               "  set WHICH else\n"
+               "end\n");
+        run("set WHICH");
+        CHECK(strstr(out, "then") != NULL, "and does not when it did");
+
+        /* nesting, and the part that is easy to get wrong: a block
+         * inside one that is not running must not run, however true its
+         * own condition is */
+        run("unset INNER");
+        SCRIPT("if test 1 -eq 2\n"
+               "  if test 1 -eq 1\n"
+               "    set INNER yes\n"
+               "  end\n"
+               "end\n");
+        run("set INNER");
+        CHECK(strstr(out, "not set") != NULL,
+              "a true if inside a false one does not run -- which is the "
+              "thing a flag rather than a stack gets wrong");
+
+        run("unset INNER");
+        SCRIPT("if test 1 -eq 1\n"
+               "  if test 1 -eq 1\n"
+               "    set INNER yes\n"
+               "  end\n"
+               "end\n");
+        run("set INNER");
+        CHECK(strstr(out, "yes") != NULL, "and a true one inside a true one does");
+
+        /* and the condition itself must not run either.
+         *
+         * checking only that the *body* is skipped misses this: the
+         * body is skipped anyway because running is ANDed in later, so
+         * a condition evaluated inside a block that is not executing
+         * does nothing visible -- except run a command. `if grep x file`
+         * inside a skipped branch would read a file, and `if rm -f x`
+         * would remove one */
+        ran_arg1 = NULL;
+        SCRIPT("if test 1 -eq 2\n"
+               "  if echo shouldnotrun\n"
+               "  end\n"
+               "end\n");
+        CHECK(ran_arg1 == NULL || strcmp(ran_arg1, "shouldnotrun") != 0,
+              "a condition inside a block that is not running is not even "
+              "evaluated -- a command is a command, and one in a skipped "
+              "branch would still have done whatever it does");
+
+        ran_arg1 = NULL;
+        SCRIPT("if test 1 -eq 2\n"
+               "  while echo shouldnotrun\n"
+               "  end\n"
+               "end\n");
+        CHECK(ran_arg1 == NULL || strcmp(ran_arg1, "shouldnotrun") != 0,
+              "and neither is a while's");
+
+        /* ---- while ---- */
+
+        SCRIPT("set N 0\n"
+               "while test $N -lt 3\n"
+               "  set N 1\n"
+               "  set N 2\n"
+               "  set N 3\n"
+               "end\n"
+               "set DONE yes\n");
+        run("set N");
+        CHECK(strstr(out, "3") != NULL, "a while loops until its test fails");
+        run("set DONE");
+        CHECK(strstr(out, "yes") != NULL, "and the script carries on after it");
+
+        /* a while whose condition is false from the start runs nothing */
+        run("unset NEVER");
+        SCRIPT("while test 1 -eq 2\n"
+               "  set NEVER yes\n"
+               "end\n");
+        run("set NEVER");
+        CHECK(strstr(out, "not set") != NULL,
+              "a while that was never true runs nothing at all");
+
+        /* one that never ends is stopped rather than hanging the
+         * machine. a script may loop forever quite legitimately, so
+         * this is a way out rather than a limit on what may be written */
+        SCRIPT("while test 1 -eq 1\n"
+               "  set SPIN yes\n"
+               "end\n");
+        CHECK(strstr(out, "stopped after") != NULL,
+              "a loop that never ends is stopped rather than hanging the "
+              "machine");
+
+        /* ---- comments and blank lines ---- */
+
+        run("unset C");
+        SCRIPT("# this is a comment\n"
+               "\n"
+               "set C yes   # and so is this\n");
+        run("set C");
+        CHECK(strstr(out, "yes") != NULL, "comments and blank lines are skipped");
+        CHECK(strstr(out, "#") == NULL, "and a trailing one is not part of the value");
+
+        /* ---- what it refuses ---- */
+
+        SCRIPT("end\n");
+        CHECK(strstr(out, "nothing open") != NULL, "an end with nothing open");
+
+        SCRIPT("else\n");
+        CHECK(strstr(out, "no if") != NULL, "an else with no if");
+
+        SCRIPT("if test 1 -eq 1\n  echo hi\n");
+        CHECK(strstr(out, "still open") != NULL,
+              "and a file that ends with a block open says so rather than "
+              "quietly doing half of it");
+
+        #undef SCRIPT
+    }
 
     /* ---- the pointer ------------------------------------------------
      *
@@ -1306,17 +1629,29 @@ int main(void) {
         CHECK(strcmp(line, "cat motd.txt | wc") == 0,
               "a complete command after a bar stays as it is");
 
-        strcpy(line, "cat motd.txt | so"); len = 17; pos = 17;
+        strcpy(line, "cat motd.txt | sor"); len = 18; pos = 18;
         out_reset();
         complete(line, &len, &pos);
         CHECK(strcmp(line, "cat motd.txt | sort") == 0,
               "and a partial one completes as a command, not as a filename");
 
-        strcpy(line, "cat motd.txt |so"); len = 16; pos = 16;
+        strcpy(line, "cat motd.txt |sor"); len = 17; pos = 17;
         out_reset();
         complete(line, &len, &pos);
         CHECK(strcmp(line, "cat motd.txt |sort") == 0,
               "with no space after the bar either");
+
+        /* `source` arrived in 0.2.18 and shares two letters with
+         * `sort`, so `so` is genuinely ambiguous now -- and completion
+         * has to stop where they stop agreeing rather than guess which
+         * was meant. that it offers a builtin and a program in the same
+         * breath is right: both are things you can type there */
+        strcpy(line, "cat motd.txt | so"); len = 17; pos = 17;
+        out_reset();
+        complete(line, &len, &pos);
+        CHECK(strcmp(line, "cat motd.txt | so") == 0,
+              "a builtin and a program sharing a prefix complete only as "
+              "far as they agree");
 
         /* filenames after cat */
         strcpy(line, "cat mo"); len = 6; pos = 6;

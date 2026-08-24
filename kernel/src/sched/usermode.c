@@ -207,6 +207,13 @@ static bool install_pipe(int pid, int fd, struct pipe *p, bool writing) {
     return process_fd_install(pid, fd, &slot);
 }
 
+/* what a spawned program is born holding, when the caller has one to
+ * give. a NULL leaves the child with the empty environment
+ * process_create gave it */
+static const struct spawn_env *pending_env;
+
+void user_spawn_env(const struct spawn_env *env) { pending_env = env; }
+
 int user_spawn(const char *path, int argc, const char *const argv[],
                const char *cwd,
                int parent, int uid, bool announce,
@@ -359,6 +366,19 @@ int user_spawn(const char *path, int argc, const char *const argv[],
     if (pid != 0 && cwd != NULL) {
         process_set_cwd(pid, cwd);
     }
+
+    /* the environment it was born holding. this is the whole of what an
+     * environment is: a thing inherited rather than asked for, which is
+     * why setting one is worth doing at all */
+    if (pid != 0 && pending_env != NULL && pending_env->block != NULL) {
+        process_set_env(pid, pending_env->block, pending_env->len);
+    } else if (pid != 0 && parent != 0) {
+        /* spawned by a program rather than by the shell: it takes its
+         * parent's, which is the same rule seen from the other side */
+        static char inherited[PROC_ENV_MAX];
+        size_t n = process_get_env(parent, inherited, sizeof inherited);
+        process_set_env(pid, inherited, n);
+    }
     /* whatever was asked for goes in before the thread exists, so the
      * program has never seen anything else in those slots */
     if (pid != 0 && io != NULL) {
@@ -476,6 +496,12 @@ void user_job_collect(struct job *j) {
         }
         int code = 0;
         if (process_collect(j->pids[i], &code)) {
+            /* the last one's status is the job's. that is what a
+             * pipeline's status has meant since sh -- `cat missing |
+             * wc -l` succeeds, and it should: wc did its job */
+            if (i == j->count - 1) {
+                j->status = code;
+            }
             /* being killed is worth saying, since somebody asked for
              * it. except in the middle of a pipeline, where it is the
              * broken-pipe machinery working exactly as intended */

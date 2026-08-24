@@ -22,6 +22,12 @@ struct pipe;
 #define MAX_PROCESSES   32
 #define PROC_NAME_MAX   24
 
+/* how much environment one process may carry. a kilobyte is about
+ * thirty ordinary variables, and this is thirty-two processes */
+#define PROC_ENV_MAX    1024
+#define ENV_NAME_MAX    64
+#define ENV_VALUE_MAX   256
+
 /* how many files one process may hold open. 0, 1 and 2 are spoken for
  * the way they are everywhere, so an opened file gets the first number
  * from 3 up */
@@ -124,6 +130,21 @@ struct process {
     uint64_t ended_ms;
     struct fd fds[MAX_FDS];
 
+    /* ---- the environment ------------------------------------------
+     *
+     * one block of "NAME=value" strings, each ended by a NUL, with an
+     * empty string for the end of the lot. that shape is not nostalgia:
+     * it is what makes the whole thing one memcpy to inherit, and
+     * inheriting is most of what an environment is *for*. a table of
+     * pointers would need every one of them rewritten on the way into a
+     * child.
+     *
+     * it belongs to the process rather than to the program, which is
+     * why `export` in every shell there has ever been is a builtin and
+     * not a command -- a command could only ever change its own */
+    char env[PROC_ENV_MAX];
+    size_t env_len;
+
     /* where this process is standing. every relative name it uses is
      * read from here, and it inherits whatever its parent was in --
      * which is what makes `cd` somewhere and then running something
@@ -185,6 +206,37 @@ const struct process *process_find(int pid);
 /* what it is called. a forked child takes its parent's name, since it
  * is the same program */
 const char *process_name(int pid);
+
+/* ---- the environment ------------------------------------------------
+ *
+ * these work on the block rather than on one variable at a time,
+ * because the block is what gets inherited and inheriting is most of
+ * what an environment is for */
+
+/* replace the whole environment. `len` counts the trailing empty string */
+bool process_set_env(int pid, const char *block, size_t len);
+
+/* a copy of it. returns how many bytes, including the terminator */
+size_t process_get_env(int pid, char *out, size_t max);
+
+/* look one variable up. false if it is not set -- which is a different
+ * answer from being set to nothing, and both are worth being able to
+ * give */
+bool process_env_get(int pid, const char *name, char *out, size_t max);
+
+/* set or replace one. a NULL value removes it */
+bool process_env_set(int pid, const char *name, const char *value);
+
+/* ---- the same operations on a bare block ----
+ *
+ * split out because the shell is a kernel thread with no process entry
+ * of its own, and its environment therefore lives in its session. one
+ * implementation, two callers, and no chance of them disagreeing about
+ * what "already set" means */
+bool env_block_get(const char *block, size_t len, const char *name,
+                   char *out, size_t max);
+bool env_block_set(char *block, size_t *len, size_t max, const char *name,
+                   const char *value);
 
 /* deliver an interrupt. the process finds it on its next syscall */
 void process_interrupt(int pid);

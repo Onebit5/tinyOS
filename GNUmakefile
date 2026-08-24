@@ -266,7 +266,7 @@ bin/tests/rtc:      tests/test_rtc.c      kernel/src/drivers/rtc.c \
                     kernel/src/sched/spinlock.c
 bin/tests/process:  tests/test_process.c  kernel/src/sched/spinlock.c \
                     kernel/src/fs/path.c kernel/src/sched/process.c \
-                    kernel/src/lib/string.c
+                    kernel/src/lib/env.c kernel/src/lib/string.c
 bin/tests/pci:      tests/test_pci.c      kernel/src/drivers/pci.c \
                     kernel/src/lib/string.c
 bin/tests/acpi:     tests/test_acpi.c     kernel/src/cpu/acpi.c \
@@ -275,13 +275,14 @@ bin/tests/auth:     tests/test_auth.c     kernel/src/sched/auth.c \
                     kernel/src/lib/string.c
 bin/tests/tty:      tests/test_tty.c      kernel/src/sched/spinlock.c \
                     kernel/src/drivers/tty.c \
-                    kernel/src/sched/process.c kernel/src/lib/string.c
+                    kernel/src/sched/process.c kernel/src/lib/env.c kernel/src/lib/string.c
 # the real pipe, not a stub: what is under test here is that stdin and
 # stdout end up somewhere other than the terminal when a pipeline says
 # they should, and a stubbed pipe could only ever agree with itself
 bin/tests/syscall:  tests/test_syscall.c  kernel/src/sched/spinlock.c \
                     kernel/src/fs/path.c kernel/src/cpu/syscall.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c \
+                    kernel/src/lib/env.c \
                     kernel/src/fs/vfs.c kernel/src/fs/pipe.c
 bin/tests/elf:      tests/test_elf.c      kernel/src/fs/elf.c \
                     kernel/src/lib/string.c
@@ -327,15 +328,20 @@ bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
 bin/tests/serial:   tests/test_serial.c   kernel/src/drivers/serial.c \
                     kernel/src/drivers/input.c \
                     kernel/src/sched/spinlock.c
+# the real process table, because the environment lives in it and the
+# rules about what "already set" means are worth running rather than
+# restating in a stub
 bin/tests/shell:    tests/test_shell.c    kernel/src/lib/string.c \
                     kernel/src/fs/ramdisk.c kernel/src/sched/auth.c \
                     kernel/src/drivers/pci.c kernel/src/fs/vfs.c \
                     kernel/src/sched/spinlock.c kernel/src/fs/path.c \
+                    kernel/src/lib/env.c \
                     kernel/src/shell/shell.c kernel/src/version.h
 bin/tests/shell:    SRCS = tests/test_shell.c kernel/src/lib/string.c \
                            kernel/src/fs/ramdisk.c kernel/src/sched/auth.c \
                            kernel/src/drivers/pci.c kernel/src/fs/vfs.c \
-                           kernel/src/sched/spinlock.c kernel/src/fs/path.c
+                           kernel/src/sched/spinlock.c kernel/src/fs/path.c \
+                           kernel/src/lib/env.c
 
 # SRCS overrides what gets compiled, for tests that #include a kernel
 # .c file directly -- that file still belongs in the prerequisites so

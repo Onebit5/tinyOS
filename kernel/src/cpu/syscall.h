@@ -72,8 +72,10 @@ struct user_stat {
 #define SYS_CHOWN  29   /* (path, len, uid, gid) -> 0, or -1            */
 #define SYS_SYMLINK 30  /* (path,len,target,tlen) -> 0, or -1           */
 #define SYS_READLINK 31 /* (path,len,buf,size) -> length, or -1         */
+#define SYS_GETENV 32   /* (name,len,buf,size) -> length, or -1         */
+#define SYS_SETENV 33   /* (name,len,value,vlen) -> 0, or -1            */
 
-#define SYSCALL_COUNT 32
+#define SYSCALL_COUNT 34
 
 /* everything ring 3 was holding when it made the call, written down by
  * the entry stub in the order it pushes them.

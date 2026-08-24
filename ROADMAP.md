@@ -361,9 +361,28 @@ step and the pointer flies off in a straight line. that looks like a
 hardware fault and is not, which is why the count of discarded bytes is
 something `mouse` prints.
 
-**0.2.18 variables, and scripts.** an environment inherited across
+**0.2.18 variables, and scripts.** ~~an environment inherited across
 spawn, `$PATH` meaning what it means everywhere else, and a shell that
-can read a file of commands with `if` and `while` in it.
+can read a file of commands with `if` and `while` in it.~~ **done in
+0.2.18.** the environment is one block of "NAME=value" strings on the
+process, which is the shape it is for a reason: inheriting is one
+memcpy, and inheriting is most of what an environment is *for*. a table
+of pointers would need every one of them rewritten on the way into a
+child.
+
+`$PATH` means what it means everywhere else now, including for
+completion -- which had been walking a fixed list that happened to be
+the same one, and stopped being the same one the moment PATH became a
+variable that did something. completion offering a program that cannot
+be run is worse than no completion: it is completion that lies.
+
+the script syntax ends blocks with `end` rather than `fi` and `done`,
+deliberately. borrowing sh's spellings would claim a compatibility that
+does not exist -- no functions, no arithmetic, no `&&`, no quoting to
+speak of -- and a script that looks like sh and is not is worse than
+one that plainly is not. a condition *is* sh's rule, because it is the
+right one: a command, true when it exits zero, which makes every
+program on the machine a usable condition without any of them knowing.
 
 **0.2.19 an init worth the name.** the shell is started by `kmain`
 because there was nothing else to start it. a first process that owns
