@@ -163,6 +163,21 @@ void keyboard_feed(uint8_t sc) {
 
 static void keyboard_irq(struct interrupt_frame *f) {
     (void)f;
+
+    /* bit 5 says this byte came from the *mouse* rather than the
+     * keyboard. both devices share one controller, one data port and
+     * one output buffer, so a byte sitting in it from the auxiliary
+     * side is read here unless somebody asks.
+     *
+     * the mouse handler has asked this since it was written. this one
+     * did not, and the result was a `2` in the username box at every
+     * boot: the mouse answers "which device are you" with a 3, that
+     * byte was still in the buffer when interrupts came on, and 0x03 is
+     * the scancode for the 2 key. a stray keystroke from a number
+     * nobody typed */
+    if (inb(KBD_STATUS) & 0x20) {
+        return;
+    }
     keyboard_feed(inb(KBD_DATA));
 }
 

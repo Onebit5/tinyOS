@@ -209,6 +209,31 @@ int main(void) {
         my_console_n = 0;
     }
 
+    /* ---- the byte that was not a keystroke ---------------------------
+     *
+     * scancode 0x03 is the 2 key. a ps/2 mouse answers "which device
+     * are you" with a 3. the keyboard and the mouse share one
+     * controller, one data port and one output buffer -- so a device id
+     * left sitting in it and read by the keyboard handler is a `2`
+     * typed by nobody, which is exactly what turned up in the username
+     * box at every boot after 0.2.17.
+     *
+     * the fix is in the handler and not here: it asks bit 5 of the
+     * status port whose byte this is, the way the mouse handler always
+     * did. that part reads io ports and is not testable on a host,
+     * which is worth saying plainly rather than implying otherwise.
+     * what *is* testable is the coincidence, and writing it down is how
+     * the next person recognises the symptom */
+    {
+        while (input_getchar() >= 0) { }
+        keyboard_feed(0x03);
+        keyboard_feed(0x03 | 0x80);
+        CHECK(input_getchar() == '2',
+              "scancode 3 is the 2 key -- which is also the device id a "
+              "wheel mouse answers with, and is why a stray 2 appeared at "
+              "the login prompt");
+    }
+
     /* ---- and the keys that switch ------------------------------------
      *
      * alt+f1..f4 is what every unix uses and is frequently unavailable

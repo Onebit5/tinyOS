@@ -256,18 +256,24 @@ void mouse_init(void) {
     wait_writable();
     outb(PS2_DATA, config);
 
-    /* defaults, then reporting on. a mouse that does not acknowledge
-     * either is not a mouse and this machine carries on without one */
-    if (!to_mouse(0xf6) || !to_mouse(0xf4)) {
+    /* defaults, and *not* reporting yet. a mouse that does not
+     * acknowledge is not a mouse and this machine carries on without one */
+    if (!to_mouse(0xf6)) {
         kprintf("mouse      : nothing answered on the auxiliary port\n");
         return;
     }
+    to_mouse(0xf5);     /* reporting off while I ask it questions */
 
     /* the wheel handshake, which can only be historical: set the sample
      * rate to 200, then 100, then 80, and ask who you are. a mouse that
      * understands answers 3 instead of 0 and starts sending a fourth
      * byte. nobody would design this; it was the only way to add a byte
-     * to a protocol that had no version number */
+     * to a protocol that had no version number.
+     *
+     * with reporting *on*, movement packets interleave with the
+     * acknowledgements and the whole conversation goes out of step --
+     * which leaves bytes in the controller that the keyboard handler
+     * then reads as scancodes. that is worth turning off for */
     unsigned size = 3;
     if (to_mouse(0xf3) && to_mouse(200)
         && to_mouse(0xf3) && to_mouse(100)
@@ -277,6 +283,18 @@ void mouse_init(void) {
             wheel = true;
             size = 4;
         }
+    }
+
+    /* whatever is left of that conversation is nobody's data. anything
+     * still in the buffer when interrupts come on is read as a
+     * keystroke by whichever handler fires first */
+    while (inb(PS2_STATUS) & 0x01) {
+        inb(PS2_DATA);
+    }
+
+    if (!to_mouse(0xf4)) {      /* and now it may talk */
+        kprintf("mouse      : it would not start reporting\n");
+        return;
     }
 
     mouse_decoder_init(&decoder, size);
