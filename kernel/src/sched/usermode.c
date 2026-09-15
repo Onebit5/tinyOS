@@ -44,10 +44,20 @@ static void user_thread_start(void *arg) {
                    argc, argv);
 }
 
-/* collect anything that finished in the background and was never
- * waited for. a real system has the parent do this on its own schedule;
- * here the next `run` sweeps up, which keeps the table from filling
- * with the remains of programs nobody asked about */
+/* collect *everything* that has finished, whether anybody was going to
+ * ask about it or not.
+ *
+ * this used to run at the top of every spawn, which was the only
+ * arrangement available when nothing else collected anything -- and it
+ * had a quiet cost: a background job that finished had its exit code
+ * swept away by the next command typed, so `jobs` reported a status
+ * that was whatever it had been the last time anybody looked.
+ *
+ * init collects orphans now, and only orphans. this is what is left: a
+ * last resort for a process table that is genuinely full, where taking
+ * an answer somebody might have wanted is still better than a machine
+ * that cannot start anything at all. it is the difference between
+ * losing an exit code and losing the ability to run a command */
 static void reap_abandoned(void) {
     /* collecting one renumbers the walk under me, so finish and start
      * over rather than trying to carry on from where I was */
@@ -218,8 +228,6 @@ int user_spawn(const char *path, int argc, const char *const argv[],
                const char *cwd,
                int parent, int uid, bool announce,
                const struct spawn_io *io, const char **error) {
-    reap_abandoned();
-
     /* a program off the ramdisk is already in memory and is used where
      * it lies; one off the disk has to be read in first, and `owned`
      * says which happened so it can be let go of afterwards */
@@ -358,6 +366,15 @@ int user_spawn(const char *path, int argc, const char *const argv[],
     /* a program cannot ask to be somebody else: it runs as whoever
      * started it, and only the shell decides what that is */
     int pid = process_create(path, parent, uid, announce, pit_uptime_ms());
+    if (pid == 0) {
+        /* full. init collects orphans on its own schedule and a shell
+         * collects its own jobs, so anything still sitting here is
+         * something somebody may yet ask about -- but a machine that
+         * cannot start a program is worse than one that lost an exit
+         * code, so this takes the lot and tries once more */
+        reap_abandoned();
+        pid = process_create(path, parent, uid, announce, pit_uptime_ms());
+    }
 
     /* wherever whoever started it was standing. process_create already
      * copies the parent's, which is right for a program spawning

@@ -40,6 +40,21 @@ struct pipe;
 /* what I record when a process was killed rather than choosing to go */
 #define PROCESS_KILLED  (-1)
 
+/* init.
+ *
+ * pid 1 is a convention everywhere and it is a convention for a reason:
+ * reparenting needs a number that is known before the process it names
+ * exists. this table hands out pids in order from 1 and init is the
+ * first thing in it, so the two agree by construction rather than by
+ * anybody remembering to keep them in step.
+ *
+ * pid *0* is the other special number and is not a process at all: it is
+ * what the kernel shell uses, since a shell here is a kernel thread. the
+ * difference matters to exactly one rule, and it is the important one --
+ * a process whose parent is 0 belongs to a shell that waits for its own
+ * and reads their exit codes, so init must not collect it */
+#define INIT_PID        1
+
 /* what a descriptor can be pointing at.
  *
  * until 0.2.9, 0, 1 and 2 were not descriptors at all -- the syscall
@@ -200,6 +215,37 @@ void process_exited(int pid, int code, uint64_t now_ms);
 /* has it finished? if so, take the code and free the slot. returns
  * false while it is still running, or if there is no such pid */
 bool process_collect(int pid, int *code);
+
+/* ---- what init owns --------------------------------------------------
+ *
+ * a process that has ended and not been collected is holding a slot, and
+ * there are thirty-two of them. normally its parent collects it -- that
+ * is what `wait` is -- but a parent can die first, and then the exit code
+ * is addressed to nobody and the slot is held forever.
+ *
+ * so children are reparented to init as their parent goes (that happens
+ * inside process_exited, since the moment the parent ends is the only
+ * moment anybody could notice), and init collects them. */
+
+/* the pid of something init should collect, or 0 when there is nothing.
+ *
+ * "should" is narrow on purpose. this returns only what is genuinely
+ * nobody's: adopted by init when its parent died, or the child of a
+ * parent that has left the table entirely. a process whose parent is 0
+ * is a kernel shell's, and taking its exit code out of the shell's hand
+ * would be a `$?` that is sometimes right */
+int process_orphan(void);
+
+/* raise the interrupt flag on everything still running, and say how many
+ * that was. init's shutdown asks twice: once to ask, and again after a
+ * grace period to find out whether asking worked */
+size_t process_interrupt_all(void);
+
+/* the thread ids of every process still going, for a shutdown that has
+ * run out of patience. gathered under the lock and acted on afterwards,
+ * because killing a thread reaches the scheduler and a holder of this
+ * lock may not */
+size_t process_running_threads(int *ids, size_t max);
 
 const struct process *process_find(int pid);
 

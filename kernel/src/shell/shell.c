@@ -23,6 +23,7 @@
 #include "sched/usermode.h"
 #include "fs/pipe.h"
 #include "sched/auth.h"
+#include "sched/init.h"
 #include "cpu/syscall.h"
 #include "cpu/interrupts.h"
 #include "drivers/pci.h"
@@ -117,6 +118,12 @@ struct session {
 
     /* what the last thing exited with. `$?`, and what `if` looks at */
     int status;
+
+    /* somebody typed `logout`. the session ends rather than looping
+     * back to a login prompt in place, so nothing of this one -- not
+     * the directory, not the history, not the variables -- is still
+     * here when the next person sits down. init starts the next one */
+    bool leaving;
 };
 
 static struct session sessions[VCONSOLE_COUNT];
@@ -280,6 +287,22 @@ static void session_init(void) {
     for (int i = 0; i < JOBS_MAX; i++) {
         jobs[i].state = JOB_FREE;
     }
+
+    /* and everything the last person left. this used to be true by
+     * accident -- a console got one session and it was zeroed at boot.
+     * a session that can end and be started again has to mean it */
+    me()->leaving = false;
+    me()->status  = 0;
+    me()->env[0]  = '\0';
+    me()->env_len = 1;
+    typed_line[0] = '\0';
+    current_user[0] = '\0';
+
+    /* nobody, rather than the master. login fills this in and nothing
+     * runs before login does -- but a session whose *default* is uid 0
+     * is one missing `return` away from handing the machine over, and
+     * -1 is a value auth already means "no such user" by */
+    current_uid = -1;
 }
 static size_t common_prefix(const char *a, const char *b);
 
@@ -730,6 +753,16 @@ static void cmd_cpus(int argc, char **argv) {
  * afterwards, because there is no reference counting here that could do
  * better and pretending otherwise would be worse than saying so */
 static void cmd_mount_at(int argc, char **argv) {
+    /* a bare `mount` used to walk straight into argv[1], which on a
+     * one-word line is whatever the splitter last left there. the
+     * compiler had been pointing at this the whole time by way of an
+     * unused `argc` -- the parameter is unused precisely because the
+     * check that should have used it was missing */
+    if (argc < 2) {
+        kprintf("mount <number> -- `parts` lists them\n");
+        return;
+    }
+
     size_t which = 0;
     for (const char *p = argv[1]; *p != '\0'; p++) {
         if (*p < '0' || *p > '9') {
@@ -1549,25 +1582,20 @@ static void cmd_time(int argc, char **argv) {
     kprintf("[%lums]\n", pit_uptime_ms() - start);
 }
 
-/* both of the ways this machine stops have to write first.
+/* both of the ways this machine stops are asked of init now.
  *
- * before 0.2.13 a write reached the drive as it was made, so a reboot
- * lost nothing by definition. it is a cache now, and a reboot that does
- * not sync throws away whatever had not been written yet -- which on
- * this machine is usually the file somebody just spent a minute editing */
-static void settle(void) {
-    if (disk_ready() && disk_dirty()) {
-        kprintf("writing what is still in memory...\n");
-        if (!disk_sync()) {
-            kprintf("the drive refused. something is being lost here\n");
-        }
-    }
-}
-
+ * these used to sync the disk and reset, from whichever console typed
+ * them. that was right when there was one console and wrong from the
+ * moment there were four: three other sessions carry on running while
+ * this one syncs, so what reaches the drive is whatever was dirty at the
+ * instant somebody asked, and anything the others wrote in the meantime
+ * is thrown away.
+ *
+ * stopping everything first is not something a command can do to itself.
+ * it needs whoever started all of it, which is what init is */
 static void cmd_poweroff(int argc, char **argv) {
     (void)argc; (void)argv;
-    settle();
-    system_poweroff();
+    init_stop_machine(INIT_POWEROFF);
 }
 
 static void cmd_crash(int argc, char **argv) {
@@ -1584,8 +1612,47 @@ static void cmd_crash(int argc, char **argv) {
 
 static void cmd_reboot(int argc, char **argv) {
     (void)argc; (void)argv;
-    settle();
-    reboot();
+    init_stop_machine(INIT_REBOOT);
+}
+
+/* what init is looking after, and how it has been going.
+ *
+ * a supervisor with nothing to look at is a supervisor you have to
+ * take on faith. the count of starts is the interesting column: a
+ * console that says 1 has been up since boot, and one that says 7 has
+ * had six people log out of it -- or has been dying, which is what the
+ * state says */
+static void cmd_init(int argc, char **argv) {
+    if (argc >= 3 && strcmp(argv[1], "start") == 0) {
+        if (init_restart(argv[2])) {
+            kprintf("%s started\n", argv[2]);
+        } else {
+            kprintf("init looks after no '%s'\n", argv[2]);
+        }
+        return;
+    }
+    if (argc >= 2) {
+        kprintf("init            -- what is being looked after\n");
+        kprintf("init start NAME -- start one that is down\n");
+        return;
+    }
+
+    struct init_table t;
+    init_snapshot(&t);
+
+    console_set_colors(COLOR_PROMPT, 0x101018);
+    kprintf("%-10s %-9s %6s %7s\n", "service", "state", "thread", "starts");
+    console_set_colors(COLOR_TEXT, 0x101018);
+
+    for (size_t i = 0; i < t.count; i++) {
+        const struct service *s = &t.s[i];
+        if (s->state == SERVICE_GIVEN_UP) {
+            console_set_colors(COLOR_WARN, 0x101018);
+        }
+        kprintf("%-10s %-9s %6d %7u\n", s->name, init_state_name(s->state),
+                s->thread_id, s->starts);
+        console_set_colors(COLOR_TEXT, 0x101018);
+    }
 }
 
 /* switch screens from the keyboard-less side of the machine.
@@ -2122,6 +2189,7 @@ static const struct command commands[] = {
     { "time",   "how long a command takes",              cmd_time, false, "time <command...>" },
     { "crash",  "tempt fate with a wild pointer",       cmd_crash, false, NULL },
     { "smash",  "run off the end of the stack on purpose", cmd_stackoverflow, false, NULL },
+    { "init",   "what init looks after, and how it fares", cmd_init, false, "init [start <name>]" },
     { "reboot", "sever the bond and begin anew",        cmd_reboot, false, NULL },
     { "poweroff","let the velvet room fade",             cmd_poweroff, false, NULL },
     { NULL, NULL, NULL, false, NULL },
@@ -3138,10 +3206,20 @@ static void login(void) {
     }
 }
 
+/* logging out ends the session rather than looping back to a login
+ * prompt inside it.
+ *
+ * that used to be one call: `logout` ran `login` and carried on in the
+ * same session, which meant the next person got the last one's working
+ * directory, history, jobs and variables. it looked like it worked
+ * because it did work -- for the one user who was already there.
+ *
+ * so the session ends, its thread with it, and init starts another. all
+ * this has to do is stop */
 static void cmd_logout(int argc, char **argv) {
     (void)argc; (void)argv;
     kprintf("fare thee well, %s\n", current_user);
-    login();
+    me()->leaving = true;
 }
 
 /* what a session reads before it starts.
@@ -3165,19 +3243,70 @@ static void read_profile(void) {
     }
 }
 
+/* what the user actually sees at the start of a session: the name, the
+ * contract, and whatever /boot/welcome.txt has to say -- named
+ * absolutely on purpose, so that what the machine says about itself
+ * cannot be changed by whatever happens to be sitting on the data disk.
+ * everything the drivers had to report went to serial and is still there
+ * under `dmesg` */
+static void greet(void) {
+    console_clear();
+
+    console_set_colors(0x45e653, 0x101018);
+    kprintf("tinyOS v%s\n\n", VERSION);
+
+    console_set_colors(0x7b8ce0, 0x101018);
+    kprintf("Thou art I... And I am thou...\n");
+    kprintf("Thou hast established a new bond...\n\n");
+    kprintf("Thou shalt be blessed when creating\n");
+    kprintf("Personas of the Computer's Arcana...\n\n");
+
+    console_set_colors(0xc8c8d0, 0x101018);
+
+    struct ramdisk_file f;
+    if (ramdisk_open("welcome.txt", &f)) {
+        const char *p = f.data;
+        for (uint64_t i = 0; i < f.size; i++) {
+            kprintf("%c", p[i]);
+        }
+        kprintf("\n");
+    }
+}
+
+/* a session, from the greeting to whenever somebody logs out.
+ *
+ * it *returns* now, which it never used to. `logout` called `login`
+ * from inside the running session, so the next person to sit down
+ * inherited the last one's working directory, history, jobs and
+ * variables -- a small leak between users on a machine whose whole
+ * point of having users is that they are separate.
+ *
+ * ending is the fix, and it needs somebody to start another one, which
+ * is exactly what init is for. the session leaves nothing behind
+ * because there is nothing left to leave it in */
 void shell_run(void) {
     session_init();
 
     char line[LINE_MAX];
 
     console_set_colors(COLOR_TEXT, 0x101018);
+    greet();
     login();
     read_profile();
 
-    for (;;) {
+    while (!me()->leaving) {
         size_t len = 0;     /* characters in the line */
         size_t pos = 0;     /* where the cursor sits within them */
         int hist_pos = hist_count;
+
+        /* the machine is going down and this screen is not going to be
+         * typed at again. a prompt printed over the top of a shutdown
+         * looks exactly like a machine that ignored the command */
+        if (init_stopping()) {
+            for (;;) {
+                sleep_ms(1000);
+            }
+        }
 
         prompt();
 
@@ -3334,4 +3463,8 @@ void shell_run(void) {
         history_add(line);
         run_line(line);
     }
+
+    /* somebody logged out. the thread this ran on ends, init notices,
+     * and a new session starts on this console -- with nothing at all
+     * carried over, which is the whole difference */
 }

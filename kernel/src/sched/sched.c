@@ -548,7 +548,13 @@ enum sched_kill_result sched_kill(int id) {
         if (t->id == id) {
             if (t == current) {
                 result = SCHED_KILL_SELF;
-            } else if (is_idle(t)) {
+            } else if (is_idle(t) || t->pid == INIT_PID) {
+                /* idle, because somebody has to be able to take the
+                 * cpu -- and init, because it is what starts everything
+                 * else and what collects everything else. a machine
+                 * that has lost init still runs; it just cannot ever
+                 * start another session or take itself down tidily,
+                 * which is a worse state than being told no */
                 result = SCHED_KILL_PROTECTED;
             } else if (t->state == THREAD_DEAD) {
                 result = SCHED_KILL_NO_SUCH;    /* already gone */

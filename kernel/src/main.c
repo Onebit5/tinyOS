@@ -26,9 +26,9 @@
 #include "fs/disk.h"
 #include "fs/vfs.h"
 #include "sched/auth.h"
+#include "sched/init.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
-#include "shell/shell.h"
 #include "version.h"
 
 
@@ -98,62 +98,6 @@ static void memory_selftest(void) {
     pmm_free_pages(big, 512);
 }
 
-/* what the user actually sees at boot: the name, the contract, and
- * whatever /boot/welcome.txt has to say -- named absolutely on purpose,
- * so that what the machine says about itself at boot cannot be changed
- * by whatever happens to be sitting on the data disk. everything the drivers had to report
- * went to serial and is still there under `dmesg` */
-static void greet(void) {
-    console_clear();
-
-    console_set_colors(0x45e653, 0x101018);
-    kprintf("tinyOS v%s\n\n", VERSION);
-
-    console_set_colors(0x7b8ce0, 0x101018);
-    kprintf("Thou art I... And I am thou...\n");
-    kprintf("Thou hast established a new bond...\n\n");
-    kprintf("Thou shalt be blessed when creating\n");
-    kprintf("Personas of the Computer's Arcana...\n\n");
-
-    console_set_colors(0xc8c8d0, 0x101018);
-
-    struct ramdisk_file f;
-    if (ramdisk_open("welcome.txt", &f)) {
-        const char *p = f.data;
-        for (uint64_t i = 0; i < f.size; i++) {
-            kprintf("%c", p[i]);
-        }
-        kprintf("\n");
-    }
-}
-
-/* the shell runs here rather than on the boot thread, because this
- * stack came from the pmm. that is what lets the boot thread walk away
- * from the loader's stack and lets me hand the loader's memory back */
-/* the disk, kept roughly honest.
- *
- * a write-back cache means what is on the drive lags what the machine
- * believes, and `sync` is how somebody closes that gap on purpose. this
- * closes it on a timer instead, so the gap has a *size*: a few seconds
- * of work rather than however long since the last time anybody thought
- * about it.
- *
- * it is not a replacement for sync and does not pretend to be. it turns
- * "you might lose anything" into "you might lose the last few seconds",
- * which is the difference between a machine you cannot trust and one
- * you should still type sync at before pulling the plug */
-#define FLUSH_EVERY_MS 3000
-
-static void flusher_thread(void *arg) {
-    (void)arg;
-    for (;;) {
-        sleep_ms(FLUSH_EVERY_MS);
-        if (disk_ready() && disk_dirty()) {
-            (void)disk_sync();
-        }
-    }
-}
-
 /* which console the calling thread belongs to. the console driver asks
  * this on every write, because output belongs to its writer rather than
  * to whichever console is being looked at -- a shell on console 2
@@ -172,34 +116,6 @@ static unsigned which_console(void) {
  * typing at one shell while reading another */
 static bool writing_to_the_shown_console(void) {
     return which_console() == console_active();
-}
-
-/* the first shell, which also finishes the boot. the other three are
- * plain sessions and skip all of this */
-static void shell_thread(void *arg) {
-    (void)arg;
-
-    uint64_t gained = pmm_reclaim_bootloader();
-    kprintf("reclaimed %lu KiB of bootloader memory (%lu MiB usable now)\n",
-            gained / 1024, pmm_total_bytes() / (1024 * 1024));
-    kprintf("four consoles: alt+1..4 (or alt+f1..f4, if your host does "
-            "not eat them),\n");
-    kprintf("             ctrl+\\ then a digit on serial, or `chvt`. "
-            "shift+pageup looks back\n");
-    kprintf("boot complete, handing the screen to the shell\n\n");
-    greet();
-
-    shell_run();
-}
-
-/* the other consoles. each is its own session -- its own login, its own
- * working directory, its own history and jobs -- and each sits waiting
- * on a screen nobody is looking at until somebody presses alt and a
- * function key */
-static void console_thread(void *arg) {
-    (void)arg;
-    greet();
-    shell_run();
 }
 
 void kmain(const struct ph_handoff *handoff) {
@@ -328,44 +244,28 @@ void kmain(const struct ph_handoff *handoff) {
      * the sti at the end of this function anyway */
     kprintf_to_console(true);
 
-    if (thread_create("shell", shell_thread, NULL) == NULL) {
-        panic("no memory for a shell. there is nobody left to talk to");
-    }
-
-    /* and one for each of the other screens. a thread inherits the
-     * console of whoever made it, so each of these is moved onto its
-     * own before it runs -- it is parked until then, so nothing of it
-     * has printed anywhere yet */
-    for (unsigned i = 1; i < VCONSOLE_COUNT; i++) {
-        char name[THREAD_NAME_MAX];
-        name[0] = 't'; name[1] = 't'; name[2] = 'y';
-        name[3] = (char)('0' + i); name[4] = '\0';
-
-        struct thread *t = thread_create_parked(name, console_thread, NULL);
-        if (t == NULL) {
-            kprintf("consoles   : no memory for console %u\n", i);
-            break;
-        }
-        t->console = i;
-        sched_wake_thread(t->id);
-    }
-
-    /* and something to keep the disk honest. it does not remove the
-     * need for `sync` -- it bounds what losing power costs, which is a
-     * different and smaller promise */
-    if (thread_create("flusher", flusher_thread, NULL) == NULL) {
-        kprintf("disk       : no flusher thread. `sync` is the only way "
-                "anything reaches the drive\n");
-    }
-
-    kprintf("threads     : the wheel turns, %ums quantum\n\n",
+    kprintf("threads     : the wheel turns, %ums quantum\n",
             5 * (1000 / PIT_HZ));
+
+    /* and this is the last thing kmain decides.
+     *
+     * up to 0.2.19 the four shells and the disk flusher were created
+     * right here, because there was nothing else that could create
+     * them. that is fine exactly once and answers nothing afterwards:
+     * what order things come up in, what happens when one of them dies,
+     * who owns a process whose parent has gone, and what shutting down
+     * means. all four of those are one job, and the job has a name.
+     *
+     * so kmain starts one thing now, and that thing starts the machine */
+    if (!init_boot()) {
+        panic("no init. there is nobody to bring the machine up");
+    }
 
     asm volatile ("sti");
 
 
     /* the boot thread's work is finished. it has to actually leave --
-     * its stack is the loader's, sitting in the memory the shell is about
-     * to reclaim, and you cannot free the ground you are standing on */
+     * its stack is the loader's, sitting in the memory init is about to
+     * reclaim, and you cannot free the ground you are standing on */
     thread_exit(0);
 }

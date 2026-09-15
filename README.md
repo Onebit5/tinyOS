@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.18** (**variables, and scripts.** an environment that is inherited, `$PATH` that means it, and `if`/`while`)
+**version: 0.2.19** (**an init worth the name.** a first process that owns the others, restarts what dies, and takes the machine down in the order it came up)
 
 ## what it does
 
@@ -56,6 +56,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] four virtual consoles, each its own session, with scrollback
 - [x] a ps/2 mouse: drag to select, middle button to paste it back
 - [x] an environment inherited across spawn, `$PATH`, and scripts with `if` and `while`
+- [x] an init: pid 1, services that come back when they die, and a tidy shutdown
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -96,7 +97,7 @@ kernel/src/cpu/       gdt, idt, isr stubs, irq dispatch, the 8259 pic, port io
 kernel/src/drivers/   serial, framebuffer console, the font, ps/2 keyboard, pit
 kernel/src/lib/       kprintf, panic, string.h stuff
 kernel/src/mm/        physical frame allocator, kernel heap, page tables
-kernel/src/sched/     threads, the run queue, the context switch
+kernel/src/sched/     threads, the run queue, the context switch, processes, init
 kernel/src/shell/     the velvet room terminal
 kernel/linker.ld      higher half layout + the section symbols the vmm maps by
 tests/                host test suites, run with `make test`
@@ -164,6 +165,75 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## an init worth the name
+
+up to 0.2.19 `kmain` started the four shells and the disk flusher itself, because there was nothing else that could. that works exactly once, and it answers nothing that comes after boot: what order things start in, what happens when one of them dies, who owns a process whose parent has gone, and what "shut down" means beyond pulling the plug in a hurry.
+
+so there is a process 1 now. it is the first thing in the table, it outlives everything else, and `kmain` starts one thing instead of six.
+
+### logging out is the reason any of this pays
+
+`logout` used to call `login` from inside the running session. it looked like it worked, and it did -- for the one person who was already sitting there. the next person got the last one's working directory, history, jobs and variables, which on a machine whose whole point of having users is that they are separate is a small leak with an embarrassing shape.
+
+the fix is that a session *ends*. `shell_run` returns instead of being `noreturn`, the thread it was on exits, and something starts another one. it leaves nothing behind because there is nothing left to leave it in.
+
+that "something" is the thing that has to exist first, and it is the same thing that answers the other three questions. the four clauses of an init are one job seen from four sides.
+
+### the rule with teeth
+
+a service that dies instantly and is restarted instantly is a machine that does nothing else, ever again. a login prompt that cannot draw itself will happily consume every cycle there is, forever, printing half of itself. every init since sysvinit has had a rule about this and this is why.
+
+five deaths inside ten seconds and init leaves it down, says so on that console, and tells you how to bring it back:
+
+```
+init: tty3 has died 6 times in under 10 seconds. leaving it down --
+      `init start tty3` from another console to try again
+```
+
+the **window** matters as much as the count, and getting only the count is the easy mistake. five deaths across an afternoon is five people logging out. a machine that gave up on a console for having been *used* would be worse than one with no rule at all -- so what is measured is a rate, and a quiet stretch starts the count again.
+
+reviving one clears its count too. without that, the first thing a revived service does is get given up on again, since it is still carrying the tally that disabled it.
+
+### shutting down, in the reverse of the order things came up
+
+this is where owning things stops being theoretical.
+
+`reboot` used to sync the disk and reset, from whichever console typed it. that was right while there was one console and wrong from the moment there were four: the other three sessions carry on running and writing while this one syncs, so what reaches the drive is whatever happened to be dirty at the instant somebody asked, and anything the others did in the meantime is gone.
+
+stopping everything first is not something a command can do to itself. it needs whoever started all of it. so both commands are a request now, and init does the work in order:
+
+1. stop respawning anything -- or killing the sessions just brings them back
+2. **ask** every program to stop, wait a second, then insist. asking first is worth the second it costs: an interrupted program returns an error from whatever syscall it was in and unwinds, so a write it was part-way through either happens or does not. killed threads leave that half-done
+3. stop the services in the reverse of the order they started -- the sessions first, because they are what can still write; the flusher last, because it is what protects the disk
+4. **and only now** sync, with nothing left that could add to it
+5. reset, or power off
+
+it says goodbye on the screen the person is actually looking at, too. init lives on console 1 and you might be on console 3.
+
+### pid 1 is not decoration
+
+reparenting needs a number that is known before the process it names exists. the table hands out pids in order from 1 and init is the first thing in it, so the two agree by construction rather than by anybody remembering to keep them in step.
+
+when a process exits, its children become init's -- one generation at a time, or a whole tree moves every time anybody in it dies. init collects them on its own schedule.
+
+that replaced something quietly wrong. there was a sweep at the top of every spawn that collected *every* finished process, whether anybody was going to ask about it or not, because nothing else collected anything. the cost was invisible until you looked for it: a background job that finished had its exit code swept away by the next command you typed, so `jobs` reported whatever the status had been the last time anyone looked. the sweep still exists, as a last resort for a process table that is genuinely full -- losing an exit code beats losing the ability to run a command.
+
+the rule about which processes init may take is narrow, and the narrow part is the interesting part. **a process whose parent is 0 is a kernel shell's**, and the shell waits for its own and reads their codes; taking one of those would be a `$?` that is right sometimes and stale the rest of the time. what is left is genuinely nobody's: adopted when its parent died, or born naming a pid that had already been collected.
+
+the first version of that rule had a bug and the test found it immediately. "is my parent still in the table" says *no* for parent 0 as well, because 0 was never in the table -- so every shell's child looked like an orphan. 0 has to be taken out of the way before the question is asked at all.
+
+### what is testable, and what is not
+
+the same split as the mouse: the decisions are one file, the machine is the other. what is worth testing about a supervisor is not that it can start a thread -- everything can start a thread -- it is what it decides about *repetition*, and those are exactly the decisions nobody ever checks by hand, because reaching them means deliberately breaking a login prompt and then sitting there while it fails five times.
+
+so the table and the clock are arguments, and `tests/test_init.c` walks a service through dying fast, dying slowly, dying fast after a quiet stretch, and being revived. the half that starts threads and pulses the reset line is `#ifdef`'d out.
+
+### what init does not own
+
+the four shells are kernel threads, not processes -- a shell here has always been a kernel thread printing straight at the screen, which is also why builtins cannot be in a pipeline. so init owns them as *services*, through its own table, and owns orphaned **processes** through the process table. two mechanisms for what ought to be one.
+
+that seam is real and this version does not close it. giving each session a process entry means `caller_pid()` starts returning non-zero for shell threads, and every rule that reads "0 means the shell" -- the terminal, redirection, the orphan rule above -- would need revisiting at once. it is worth doing and it is not worth doing halfway.
 
 ## variables, and scripts
 
@@ -2099,7 +2169,15 @@ $ make test
   keyboard   ok        scancodes, ctrl, arrows, 20 cases
   serial     ok        terminal dialect + escape sequences
   shell      ok        parsing, dispatch, history, 32 cases
+  pipe       ok        the two rules the reference counts hang off
+  bcache     ok        lru eviction, dirty write-back, and a full cache
+  ext2       ok        inodes, bitmaps, and the indirect block map
+  part       ok        mbr and gpt, and every corrupt table refused
+  console    ok        four of them, colour that survives a repaint
+  mouse      ok        the decoder, and every way of losing sync
+  init       ok        what a supervisor decides about a service that keeps dying
   switch     ok        a real context switch, in userspace
+  fsck       ok        an ext2 reader written from the spec, not from the driver
   all suites passed
 ```
 
@@ -2186,6 +2264,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.19** — an init worth the name. `kmain` started the four shells and the flusher itself because there was nothing else that could, which works once and answers nothing that comes after: what order things start in, what happens when one dies, who owns a process whose parent has gone, what shutting down means. the clause that pays for the rest is **restarting what dies** — `logout` can end a session now rather than calling `login` from inside it, so the next person does not inherit the last one's directory, history, jobs and variables. the rule with teeth is the one every init has had since sysvinit: something that dies instantly and restarts instantly is a machine that does nothing else ever again, so five deaths inside ten seconds and init leaves it down and says so on that console — and the **window** matters as much as the count, since five deaths across an afternoon is five people logging out and a machine that gave up on a console for having been *used* would be worse than no rule at all. shutdown is where owning things stops being theoretical: `reboot` used to sync and reset from whichever console typed it while three other sessions carried on writing, so what reached the drive was whatever was dirty at that instant; init stops respawning, asks the programs to stop before insisting, takes the services down in the reverse of the order they came up (sessions first, since they can write; flusher last, since it protects the disk) and syncs only then. pid 1 matters because reparenting needs a number known before the process it names exists. that replaced a sweep at the top of every spawn which collected *every* finished process — a background job's exit code was swept away by the next command typed, so `jobs` reported whatever the status had been last time anyone looked; it survives only as a last resort for a table that is genuinely full. the orphan rule had a bug the test caught at once: "is my parent still in the table" says no for parent **0** as well, and 0 is the kernel shell, so every shell's child looked like an orphan. also fixed in passing: a bare `mount` walked into `argv[1]` on a one-word line, which the compiler had been pointing at the whole time by way of an unused `argc`.
 - **0.2.18a** — the keyboard handler was reading bytes that belonged to the mouse. they share one controller, one data port and one output buffer, and bit 5 of the status byte says whose a waiting byte is — the mouse handler asked, the keyboard handler did not. a wheel mouse answers its device-id query with a **3**, `0x03` is the scancode for the 2 key, and so every boot came up with a `2` already typed in the username box. the wheel handshake also runs with reporting off now, since movement packets otherwise interleave with the acknowledgements and put the conversation out of step, and whatever is left is drained before interrupts come on.
 - **0.2.18** — an environment, `$PATH`, and scripts. the environment is one block of NUL-separated `NAME=value` strings on the process rather than a table of pointers, because that shape makes inheriting it a single memcpy and inheriting is most of what an environment is *for*; it belongs to the process, which is why `export` has been a shell builtin everywhere since 1977 — a command could only ever change its own. the shell's lives in its session since it is a kernel thread with no process, so the block operations moved to `lib/env.c` and both callers share them. doing `$PATH` turned up something quietly wrong: **completion had been walking a fixed list** that happened to be the same one, and stopped being the same the moment PATH could be set — completion that offers a program which cannot be run is worse than none. scripts get `if`, `else`, `while` and `end` — `end` rather than `fi`/`done` deliberately, since borrowing sh's spellings would claim a compatibility that does not exist. a condition is a command and true means it exited zero, which is sh's rule and the right one; the subtle part is that a condition inside a *skipped* block must not be evaluated at all, because `if grep x file` would still read the file — checking only that the body is skipped misses it entirely, and there is a test that does not. `/boot/etc/profile` runs before every prompt on every console, which is the whole point: a PATH that must be typed every time is a PATH that means nothing.
 - **0.2.17** — a ps/2 mouse, which is the first input here that is not a stream of characters. a queue is right for typing because typing *is* a sequence and the order is the meaning; a mouse reports a change since last time and the interesting thing is where the pointer ended up, so the driver keeps a position and the events are edges. what it turned out to be good for is what a pointer has been good for on a text console since gpm in 1993 — drag over a path, middle-click at a prompt, and it is typed for you, with the characters going into the input queue as though keys had been pressed so that nothing above knows a mouse exists. the wheel scrolls back. the one genuinely hard part is that the 8042 has no framing: a packet is three bytes and nothing marks where one starts but a bit that is always set, so a single dropped byte puts every packet after it out of step and the pointer flies off in a straight line — which looks like a hardware fault and is not, which is why `mouse` prints the count of discarded bytes. a truncated packet cannot be fully recovered and costs exactly one wrong packet before it is back in step, and there is a test that says so.

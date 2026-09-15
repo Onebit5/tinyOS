@@ -141,6 +141,21 @@ void process_exited(int pid, int code, uint64_t now_ms) {
              * whoever took the pipes off it beforehand does that part */
             p->fds[f].kind = FD_FREE;
         }
+
+        /* and whatever it was the parent of is init's now.
+         *
+         * this is the moment, and the only moment: afterwards the slot
+         * is collected and there is nothing left to say who these were
+         * the children of. a child left pointing at a dead parent is a
+         * child nobody will ever wait for, holding a slot forever --
+         * which is what "a first process that owns the others" is
+         * actually for. it is not a hierarchy for its own sake, it is
+         * the answer to who collects you when your parent does not */
+        for (size_t j = 0; j < MAX_PROCESSES; j++) {
+            if (table[j].pid != 0 && table[j].parent == pid) {
+                table[j].parent = INIT_PID;
+            }
+        }
     }
     spin_unlock_irq(&process_lock, flags);
 }
@@ -160,6 +175,81 @@ bool process_collect(int pid, int *code) {
 
     spin_unlock_irq(&process_lock, flags);
     return collected;
+}
+
+/* ---- what init owns -------------------------------------------------- */
+
+/* is there still a process with this pid? asked of the *table* rather
+ * than of anything above it, because a parent that has exited but not
+ * been collected is still here and can still be waited for */
+static bool present(int pid) {
+    return pid != 0 && slot_for(pid) != NULL;
+}
+
+int process_orphan(void) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    int pid = 0;
+
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        struct process *p = &table[i];
+        if (p->pid == 0 || !p->exited) {
+            continue;
+        }
+        /* parent 0 is a kernel shell's, and the shell collects its own.
+         * asked first and on its own, because 0 is also not a pid that
+         * is *in* the table -- so the "nobody is left to wait for this"
+         * test below says yes to every one of them unless 0 is taken out
+         * of its way first.
+         *
+         * this is also what keeps init out of its own list, without a
+         * second check that reads like defence and could never fire:
+         * init's parent is 0, because init is what kmain started */
+        if (p->parent == 0) {
+            continue;
+        }
+        /* whose parent is init, or whose parent is not in the table at
+         * all, has nobody else who could */
+        if (p->parent == INIT_PID || !present(p->parent)) {
+            pid = p->pid;
+            break;
+        }
+    }
+
+    spin_unlock_irq(&process_lock, flags);
+    return pid;
+}
+
+size_t process_interrupt_all(void) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    size_t n = 0;
+
+    for (size_t i = 0; i < MAX_PROCESSES; i++) {
+        if (table[i].pid == 0 || table[i].exited
+            || table[i].pid == INIT_PID) {
+            continue;
+        }
+        table[i].interrupted = true;
+        n++;
+    }
+
+    spin_unlock_irq(&process_lock, flags);
+    return n;
+}
+
+size_t process_running_threads(int *ids, size_t max) {
+    uint64_t flags = spin_lock_irq(&process_lock);
+    size_t n = 0;
+
+    for (size_t i = 0; i < MAX_PROCESSES && n < max; i++) {
+        if (table[i].pid == 0 || table[i].exited
+            || table[i].pid == INIT_PID || table[i].thread_id == 0) {
+            continue;
+        }
+        ids[n++] = table[i].thread_id;
+    }
+
+    spin_unlock_irq(&process_lock, flags);
+    return n;
 }
 
 bool process_announces(int pid) {

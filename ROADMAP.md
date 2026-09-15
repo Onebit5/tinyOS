@@ -384,10 +384,34 @@ one that plainly is not. a condition *is* sh's rule, because it is the
 right one: a command, true when it exits zero, which makes every
 program on the machine a usable condition without any of them knowing.
 
-**0.2.19 an init worth the name.** the shell is started by `kmain`
+**0.2.19 an init worth the name.** ~~the shell is started by `kmain`
 because there was nothing else to start it. a first process that owns
 the others, brings things up in an order, restarts what dies, and shuts
-the machine down tidily.
+the machine down tidily.~~ **done in 0.2.19.** the four clauses turn out
+to be one job seen from four sides, and the one that pays for the rest
+is *restarts what dies*: `logout` can end a session now instead of
+calling `login` from inside it, so the next person does not inherit the
+last one's directory, history, jobs and variables.
+
+the rule with teeth is the one every init has had since sysvinit:
+something that dies instantly and is restarted instantly is a machine
+that does nothing else ever again. five deaths inside ten seconds and
+init leaves it down and says so. the *window* matters as much as the
+count -- five deaths across an afternoon is five people logging out, and
+a machine that gave up on a console for having been used would be
+worse than one with no rule at all.
+
+shutting down is where owning things stops being theoretical. `reboot`
+used to sync the disk and reset from whichever console typed it, while
+three other sessions carried on writing -- so what reached the drive was
+whatever was dirty at the instant somebody asked. stopping everything
+first is not something a command can do to itself.
+
+and pid 1 is not decoration: reparenting needs a number that is known
+before the process it names exists. a child whose parent dies becomes
+init's, and init collects it -- which replaced a sweep that ran on every
+spawn and took *every* finished process with it, background jobs whose
+exit codes nobody had read yet included.
 
 **0.2.20 the x86 parts, in one place.** everything that assumes this
 architecture is scattered through the tree. an `arch/` boundary, drawn

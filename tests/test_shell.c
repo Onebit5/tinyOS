@@ -76,21 +76,59 @@ static int pending_key = -1;
 int input_peek(void) { return pending_key; }
 uint64_t pit_uptime_ms(void) { return 12345; }
 uint64_t pit_ticks(void) { return 1234; }
-/* both of these are declared noreturn, and they mean it -- so a stub
- * that simply returned would run straight into the trap the compiler
- * puts after it. it jumps back to whoever asked instead.
+/* init, as far as the shell is concerned.
  *
- * what it must *not* do is exit(0), which is what it did until 0.2.13.
- * a stub that ends the process makes every assertion after it vacuous:
- * the suite stops, the runner sees a zero exit code, and the whole
- * thing reports success having run half of itself. that is a worse
- * failure than any bug it could have found, and it hid behind the fact
- * that nothing was testing reboot until something needed to */
+ * the shell used to sync the disk and reset the machine itself, which
+ * was right while there was one console and wrong from the moment there
+ * were four -- the other three carry on running and writing while this
+ * one syncs. so both commands are a *request* now, and what is worth
+ * checking here is that the request is made and that the shell does not
+ * try to do any of it on its own.
+ *
+ * it is declared noreturn and it means it, so a stub that simply
+ * returned would run straight into the trap the compiler puts after it.
+ * it jumps back to whoever asked instead.
+ *
+ * what it must *not* do is exit(0), which is what the reboot stub did
+ * until 0.2.13. a stub that ends the process makes every assertion
+ * after it vacuous: the suite stops, the runner sees a zero exit code,
+ * and the whole thing reports success having run half of itself. that
+ * is a worse failure than any bug it could have found, and it hid
+ * behind the fact that nothing was testing reboot until something
+ * needed to */
 #include <setjmp.h>
+#include "sched/init.h"
 static jmp_buf stopped_here;
-static int reboots, poweroffs;
+static int stops;
+static enum init_stop stopped_how;
 
-void reboot(void) { kprintf("<REBOOT>"); reboots++; longjmp(stopped_here, 1); }
+void init_stop_machine(enum init_stop how) {
+    stops++;
+    stopped_how = how;
+    kprintf(how == INIT_REBOOT ? "<REBOOT>" : "<POWEROFF>");
+    longjmp(stopped_here, 1);
+}
+
+/* a machine on its way down, or not. the shell asks before printing a
+ * prompt; nothing in these tests is going down while it runs */
+static bool machine_stopping;
+bool init_stopping(void) { return machine_stopping; }
+
+/* two services, one of them in the state worth noticing */
+void init_snapshot(struct init_table *out) {
+    init_table_reset(out);
+    init_add(out, "flusher", NULL, NULL, 0, true);
+    init_add(out, "tty1", NULL, NULL, 0, true);
+    init_started(out, 0, 11, 0);
+    init_started(out, 1, 12, 0);
+    init_died(out, 1, 1);
+}
+
+static const char *restarted;
+bool init_restart(const char *name) {
+    restarted = name;
+    return strcmp(name, "tty1") == 0;
+}
 uint64_t pmm_total_bytes(void) { return 2046ull * 1024 * 1024; }
 uint64_t pmm_used_bytes(void) { return 100ull * 1024; }
 uint64_t pmm_free_bytes(void) { return 2045ull * 1024 * 1024; }
@@ -368,11 +406,6 @@ bool user_pipeline(const struct stage *stages, int count, const char *cwd,
 size_t pipe_count(void) { return 0; }
 void vmm_dump(uint64_t v) { kprintf("<VMM %#lx>", v); }
 void kbacktrace(uint64_t rbp, uint64_t rip) { (void)rbp; (void)rip; kprintf("<BT>"); }
-void system_poweroff(void) {
-    kprintf("<POWEROFF>");
-    poweroffs++;
-    longjmp(stopped_here, 1);
-}
 uint64_t vmm_translate(uint64_t pml4, uint64_t v) { (void)pml4; (void)v; return v; }
 #include "drivers/rtc.h"
 void rtc_read(struct rtc_time *t) {
@@ -1063,26 +1096,55 @@ int main(void) {
           "machine now disagree and somebody should know");
     sync_ok = true;
 
-    cache_dirty = true;
-    syncs = 0;
-    reboots = 0;
-    run("reboot");
-    CHECK(syncs == 1, "reboot writes first");
-    CHECK(reboots == 1 && strstr(out, "<REBOOT>") != NULL, "and then reboots");
+    /* both ways of stopping are asked of init now, and neither of them
+     * writes anything here.
+     *
+     * these used to assert that `reboot` synced the disk itself, which
+     * was the right assertion right up until there were four consoles:
+     * three other sessions carry on running and writing while this one
+     * syncs, so what reaches the drive is whatever was dirty at the
+     * instant somebody asked. stopping everything first is not
+     * something a command can do to itself -- it needs whoever started
+     * all of it. so the sync moved to init, and what belongs here is
+     * that the shell asks and does not improvise */
 
     cache_dirty = true;
     syncs = 0;
-    poweroffs = 0;
-    run("poweroff");
-    CHECK(syncs == 1, "and so does poweroff");
-    CHECK(poweroffs == 1, "before going out");
-
-    cache_dirty = false;
-    syncs = 0;
+    stops = 0;
     run("reboot");
+    CHECK(stops == 1, "reboot asks init to stop the machine");
+    CHECK(stopped_how == INIT_REBOOT, "saying which way");
     CHECK(syncs == 0,
-          "with nothing waiting, neither of them writes anything -- there "
-          "is no point spinning up a drive to say nothing");
+          "and does not sync on its own -- doing that here would write "
+          "out whatever happened to be dirty while three other sessions "
+          "are still adding to it");
+
+    cache_dirty = true;
+    stops = 0;
+    run("poweroff");
+    CHECK(stops == 1, "and poweroff asks the same way");
+    CHECK(stopped_how == INIT_POWEROFF, "saying the other");
+    CHECK(syncs == 0, "and improvises no more than reboot does");
+
+    /* ---- what init is looking after ---- */
+
+    run("init");
+    CHECK(strstr(out, "flusher") != NULL && strstr(out, "tty1") != NULL,
+          "`init` lists the services");
+    CHECK(strstr(out, "running") != NULL, "with what each one is doing");
+    CHECK(strstr(out, "stopped") != NULL,
+          "including the ones that are not -- a supervisor you cannot "
+          "look at is one you have to take on faith");
+
+    restarted = NULL;
+    run("init start tty1");
+    CHECK(restarted != NULL && strcmp(restarted, "tty1") == 0,
+          "and one that is down can be started by name");
+    CHECK(strstr(out, "started") != NULL, "which says so");
+
+    run("init start nosuch");
+    CHECK(strstr(out, "no '") != NULL,
+          "and asking for one that does not exist is a plain no");
 
     /* ---- jobs -----------------------------------------------------
      *

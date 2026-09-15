@@ -35,6 +35,114 @@ static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)
 
 int main(void) {
+    /* ---- orphans, and who owns them ----------------------------------
+     *
+     * first in the file, and that is not tidiness: this table hands out
+     * pids in order from 1, so the only way to have a *real* process 1
+     * to test against is to make it before anything else -- which is
+     * exactly what the machine does, and the reason pid 1 can be relied
+     * on as the number reparenting points at.
+     *
+     * the problem being solved: a process that has ended and not been
+     * collected is holding one of thirty-two slots. normally its parent
+     * collects it -- that is what `wait` is -- but a parent can die
+     * first, and then the exit code is addressed to nobody and the slot
+     * is held forever. so children are reparented to init as their
+     * parent goes, and init collects them.
+     *
+     * which ones is the delicate part, and it is most of what is below */
+
+    CHECK(process_orphan() == 0, "an empty table has no orphans");
+
+    int p1 = process_create("init", 0, 0, false, 0);
+    CHECK(p1 == INIT_PID,
+          "the first process is pid 1, which is what makes 1 a number "
+          "reparenting can be written against");
+
+    /* a shell's child, which the shell will wait for itself */
+    int shell_child = process_create("cat", 0, 0, false, 0);
+    process_exited(shell_child, 0, 0);
+    CHECK(process_orphan() == 0,
+          "a process whose parent is 0 is a kernel shell's, and the shell "
+          "collects its own -- taking this one would be a `$?` that is "
+          "right sometimes and whatever was there before the rest of the "
+          "time");
+    process_collect(shell_child, NULL);
+
+    /* a child whose parent is alive and well is nobody's business but
+     * the parent's, however long it has been sitting there finished */
+    int waiting = process_create("waiting", 0, 0, false, 0);
+    int watched = process_create("watched", waiting, 0, false, 0);
+    process_exited(watched, 0, 5);
+    CHECK(process_orphan() == 0,
+          "and a finished child whose parent is still running is the "
+          "parent's to collect");
+    process_collect(watched, NULL);
+    process_exited(waiting, 0, 6);
+    process_collect(waiting, NULL);
+
+    int mother   = process_create("mother", 0, 0, false, 0);
+    int kid      = process_create("kid", mother, 0, false, 0);
+    int grandkid = process_create("grandkid", kid, 0, false, 0);
+
+    CHECK(process_find(kid)->parent == mother, "a child knows its parent");
+
+    process_exited(mother, 0, 100);
+    CHECK(process_find(kid)->parent == INIT_PID,
+          "and when the parent dies the child becomes init's");
+    CHECK(process_find(grandkid)->parent == kid,
+          "but only its own children -- reparenting one generation at a "
+          "time, or a whole tree moves every time anybody in it dies");
+
+    CHECK(process_orphan() == 0,
+          "an adopted child that is still running is not collectable, "
+          "however orphaned it is");
+
+    process_exited(kid, 7, 110);
+    CHECK(process_orphan() == kid,
+          "one that has ended is -- and this one's parent really is init, "
+          "which is here in the table");
+    CHECK(process_find(grandkid)->parent == INIT_PID,
+          "and its own children move up in turn");
+    process_collect(kid, NULL);
+
+    /* the other clause: a child whose parent is not in the table at
+     * all. reparenting cannot reach this one, because it was never
+     * there to be reparented -- it was created naming a pid that had
+     * already been collected, which is what a spawn racing an exit
+     * looks like from here.
+     *
+     * without this clause that process is uncollectable forever: its
+     * parent is a number, and nothing will ever wait on a number */
+    int ghost = process_create("ghost", 0, 0, false, 0);
+    process_exited(ghost, 0, 200);
+    process_collect(ghost, NULL);       /* gone from the table altogether */
+
+    int left_behind = process_create("left behind", ghost, 0, false, 0);
+    CHECK(process_find(left_behind)->parent == ghost,
+          "a process can be born naming a parent that has already gone");
+    process_exited(left_behind, 0, 210);
+    CHECK(process_orphan() == left_behind,
+          "and it is init's too, by the parent not being anywhere rather "
+          "than by having been handed over");
+    process_collect(left_behind, NULL);
+
+    process_exited(grandkid, 0, 220);
+    process_collect(grandkid, NULL);
+    process_collect(mother, NULL);
+
+    CHECK(process_orphan() == 0, "and then there are none");
+
+    /* and init is not its own orphan -- by the same rule as everything
+     * else rather than by a special case, since init's parent is 0: it
+     * is what kmain started, and kmain is not a process either */
+    process_exited(p1, 0, 300);
+    CHECK(process_find(p1)->parent == 0, "init's parent is nobody");
+    CHECK(process_orphan() == 0, "so init is not its own orphan");
+    process_collect(p1, NULL);
+
+    CHECK(process_count() == 0, "and the table is empty for what follows");
+
     /* ---- the ordinary life of one ---- */
     int pid = process_create("bin/hello", 0, 0, false, 1000);
     CHECK(pid > 0, "a process gets a pid");
