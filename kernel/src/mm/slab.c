@@ -1,7 +1,7 @@
 #include "mm/slab.h"
 #include "mm/pmm.h"
 #include "lib/panic.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include <stdbool.h>
 

@@ -5,10 +5,10 @@
 #include "mm/addrspace.h"
 #include "mm/kmalloc.h"
 #include "mm/slab.h"
-#include "cpu/smp.h"
+#include "arch/mmu.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include "sched/process.h"
 #include "fs/pipe.h"
@@ -52,7 +52,7 @@ static void thread_bootstrap(void) {
      * return through. so I let interrupts back in myself.
      * forget this line and the first thread you spawn quietly kills
      * preemption for the whole system */
-    asm volatile ("sti");
+    irq_enable();
 
     struct thread *me = sched_current();
     me->entry(me->arg);

@@ -2,7 +2,7 @@
 #include "boot.h"
 #include "mm/buddy.h"
 #include "lib/kprintf.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include <stdbool.h>
 #include "lib/panic.h"

@@ -1,30 +1,16 @@
 #include "sched/spinlock.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
+#include "arch/cpu.h"
 #include "lib/panic.h"
 #include "lib/kprintf.h"
 
-#ifndef TINYOS_HOSTED
-#include "cpu/smp.h"
-#else
-/* on the host every pthread stands in for a core, and there is no apic
- * to ask which one this is. the address of a thread-local is as good a
- * name as any, and unique for the same reason */
-static uint32_t hosted_id(void) {
-    static _Thread_local uint32_t id;
-    static volatile uint32_t next;
-    if (id == 0) {
-        id = __atomic_add_fetch(&next, 1, __ATOMIC_SEQ_CST);
-    }
-    return id;
-}
-#endif
-
+/* which core this is used to be answered here, twice, behind an #ifdef
+ * -- the apic on a real machine and a thread-local counter under the
+ * host tests. that is the shape of every arch leak: a portable file
+ * carrying two answers because nowhere else was willing to hold them.
+ * arch/cpu.h holds them now and this file asks one question */
 static uint32_t whoami(void) {
-#ifndef TINYOS_HOSTED
-    return smp_this_cpu();
-#else
-    return hosted_id();
-#endif
+    return cpu_id();
 }
 
 /* a core that spins forever is a machine that has stopped with nothing
@@ -114,11 +100,9 @@ static void take(struct spinlock *l) {
             panic("spinlock: cpu %u waited out %s, held by cpu %u",
                   me, l->name, l->owner);
         }
-#ifndef TINYOS_HOSTED
         /* tell the processor this is a spin loop. it costs nothing and
          * stops the core burning power fighting its own store buffer */
-        __asm__ volatile ("pause");
-#endif
+        cpu_relax();
     }
 
     l->owner = me;

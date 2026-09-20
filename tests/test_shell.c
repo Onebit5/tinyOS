@@ -269,7 +269,7 @@ bool disk_usage(uint64_t *used, uint64_t *total) {
 uint64_t ahci_sectors(void) { return 131072; }
 
 /* the processors, which the shell only ever asks about */
-#include "cpu/smp.h"
+#include "arch/x86_64/smp.h"
 static struct cpu fake_cpus[2] = {
     { .index = 0, .apic_id = 0, .reported_id = 0, .online = true,
       .bootstrap = true, .scheduling = true },

@@ -37,11 +37,11 @@ LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld
 NASMFLAGS := -f elf64 -g
 
 CSRC := $(shell find kernel/src -name '*.c')
-ASRC := $(filter-out kernel/src/cpu/trampoline.asm, \
+ASRC := $(filter-out kernel/src/arch/x86_64/trampoline.asm, \
           $(shell find kernel/src -name '*.asm'))
 OBJ  := $(patsubst kernel/src/%.c,obj/%.c.o,$(CSRC)) \
         $(patsubst kernel/src/%.asm,obj/%.asm.o,$(ASRC)) \
-        obj/cpu/trampoline.c.o
+        obj/arch/x86_64/trampoline.c.o
 
 .PHONY: all run bootimg clean distclean
 
@@ -76,14 +76,14 @@ obj/%.asm.o: kernel/src/%.asm
 # the code a second cpu wakes up in. it runs in real mode at a fixed low
 # address, which is nowhere the linker would put anything, so it is
 # assembled flat and carried inside the kernel as bytes
-obj/cpu/trampoline.bin: kernel/src/cpu/trampoline.asm
+obj/arch/x86_64/trampoline.bin: kernel/src/arch/x86_64/trampoline.asm
 	@mkdir -p $(@D)
 	$(NASM) -f bin $< -o $@
 
-obj/cpu/trampoline.c: obj/cpu/trampoline.bin tools/bin2c.py
+obj/arch/x86_64/trampoline.c: obj/arch/x86_64/trampoline.bin tools/bin2c.py
 	@python3 tools/bin2c.py smp_trampoline $< > $@
 
-obj/cpu/trampoline.c.o: obj/cpu/trampoline.c
+obj/arch/x86_64/trampoline.c.o: obj/arch/x86_64/trampoline.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 -include $(OBJ:.o=.d)
@@ -269,7 +269,7 @@ bin/tests/process:  tests/test_process.c  kernel/src/sched/spinlock.c \
                     kernel/src/lib/env.c kernel/src/lib/string.c
 bin/tests/pci:      tests/test_pci.c      kernel/src/drivers/pci.c \
                     kernel/src/lib/string.c
-bin/tests/acpi:     tests/test_acpi.c     kernel/src/cpu/acpi.c \
+bin/tests/acpi:     tests/test_acpi.c     kernel/src/arch/x86_64/acpi.c \
                     kernel/src/lib/string.c
 bin/tests/auth:     tests/test_auth.c     kernel/src/sched/auth.c \
                     kernel/src/lib/string.c
@@ -280,7 +280,7 @@ bin/tests/tty:      tests/test_tty.c      kernel/src/sched/spinlock.c \
 # stdout end up somewhere other than the terminal when a pipeline says
 # they should, and a stubbed pipe could only ever agree with itself
 bin/tests/syscall:  tests/test_syscall.c  kernel/src/sched/spinlock.c \
-                    kernel/src/fs/path.c kernel/src/cpu/syscall.c \
+                    kernel/src/fs/path.c kernel/src/arch/x86_64/syscall.c \
                     kernel/src/sched/process.c kernel/src/lib/string.c \
                     kernel/src/lib/env.c \
                     kernel/src/fs/vfs.c kernel/src/fs/pipe.c
@@ -325,7 +325,7 @@ bin/tests/args:     tests/test_args.c     user/args.c
 bin/tests/vfs:      tests/test_vfs.c      kernel/src/fs/vfs.c \
                     kernel/src/fs/ramdisk.c kernel/src/lib/string.c
 bin/tests/philemon:  tests/test_philemon.c boot/philemon.c boot/philemon.h
-bin/tests/gdt:      tests/test_gdt.c      kernel/src/cpu/gdt.c
+bin/tests/gdt:      tests/test_gdt.c      kernel/src/arch/x86_64/gdt.c
 bin/tests/gdt:      SRCS = tests/test_gdt.c
 bin/tests/keyboard: tests/test_keyboard.c kernel/src/drivers/keyboard.c \
                     kernel/src/drivers/input.c \
@@ -359,7 +359,7 @@ $(filter-out bin/tests/switch,$(TEST_BINS)):
 
 # the switch test calls into the real switch.asm, and needs -no-pie so
 # the `callq switch_context` in its inline asm resolves
-obj/tests/switch.asm.o: kernel/src/sched/switch.asm
+obj/tests/switch.asm.o: kernel/src/arch/x86_64/switch.asm
 	@mkdir -p $(@D)
 	$(NASM) -f elf64 $< -o $@
 
@@ -415,7 +415,7 @@ ext2-image:
 # now every host suite has passed while the kernel did not link -- disk.c
 # and shell.c are compiled into no host test, so nothing but building
 # the real thing catches a missing function there
-test: checkfmt bin/tinyos $(USER_PROGS) $(RAMDISK) $(TEST_BINS) \
+test: checkfmt checkarch bin/tinyos $(USER_PROGS) $(RAMDISK) $(TEST_BINS) \
       fat32-image ext2-image part-images
 	@fail=0; \
 	for t in $(TEST_BINS); do \
@@ -447,6 +447,14 @@ test: checkfmt bin/tinyos $(USER_PROGS) $(RAMDISK) $(TEST_BINS) \
 checkfmt:
 	@printf '  %-10s ' checkfmt
 	@python3 tools/checkfmt.py kernel/src && echo 'ok'
+
+# the arch boundary, which is worth exactly as much as whatever checks
+# it. a line drawn in 0.2.20 and not checked would decay the first time
+# somebody needed a `hlt` in a hurry -- silently, because the kernel goes
+# on building and booting perfectly either way
+.PHONY: checkarch
+checkarch:
+	@python3 tools/checkarch.py
 
 # boot the iso and drive the shell over serial. needs qemu
 .PHONY: boottest

@@ -4,7 +4,6 @@
 #include "drivers/tty.h"
 #include "drivers/mouse.h"
 #include "drivers/pit.h"
-#include "cpu/system.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "mm/pmm.h"
@@ -13,19 +12,20 @@
 #include "mm/vmm.h"
 #include "lib/backtrace.h"
 #include "drivers/rtc.h"
-#include "cpu/cpuinfo.h"
+#include "arch/x86_64/cpuinfo.h"
 #include "fs/ramdisk.h"
 #include "fs/disk.h"
 #include "fs/vfs.h"
 #include "fs/path.h"
 #include "drivers/ahci.h"
-#include "cpu/smp.h"
+#include "arch/x86_64/smp.h"
 #include "sched/usermode.h"
 #include "fs/pipe.h"
 #include "sched/auth.h"
 #include "sched/init.h"
-#include "cpu/syscall.h"
-#include "cpu/interrupts.h"
+#include "arch/x86_64/syscall.h"
+#include "arch/x86_64/interrupts.h"
+#include "arch/cpu.h"
 #include "drivers/pci.h"
 #include "lib/ksyms.h"
 #include "version.h"
@@ -932,10 +932,8 @@ static void cmd_vmm(int argc, char **argv) {
         kfree(heap);
     }
 
-    uint64_t rsp;
-    asm volatile ("mov %%rsp, %0" : "=r"(rsp));
     kprintf("this thread's stack:\n");
-    vmm_dump(rsp);
+    vmm_dump(cpu_stack_pointer());
 
     kprintf("and somewhere nobody lives:\n");
     vmm_dump(0x0000dead00000000ull);

@@ -231,8 +231,8 @@ const char *pci_device_name(uint16_t vendor, uint16_t device) {
 
 #ifndef TINYOS_HOSTED
 
-#include "cpu/io.h"
-#include "cpu/interrupts.h"
+#include "arch/x86_64/io.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 
 /* the original way in, and still the one every machine supports: an

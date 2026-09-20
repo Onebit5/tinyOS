@@ -1,5 +1,5 @@
 #include "sched/sched.h"
-#include "cpu/smp.h"
+#include "arch/cpu.h"
 #include "sched/thread.h"
 #include "drivers/pit.h"
 #include "mm/pmm.h"
@@ -9,10 +9,10 @@
 #include "lib/kprintf.h"
 #include "lib/panic.h"
 #include "lib/string.h"
-#include "cpu/interrupts.h"
+#include "arch/cpu.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
-#include "cpu/tss.h"
-#include "cpu/syscall.h"
+#include "arch/context.h"
 #include "mm/pmm.h"
 #include "mm/addrspace.h"
 #include "sched/process.h"
@@ -24,7 +24,6 @@
 #define QUANTUM_TICKS 5
 
 /* implemented in switch.asm */
-extern void switch_context(uint64_t *save_rsp, uint64_t *load_rsp);
 
 /* the run queue: a ring every core will eventually walk, and the
  * one place a thread can be in two states at once if nobody is
@@ -50,12 +49,12 @@ struct percpu {
     bool scheduling;        /* has this core entered the scheduler yet */
 };
 
-static struct percpu percpu[SMP_MAX_CPUS];
+static struct percpu percpu[CPU_MAX];
 
 /* the ring itself, and any thread in it. `ring` is just a way in */
 static struct thread *ring;
 
-#define ME (&percpu[smp_this_cpu()])
+#define ME (&percpu[cpu_id()])
 #define current (ME->running)
 
 /* the thread that limine handed the cpu to. its stack came from the
@@ -77,7 +76,7 @@ static void idle_loop(void *arg) {
      * that is not inside the scheduler holding the run queue */
     for (;;) {
         reap_dead();
-        asm volatile ("hlt");
+        cpu_idle();
     }
 }
 
@@ -159,7 +158,7 @@ static void wake_sleepers(void) {
  * an idle thread belongs to its own core and must never be picked up by
  * another, or two cores end up sharing one idle stack */
 static bool is_idle(const struct thread *t) {
-    for (size_t i = 0; i < SMP_MAX_CPUS; i++) {
+    for (size_t i = 0; i < CPU_MAX; i++) {
         if (percpu[i].idle == t) {
             return true;
         }
@@ -209,7 +208,7 @@ static void schedule(void) {
 
     if (next == prev) {
         prev->state = THREAD_RUNNING;
-        prev->on_cpu = (int)smp_this_cpu();
+        prev->on_cpu = (int)cpu_id();
         return;
     }
 
@@ -220,7 +219,7 @@ static void schedule(void) {
         prev->on_cpu = -1;
     }
     next->state = THREAD_RUNNING;
-    next->on_cpu = (int)smp_this_cpu();
+    next->on_cpu = (int)cpu_id();
     current = next;
 
     /* whose memory is real from here on. the kernel half is identical
@@ -236,8 +235,7 @@ static void schedule(void) {
     if (next->stack_phys != 0) {
         uint64_t ktop = (uint64_t)pmm_phys_to_virt(next->stack_phys)
                       + next->stack_pages * PAGE_SIZE;
-        tss_set_rsp0(ktop);
-        syscall_set_kernel_rsp(ktop);
+        context_set_kernel_stack(ktop);
     }
 
     switch_context(&prev->rsp, &next->rsp);
@@ -648,7 +646,7 @@ int sched_thread_cpu(const struct thread *t) {
 }
 
 const char *sched_cpu_running(unsigned cpu) {
-    if (cpu >= SMP_MAX_CPUS) {
+    if (cpu >= CPU_MAX) {
         return "?";
     }
     struct thread *t = percpu[cpu].running;
@@ -657,7 +655,7 @@ const char *sched_cpu_running(unsigned cpu) {
 
 size_t sched_cores_scheduling(void) {
     size_t n = 0;
-    for (size_t i = 0; i < SMP_MAX_CPUS; i++) {
+    for (size_t i = 0; i < CPU_MAX; i++) {
         if (percpu[i].scheduling) {
             n++;
         }

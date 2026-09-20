@@ -1,8 +1,9 @@
 #include "drivers/pit.h"
-#include "cpu/smp.h"
-#include "cpu/io.h"
-#include "cpu/pic.h"
-#include "cpu/interrupts.h"
+#include "arch/x86_64/smp.h"
+#include "arch/x86_64/io.h"
+#include "arch/cpu.h"
+#include "arch/x86_64/pic.h"
+#include "arch/x86_64/interrupts.h"
 #include "sched/sched.h"
 
 #define PIT_CH0  0x40
@@ -99,7 +100,7 @@ void pit_poll_wait(uint64_t ms) {
      * and a wrong measurement is recoverable where a hang is not */
     uint64_t spins = 200000000;
     while (!(inb(PORT_61) & P61_CH2_OUT) && spins-- > 0) {
-        asm volatile ("pause");
+        cpu_relax();
     }
 
     outb(PORT_61, saved);
@@ -108,6 +109,6 @@ void pit_poll_wait(uint64_t ms) {
 void pit_busy_wait(uint64_t ms) {
     uint64_t until = ticks + (ms / (1000 / PIT_HZ)) + 1;
     while (ticks < until) {
-        asm volatile ("pause");
+        cpu_relax();
     }
 }

@@ -2,7 +2,7 @@
 #include "fs/fat32.h"
 #include "drivers/ahci.h"
 #include "lib/string.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include "drivers/rtc.h"
 #include "fs/bcache.h"

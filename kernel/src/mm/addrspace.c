@@ -3,7 +3,8 @@
 #include "mm/vmm.h"
 #include "mm/kmalloc.h"
 #include "mm/slab.h"
-#include "cpu/smp.h"
+#include "arch/x86_64/smp.h"
+#include "arch/mmu.h"
 #include "lib/string.h"
 
 /* the lower half is per-process, the upper half is everyone's. the
@@ -484,7 +485,7 @@ void addrspace_switch(struct addrspace *as) {
         return;
     }
     live_pml4 = want;
-    asm volatile ("mov %0, %%cr3" : : "r"(want) : "memory");
+    mmu_load_table(want);
 }
 
 #endif

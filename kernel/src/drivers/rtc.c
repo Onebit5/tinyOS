@@ -1,6 +1,6 @@
 #include "drivers/rtc.h"
-#include "cpu/io.h"
-#include "cpu/interrupts.h"
+#include "arch/x86_64/io.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include <stdbool.h>
 

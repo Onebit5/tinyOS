@@ -134,7 +134,8 @@ const char *init_state_name(enum service_state s) {
 #include "drivers/console.h"
 #include "drivers/pit.h"
 #include "drivers/tty.h"
-#include "cpu/system.h"
+#include "arch/machine.h"
+#include "arch/cpu.h"
 #include "fs/disk.h"
 #include "fs/pipe.h"
 #include "lib/kprintf.h"
@@ -414,6 +415,36 @@ static void stop_the_programs(void) {
     }
 }
 
+/* the last thing on the screen.
+ *
+ * this used to live in `system.c` next to the code that pulses the reset
+ * line, which put a persona quote in the architecture layer -- it is not
+ * x86 and never was, it is what *this kernel* says when it stops. so it
+ * lives with the thing that decides to stop, and what is left behind the
+ * arch boundary is three pokes at a motherboard.
+ *
+ * interrupts stay on through all of it, because the wait counts timer
+ * ticks and the timer cannot tick with them off. the door is shut only
+ * once there is nothing left to wait for */
+static void say_goodbye(enum init_stop how) {
+    console_set_colors(0x7b8ce0, 0x101018);
+
+    if (how == INIT_REBOOT) {
+        kprintf("\nThou art I... And I am thou...\n");
+        kprintf("Thou hast established a genuine bond...\n\n");
+        kprintf("The innermost power of the Computer\n");
+        kprintf("Arcana hath been set free.\n\n");
+        kprintf("I bestow upon thee the ability to\n");
+        kprintf("create tinyOS, the ultimate form\n");
+        kprintf("of the Computer's Arcana...\n\n");
+        pit_busy_wait(3000);
+    } else {
+        kprintf("\nThe Velvet Room fades...\n");
+        kprintf("Till I meet again.\n");
+        pit_busy_wait(1500);
+    }
+}
+
 static void take_the_machine_down(void) {
     enum init_stop how = (enum init_stop)stop_how;
 
@@ -461,11 +492,18 @@ static void take_the_machine_down(void) {
         }
     }
 
+    say_goodbye(how);
+
     if (how == INIT_REBOOT) {
-        reboot();
-    } else {
-        system_poweroff();
+        machine_reset();        /* which does not come back either way */
     }
+
+    /* and a poweroff that nothing answered is worth saying out loud. a
+     * machine sitting there with the fan running looks broken; "close
+     * the window" is a complete answer and takes one line */
+    machine_poweroff();
+    kprintf("init: nothing answered. halting instead -- close the window\n");
+    cpu_stop();
 }
 
 /* ---- process 1 -------------------------------------------------------- */

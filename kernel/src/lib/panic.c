@@ -3,8 +3,9 @@
 #include "lib/kprintf.h"
 #include "lib/backtrace.h"
 #include "drivers/console.h"
-#include "cpu/system.h"
-#include "cpu/io.h"
+#include "arch/irq.h"
+#include "arch/cpu.h"
+#include "arch/machine.h"
 #include <stdarg.h>
 #include <stdint.h>
 
@@ -15,7 +16,7 @@ void panic(const char *fmt, ...) {
      * about what actually went wrong */
     spin_abandon_all();
 
-    asm volatile ("cli");
+    irq_disable();
 
     console_set_colors(0xe64553, 0x101018);
 
@@ -36,22 +37,13 @@ void panic(const char *fmt, ...) {
     kprintf("Press any key to return to the Velvet Room...\n");
 
     /* interrupts are off and never coming back, so the keyboard driver
-     * is no help here -- I talk to the 8042 myself. poll the status
-     * port for a byte, and reset on the first press I see (bit 7 set
-     * means a key came *up*, which is probably just the user releasing
-     * whatever they were holding when it all went wrong) */
+     * is no help here -- it is built entirely around an interrupt that
+     * will not arrive. asking the machine directly is the only way, and
+     * *how* it asks is the machine's business rather than this file's */
     for (;;) {
-        if (inb(0x64) & 1) {
-            uint8_t sc = inb(0x60);
-            if (!(sc & 0x80)) {
-                system_reset();
-            }
+        if (machine_key_pressed()) {
+            machine_reset();
         }
-        /* and over the serial line, for anyone driving this headless */
-        if (inb(0x3f8 + 5) & 1) {
-            inb(0x3f8);
-            system_reset();
-        }
-        asm volatile ("pause");
+        cpu_relax();
     }
 }

@@ -6,7 +6,7 @@ a tiny 64-bit hobby kernel for x86_64, written in C, booted by a bootloader of i
 
 im building this to actually understand what happens between "power button" and "shell prompt". its not trying to be the next linux, its trying to fit in my head.
 
-**version: 0.2.19** (**an init worth the name.** a first process that owns the others, restarts what dies, and takes the machine down in the order it came up)
+**version: 0.2.20** (**the x86 parts, in one place.** an `arch/` boundary drawn from the outside in, and something that checks it holds)
 
 ## what it does
 
@@ -57,6 +57,7 @@ im building this to actually understand what happens between "power button" and 
 - [x] a ps/2 mouse: drag to select, middle button to paste it back
 - [x] an environment inherited across spawn, `$PATH`, and scripts with `if` and `while`
 - [x] an init: pid 1, services that come back when they die, and a tidy shutdown
+- [x] an `arch/` boundary, and a build that fails when something crosses it
 - [x] ci that builds the iso, boot-tests it in qemu, and types at the shell
 
 where it goes next is [ROADMAP.md](ROADMAP.md): the rest of 0.2.x, ending in
@@ -93,7 +94,8 @@ regression can be bisected to the milestone that owns it.
 
 ```
 kernel/src/           main.c and friends
-kernel/src/cpu/       gdt, idt, isr stubs, irq dispatch, the 8259 pic, port io
+kernel/src/arch/      the boundary: irq, cpu, mmu, context, machine
+kernel/src/arch/x86_64/  gdt, idt, isr stubs, irq dispatch, the 8259 pic, port io
 kernel/src/drivers/   serial, framebuffer console, the font, ps/2 keyboard, pit
 kernel/src/lib/       kprintf, panic, string.h stuff
 kernel/src/mm/        physical frame allocator, kernel heap, page tables
@@ -165,6 +167,88 @@ all of that rests on one small change: the console used to treat `\b` as "move l
 cancelling them with ctrl+c is cooperative, not forceful -- I have no signals and no safe way to yank a sleeping thread off the run queue, so a persona notices it has been recalled the next time it wakes up. that can be up to one sleep period later.
 
 `crash` dereferences `0xdeadbeef` on purpose, which page faults inside the shell thread and gets you the full m2 exception report -- decoded fault reason, cr2, every register, then the panic. the machine is dead at that point, but the panic handler polls the 8042 directly (interrupts are never coming back, so the keyboard driver is no help) and any keypress resets the box. it ignores key *releases*, otherwise letting go of the enter key you used to type `crash` would reboot instantly.
+
+## the x86 parts, in one place
+
+everything under `kernel/src/arch/x86_64/` assumes this machine, and everything above it is not supposed to. that sentence was not true before 0.2.20: the kernel named registers all over the tree. `mov %%cr3` in the address space code, `mov %%rbp` in the backtrace, `hlt` in the scheduler, `pause` in three places, `sti` in two.
+
+no new behaviour at all. the test is that nothing changes, and that turned out to be a test I could actually run.
+
+### drawn from the outside in
+
+the headers are named for **what the rest of the kernel wants**, not for what x86 happens to provide. that is the whole difference between a boundary and a folder.
+
+| header | what it is for |
+| --- | --- |
+| `arch/irq.h` | may interrupts happen right now |
+| `arch/cpu.h` | what this core can be told to do, and where it is |
+| `arch/mmu.h` | what the hardware must be told about a page table |
+| `arch/context.h` | what a thread is, as far as the processor is concerned |
+| `arch/machine.h` | the box rather than the processor: reset, power, a key |
+
+drawn the other way round — moving `cpu/` to `arch/x86_64/` and exporting what was already there — `arch/` would have ended up with a `write_cr3()`. that is an x86 instruction wearing a portable-looking name, and it is *worse* than the inline asm it replaced, because the inline asm at least admitted what it was.
+
+each portable header picks its implementation with an `#if defined(__x86_64__)` and an `#error` for anything else. the `#error` is the point: adding aarch64 in 0.2.21 means the compiler lists exactly what is missing, rather than the machine booting and being subtly wrong.
+
+`arch/machine.h` being separate from `arch/cpu.h` is not pedantry. resetting, powering off, and reading a key with interrupts off are properties of a *board*, not of an instruction set — two aarch64 boards have nothing in common here. keeping them apart means a second architecture does not have to pretend its power switch is a feature of its cpu.
+
+### the biggest leak was not the assembly
+
+it was `cpu/interrupts.h`. **nineteen files** across mm, sched, fs, drivers and lib included an x86 header to get four lines of interrupt masking — and got a struct listing rax through r15, the 8259, the io apic and the acpi tables along with them.
+
+interrupt masking is a thing every architecture has and none of them spell the same way, which is the definition of something belonging behind this line. it is `arch/irq.h` now, on its own, and twelve of those files no longer name the architecture at all.
+
+the same shape turned up inside `spinlock.c`, which carried its own `#ifdef` answering "which core am I" twice — the apic on a real machine, a thread-local counter under the host tests. that is what an arch leak looks like when it has nowhere to go: a portable file holding two answers because nothing else would.
+
+### the thing that checks it
+
+a boundary is worth exactly what checks it. this one would decay the first time somebody needed a `hlt` in a hurry, and it would decay *silently*, because the kernel goes on building and booting perfectly either way.
+
+so `tools/checkarch.py` runs on every `make test`, the same idea as `checkfmt.py` and for the same reason — the bug it prevents is one that hides. it fails the build on:
+
+- inline assembly anywhere outside `kernel/src/arch/`, with no allow-list at all, because a single exception is a precedent rather than a line
+- an `#include` of `arch/x86_64/...` from outside, unless the file is on a list **with a stated reason**
+- a file on that list that has stopped needing to be — a list nobody prunes stops meaning anything
+
+it printed three of those on its first run, against a list I had just written by hand. and it prints the survivors every build, because the list is the interesting output:
+
+```
+  checkarch  ok        75 files portable, 10 still name x86:
+               drivers/keyboard.c   ps/2, which is an 8042 at port 0x60
+               drivers/mouse.c      the same 8042, sharing the same port
+               drivers/pci.c        configuration space through ports 0xcf8/0xcfc
+               ...
+               shell/shell.c        `cpus`, `lspci` and `ioapic` report on this hardware by name
+```
+
+### proving that nothing changed
+
+"the test is that nothing changes" sounds like a thing you assert. it is not: the previous kernel is one `git archive` away, and instructions can be compared.
+
+**1057 of the 1073 functions present in both builds have byte-identical instruction sequences.** all sixteen that differ are accounted for:
+
+- five differ only by extra `mov`s — an inlined wrapper spills its parameter through a stack slot at `-O0`
+- `vmm_init` also lost two `call`s, because two static helpers became arch calls that inline
+- `panic` and `boot_take_handoff` lost the code that genuinely moved: an 8042 polling loop and a `cli; hlt`
+- `user_thread_start` lost its epilogue, because entering ring 3 is now declared as never returning — which it never did
+- three differ by alignment padding
+- **two are not differences.** `mine` and `list_remove` each name a static function in two different files, so comparing by name compares the pair. worth saying rather than quietly excluding
+
+### the one that nearly got through
+
+this kernel builds at `-O0`, where a plain `static inline` is a call like any other.
+
+for `cpu_relax()` that is merely slower than the `pause` it replaced — a call to a function containing `pause` still pauses. for `cpu_frame_pointer()` it is **wrong**: a called function reads *its own* frame, so `kbacktrace` would have started one line low and politely reported itself as the innermost caller. the kind of wrong that looks entirely plausible in the output.
+
+so every primitive that replaced inline assembly says `__attribute__((always_inline))` rather than hoping for an optimiser this build does not turn on. `irq_save`/`irq_restore` deliberately do *not* — they were always a plain inline, and a version whose promise is "nothing changes" should not change what it did not touch.
+
+### what is deliberately still x86 and shouldn't be
+
+the drivers that talk to ports — the 8259, the pit, ps/2, the cmos clock, the 8250 uart, pci configuration — are still in `drivers/`. they are as x86 as anything behind the boundary.
+
+they are not moved because **a boundary drawn around drivers before there is a second machine to draw it against is a guess.** 0.2.21 is the aarch64 port and it is the thing that says which of those are "an x86 driver", which are "a driver that happens to use port io", and which are neither. moving them now would be inventing an answer a version ahead of the question.
+
+what is done instead is making the leak legible and counted, rather than assumed.
 
 ## an init worth the name
 
@@ -2143,6 +2227,7 @@ most of this kernel can be tested without booting anything, because the parts th
 ```
 $ make test
   checkfmt   ok        every format string vs what kprintf implements
+  checkarch  ok        no inline asm and no x86 headers outside arch/
   kprintf    ok        formatting vs the real printf, 33 cases
   mm         ok        pmm + heap, incl. draining ram dry
   vmm        ok        page tables built and walked, 40+ cases
@@ -2264,6 +2349,7 @@ this system onto a disk, which is what the ramdisk has been kept for.
 
 ## changelog
 
+- **0.2.20** — the x86 parts, in one place. an `arch/` boundary drawn **from the outside in**: the headers are named for what the kernel wants — may interrupts happen, stop until something occurs, this mapping is stale, land the kernel here when this thread traps — rather than for what x86 provides. drawn the other way round it produces a `write_cr3()`, which is an x86 instruction wearing a portable name and worse than the inline asm it replaced. the biggest leak was not the assembly but `cpu/interrupts.h`: **nineteen files** included an x86 header to get four lines of interrupt masking, and got a struct listing rax through r15 and the whole 8259 with them. the version's real deliverable is `tools/checkarch.py`, since a boundary is worth exactly what checks it and this one would decay silently — it fails the build on inline asm outside `arch/`, on any portable file naming x86 without a stated reason, and on a list entry that has stopped being needed. it caught three wrong entries in the list I had just written by hand, plus two `__asm__ volatile` sites my own grep had missed. **"nothing changes" was checked rather than asserted**: the previous kernel is one `git archive` away, and 1057 of the 1073 functions in both builds have byte-identical instruction sequences — every one of the sixteen accounted for, and two of them not differences at all but two files each having a static function called `mine`. the thing that nearly got through: this kernel builds at `-O0`, where a plain `static inline` is a call — merely slower for `cpu_relax`, but *wrong* for `cpu_frame_pointer`, since a called function reads its own frame and the backtrace would have started one line low, politely reporting itself.
 - **0.2.19** — an init worth the name. `kmain` started the four shells and the flusher itself because there was nothing else that could, which works once and answers nothing that comes after: what order things start in, what happens when one dies, who owns a process whose parent has gone, what shutting down means. the clause that pays for the rest is **restarting what dies** — `logout` can end a session now rather than calling `login` from inside it, so the next person does not inherit the last one's directory, history, jobs and variables. the rule with teeth is the one every init has had since sysvinit: something that dies instantly and restarts instantly is a machine that does nothing else ever again, so five deaths inside ten seconds and init leaves it down and says so on that console — and the **window** matters as much as the count, since five deaths across an afternoon is five people logging out and a machine that gave up on a console for having been *used* would be worse than no rule at all. shutdown is where owning things stops being theoretical: `reboot` used to sync and reset from whichever console typed it while three other sessions carried on writing, so what reached the drive was whatever was dirty at that instant; init stops respawning, asks the programs to stop before insisting, takes the services down in the reverse of the order they came up (sessions first, since they can write; flusher last, since it protects the disk) and syncs only then. pid 1 matters because reparenting needs a number known before the process it names exists. that replaced a sweep at the top of every spawn which collected *every* finished process — a background job's exit code was swept away by the next command typed, so `jobs` reported whatever the status had been last time anyone looked; it survives only as a last resort for a table that is genuinely full. the orphan rule had a bug the test caught at once: "is my parent still in the table" says no for parent **0** as well, and 0 is the kernel shell, so every shell's child looked like an orphan. also fixed in passing: a bare `mount` walked into `argv[1]` on a one-word line, which the compiler had been pointing at the whole time by way of an unused `argc`.
 - **0.2.18a** — the keyboard handler was reading bytes that belonged to the mouse. they share one controller, one data port and one output buffer, and bit 5 of the status byte says whose a waiting byte is — the mouse handler asked, the keyboard handler did not. a wheel mouse answers its device-id query with a **3**, `0x03` is the scancode for the 2 key, and so every boot came up with a `2` already typed in the username box. the wheel handshake also runs with reporting off now, since movement packets otherwise interleave with the acknowledgements and put the conversation out of step, and whatever is left is drained before interrupts come on.
 - **0.2.18** — an environment, `$PATH`, and scripts. the environment is one block of NUL-separated `NAME=value` strings on the process rather than a table of pointers, because that shape makes inheriting it a single memcpy and inheriting is most of what an environment is *for*; it belongs to the process, which is why `export` has been a shell builtin everywhere since 1977 — a command could only ever change its own. the shell's lives in its session since it is a kernel thread with no process, so the block operations moved to `lib/env.c` and both callers share them. doing `$PATH` turned up something quietly wrong: **completion had been walking a fixed list** that happened to be the same one, and stopped being the same the moment PATH could be set — completion that offers a program which cannot be run is worse than none. scripts get `if`, `else`, `while` and `end` — `end` rather than `fi`/`done` deliberately, since borrowing sh's spellings would claim a compatibility that does not exist. a condition is a command and true means it exited zero, which is sh's rule and the right one; the subtle part is that a condition inside a *skipped* block must not be evaluated at all, because `if grep x file` would still read the file — checking only that the body is skipped misses it entirely, and there is a test that does not. `/boot/etc/profile` runs before every prompt on every console, which is the whole point: a PATH that must be typed every time is a PATH that means nothing.

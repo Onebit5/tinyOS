@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <stdint.h>
 
-#include "cpu/gdt.c"
+#include "arch/x86_64/gdt.c"
 
 static int failures;
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s\n", m); failures++; } } while (0)

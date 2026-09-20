@@ -2,13 +2,14 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "boot.h"
-#include "cpu/gdt.h"
-#include "cpu/idt.h"
-#include "cpu/pic.h"
-#include "cpu/interrupts.h"
-#include "cpu/smp.h"
-#include "cpu/tss.h"
-#include "cpu/syscall.h"
+#include "arch/x86_64/gdt.h"
+#include "arch/x86_64/idt.h"
+#include "arch/x86_64/pic.h"
+#include "arch/x86_64/interrupts.h"
+#include "arch/irq.h"
+#include "arch/x86_64/smp.h"
+#include "arch/x86_64/tss.h"
+#include "arch/x86_64/syscall.h"
 #include "drivers/serial.h"
 #include "drivers/console.h"
 #include "drivers/keyboard.h"
@@ -261,7 +262,7 @@ void kmain(const struct ph_handoff *handoff) {
         panic("no init. there is nobody to bring the machine up");
     }
 
-    asm volatile ("sti");
+    irq_enable();
 
 
     /* the boot thread's work is finished. it has to actually leave --

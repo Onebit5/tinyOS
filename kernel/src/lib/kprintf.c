@@ -1,7 +1,7 @@
 #include "lib/kprintf.h"
 #include "drivers/serial.h"
 #include "drivers/console.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include <stdint.h>
 #include <stddef.h>

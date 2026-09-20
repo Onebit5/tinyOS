@@ -1,9 +1,9 @@
 #include "serial.h"
 #include "drivers/input.h"
 #include "drivers/console.h"
-#include "cpu/io.h"
-#include "cpu/pic.h"
-#include "cpu/interrupts.h"
+#include "arch/x86_64/io.h"
+#include "arch/x86_64/pic.h"
+#include "arch/x86_64/interrupts.h"
 
 /* com1, a 16550 uart (or whatever qemu pretends is one) */
 #define COM1     0x3f8

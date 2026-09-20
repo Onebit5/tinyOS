@@ -2,6 +2,6 @@
 #define VERSION_H
 
 /* one place, so the banner, `arcana` and `persona` can never disagree */
-#define VERSION "0.2.19"
+#define VERSION "0.2.20"
 
 #endif

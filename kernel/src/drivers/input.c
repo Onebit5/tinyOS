@@ -1,5 +1,5 @@
 #include "drivers/input.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include "sched/sched.h"
 #include "drivers/tty.h"

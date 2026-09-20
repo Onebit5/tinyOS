@@ -1,8 +1,8 @@
 #include "drivers/keyboard.h"
 #include "drivers/input.h"
-#include "cpu/io.h"
-#include "cpu/pic.h"
-#include "cpu/interrupts.h"
+#include "arch/x86_64/io.h"
+#include "arch/x86_64/pic.h"
+#include "arch/x86_64/interrupts.h"
 #include <stdbool.h>
 
 #define KBD_DATA   0x60

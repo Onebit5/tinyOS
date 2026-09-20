@@ -1,7 +1,7 @@
 #include "sched/usermode.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
-#include "cpu/gdt.h"
+#include "arch/context.h"
 #include "drivers/input.h"
 #include "drivers/tty.h"
 #include "fs/elf.h"
@@ -40,8 +40,7 @@ static void user_thread_start(void *arg) {
      * and the syscall stack at my kernel stack when it switched me in,
      * so a trap from ring 3 lands somewhere I own. everything below
      * this line is one way */
-    enter_usermode(entry, stack_top, GDT_USER_CODE3, GDT_USER_DATA3,
-                   argc, argv);
+    context_enter_user(entry, stack_top, argc, argv);
 }
 
 /* collect *everything* that has finished, whether anybody was going to

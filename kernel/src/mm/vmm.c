@@ -227,7 +227,9 @@ bool vmm_unmap_page(uint64_t pml4, uint64_t virt) {
  * and exercise the portable half above instead */
 #ifndef TINYOS_HOSTED
 
-#include "cpu/msr.h"
+#include "arch/x86_64/msr.h"
+#include "arch/mmu.h"
+#include "arch/cpu.h"
 #include "boot.h"
 
 void kmain(void);   /* just for its address, to check .text is mapped */
@@ -256,20 +258,6 @@ static void enable_nx(void) {
     nx = PTE_NX;
 }
 
-/* without CR0.WP, ring 0 may scribble on read-only pages regardless of
- * what the tables say, which would make the whole exercise decorative */
-static void enable_write_protect(void) {
-    uint64_t cr0;
-    asm volatile ("mov %%cr0, %0" : "=r"(cr0));
-    cr0 |= (1ull << 16);
-    asm volatile ("mov %0, %%cr0" : : "r"(cr0) : "memory");
-}
-
-static uint64_t read_rsp(void) {
-    uint64_t rsp;
-    asm volatile ("mov %%rsp, %0" : "=r"(rsp));
-    return rsp;
-}
 
 /* check my work before betting the machine on it. a wrong mapping
  * here is a triple fault with no message and no debugger, so anything
@@ -374,7 +362,7 @@ void vmm_init(void) {
     /* the stack I am standing on, and some room below it for the
      * calls I am about to make. if this isnt mapped, loading cr3
      * would be the last thing this cpu ever did */
-    uint64_t rsp = read_rsp();
+    uint64_t rsp = cpu_stack_pointer();
     require_mapped(kernel_pml4, rsp, "the current stack");
     require_mapped(kernel_pml4, rsp - 0x4000, "room below the stack");
 
@@ -400,11 +388,11 @@ void vmm_init(void) {
         panic("vmm: .data came out executable, W^X is not holding");
     }
 
-    enable_write_protect();
+    mmu_enforce_write_protect();
 
     /* the moment of truth. every instruction after this one is fetched
      * through tables I built myself */
-    asm volatile ("mov %0, %%cr3" : : "r"(kernel_pml4) : "memory");
+    mmu_load_table(kernel_pml4);
 
     kprintf("  -> cr3 is mine. %s, W^X on .text\n",
             nx ? "NX enabled" : "no NX available");
@@ -415,7 +403,7 @@ uint64_t vmm_nx(void) {
 }
 
 void vmm_flush_page(uint64_t virt) {
-    asm volatile ("invlpg (%0)" : : "r"(virt) : "memory");
+    mmu_flush_page(virt);
 }
 
 void vmm_dump(uint64_t virt) {

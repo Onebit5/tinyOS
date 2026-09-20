@@ -1,5 +1,5 @@
 #include "sched/process.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include "fs/pipe.h"
 #include "lib/string.h"

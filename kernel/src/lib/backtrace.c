@@ -2,6 +2,7 @@
 #include "lib/ksyms.h"
 #include "lib/kprintf.h"
 #include "mm/vmm.h"
+#include "arch/cpu.h"
 
 #define MAX_FRAMES 24
 
@@ -59,7 +60,7 @@ void kbacktrace(uint64_t rbp, uint64_t rip) {
     }
 
     if (rbp == 0) {
-        asm volatile ("mov %%rbp, %0" : "=r"(rbp));
+        rbp = cpu_frame_pointer();
     }
 
     struct frame *f = (struct frame *)rbp;

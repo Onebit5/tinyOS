@@ -1,6 +1,6 @@
 #include "drivers/tty.h"
 #include "drivers/input.h"
-#include "cpu/interrupts.h"
+#include "arch/irq.h"
 #include "sched/spinlock.h"
 #include "lib/kprintf.h"
 #include "sched/process.h"

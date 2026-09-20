@@ -346,7 +346,7 @@ bool user_wait(int pid, int *code) {
     (void)pid; if (code) *code = wait_code; return true;
 }
 
-#include "cpu/syscall.h"
+#include "arch/x86_64/syscall.h"
 extern int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1,
                                 uint64_t a2, uint64_t a3, uint64_t a4,
                                 struct user_regs *regs);

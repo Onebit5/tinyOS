@@ -1,5 +1,6 @@
 #include "boot.h"
 #include "lib/panic.h"
+#include "arch/cpu.h"
 
 static const struct ph_handoff *handoff;
 
@@ -8,9 +9,7 @@ void boot_take_handoff(const struct ph_handoff *h) {
         /* nothing has been set up yet -- no console, no serial -- so
          * there is nowhere to complain to. stopping is the only honest
          * thing left */
-        for (;;) {
-            __asm__ volatile ("cli; hlt");
-        }
+        cpu_stop();
     }
     handoff = h;
 }

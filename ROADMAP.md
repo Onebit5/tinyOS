@@ -413,11 +413,42 @@ init's, and init collects it -- which replaced a sweep that ran on every
 spawn and took *every* finished process with it, background jobs whose
 exit codes nobody had read yet included.
 
-**0.2.20 the x86 parts, in one place.** everything that assumes this
+**0.2.20 the x86 parts, in one place.** ~~everything that assumes this
 architecture is scattered through the tree. an `arch/` boundary, drawn
 from the outside in, so the rest of the kernel stops naming registers it
 has no business knowing about. no new behaviour at all -- the test is
-that nothing changes.
+that nothing changes.~~ **done in 0.2.20.** drawn from the outside in
+turned out to be the whole instruction: the headers are named for what
+the kernel *wants* -- may interrupts happen, stop until something
+occurs, this mapping is stale, land the kernel here when this thread
+traps -- rather than for what x86 provides. drawn the other way round it
+would have produced a `write_cr3()`, which is an x86 instruction wearing
+a portable-looking name and worse than the inline asm it replaced,
+because the inline asm at least admitted what it was.
+
+the biggest single leak was not the assembly, it was `cpu/interrupts.h`:
+nineteen files across mm, sched, fs, drivers and lib included an x86
+header to get four lines of interrupt masking, and got a struct listing
+rax through r15 and the whole 8259 along with them.
+
+and the version's real deliverable is `tools/checkarch.py`, because a
+boundary is worth exactly what checks it. it fails the build on inline
+assembly outside `arch/` and on any portable file naming x86, and it
+prints the ten files still allowed to -- with the reason for each. the
+list is meant to shrink; three of the entries I first wrote turned out
+to be wrong, which the checker said so on its first run.
+
+"nothing changes" is checkable and was checked: 1057 of the 1073
+functions in both builds have byte-identical instruction sequences, and
+every one of the sixteen that differ is accounted for. two of them are
+not changes at all -- two files each have a static function called
+`mine`, and comparing by name compares the pair.
+
+the thing that nearly slipped through: this kernel builds at `-O0`,
+where a plain `static inline` is a call like any other. for `cpu_relax`
+that is merely slower; for `cpu_frame_pointer` it is *wrong*, because a
+called function reads its own frame and the backtrace would have started
+one line low, politely reporting itself.
 
 **0.2.21 a second architecture.** aarch64 on qemu's virt board: a
 different uart, a different interrupt controller, a different timer, a
