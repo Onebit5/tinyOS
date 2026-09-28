@@ -21,6 +21,31 @@ void enter_usermode(uint64_t entry, uint64_t stack_top,
                     uint64_t cs, uint64_t ss,
                     uint64_t argc, uint64_t argv);
 
+/* a stack that looks like a thread already parked inside
+ * switch_context. the six zeroes are what its pops will eat, in the
+ * order it pops them, and the return address is what its `ret` lands on.
+ *
+ * this lived in thread.c until 0.2.21, with a comment naming each
+ * register -- which was portable code that knew x86 had six callee-saved
+ * registers and returned through the stack. both halves of that are
+ * false on aarch64 */
+ARCH_INLINE uint64_t context_make_stack(uint64_t stack_top,
+                                        void (*entry)(void)) {
+    uint64_t *sp = (uint64_t *)stack_top;
+
+    *--sp = 0;                      /* bootstrap never returns, but if it
+                                     * somehow did, land on 0 loudly */
+    *--sp = (uint64_t)entry;        /* switch_context's ret target */
+    *--sp = 0;                      /* rbp */
+    *--sp = 0;                      /* rbx */
+    *--sp = 0;                      /* r12 */
+    *--sp = 0;                      /* r13 */
+    *--sp = 0;                      /* r14 */
+    *--sp = 0;                      /* r15 */
+
+    return (uint64_t)sp;
+}
+
 /* where the kernel lands when this thread traps.
  *
  * two registers because there are two doors. an interrupt from ring 3

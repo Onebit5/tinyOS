@@ -21,8 +21,11 @@ enum thread_state {
 
 struct thread {
     /* the saved stack pointer. everything else about a parked thread
-     * lives ON that stack -- this one word is the whole handle */
-    uint64_t rsp;
+     * lives ON that stack -- this one word is the whole handle.
+     *
+     * called `rsp` until 0.2.21, which is the x86 name for it and was a
+     * register named in portable code. what it is, is the stack pointer */
+    uint64_t sp;
 
     uint64_t stack_phys;        /* what the pmm gave me, for giving back */
     size_t   stack_pages;

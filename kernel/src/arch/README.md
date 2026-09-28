@@ -41,13 +41,20 @@ clock, the 8250 uart, pci configuration -- are still in `drivers/`. they
 are as x86 as anything in this directory.
 
 they are not moved because **a boundary drawn around drivers before there
-is a second machine to draw it against is a guess.** 0.2.21 is an
-aarch64 port, and it is the thing that says which of those are "an x86
-driver", which are "a driver that happens to use port io", and which are
-neither. moving them now would be inventing an answer a version ahead of
-the question.
+is a second machine to draw it against is a guess.**
 
-what is done instead is making the leak *legible*: port io lives in
-`arch/x86_64/io.h`, so a file that does it visibly includes an x86
-header, and `tools/checkarch.py` prints the list on every build. it is
-meant to shrink.
+one of them stopped being a guess. an aarch64 port was written and then
+removed (see ROADMAP.md), and while it existed it answered the question
+for the serial driver: `drivers/serial.c` was a terminal with a chip
+stuck to it. an 8250 is not an x86 chip -- *reaching* it through a port
+space is -- so the escape-sequence machine stayed in `drivers/` and the
+`outb`s went to `arch/x86_64/uart.c`.
+
+the rest are still here because the port was removed before it could say
+anything about them.
+
+what is done in the meantime is making the leak *legible* and *counted*:
+port io lives in `arch/x86_64/io.h`, so a file that does it visibly
+includes an x86 header; `tools/checkarch.py` prints the list on every
+build; and `tools/portable.py` catches the kind that has no include to
+grep for.

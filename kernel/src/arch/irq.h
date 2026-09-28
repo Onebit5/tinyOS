@@ -13,10 +13,15 @@
  * now" and none of them spell it the same, which is exactly what an arch
  * boundary is for. */
 
-#if defined(__x86_64__)
-#include "arch/x86_64/irq.h"
+#if defined(TINYOS_ARCH_NONE)
+/* an architecture that does nothing, for `make portable-check`. see
+ * kernel/src/arch/none/README.md -- it exists to find out whether
+ * anything above this line secretly needs a particular machine */
+#  include "arch/none/irq.h"
+#elif defined(TINYOS_ARCH_X86_64) || defined(__x86_64__)
+#  include "arch/x86_64/irq.h"
 #else
-#error "arch/irq.h: no implementation for this architecture"
+#  error "arch/irq.h: no implementation for this architecture"
 #endif
 
 /* the contract, whatever implements it:

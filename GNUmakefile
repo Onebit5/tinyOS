@@ -20,31 +20,92 @@ CPUS ?= 4
 MEM  ?= 2G
 QEMU_EXTRA ?=
 
-CC   := gcc
-LD   := ld
 NASM := nasm
+
+# ---- which machine -------------------------------------------------
+#
+# x86_64 is the only one, and the mechanism for there being more than
+# one is kept deliberately.
+#
+# an aarch64 port was written and removed again -- see ROADMAP.md. what
+# it found while it existed is still here and is most of why 0.2.20's
+# boundary is worth anything: a portable file building an x86 stack
+# frame, kmain naming a machine, and a serial driver that turned out to
+# be a terminal with a chip stuck to it. none of that needed the port to
+# survive in order to stay fixed.
+#
+# what does still work without one:
+#
+#   make portable-check LIST=1     the portable half, against no arch
+#   make arch-check ARCH=x86_64    one architecture, compiled alone
+#
+ARCH  ?= x86_64
+CROSS ?=
+
+CC := $(CROSS)gcc
+LD := $(CROSS)ld
+
+# one object tree per architecture. without this, switching ARCH and
+# rebuilding links x86 objects into an arm kernel and the error it gives
+# is about relocations rather than about what you actually did
+OBJDIR := obj/$(ARCH)
+
+# the drivers an architecture supplies for itself, and therefore the
+# the portable drivers an architecture does not want, because it brings
+# its own. empty while there is one architecture, and the mechanism is
+# kept because the *reason* for it survived the port that needed it:
+# drivers/serial.c is the terminal now and the chip lives in arch/
+ARCH_SKIP_x86_64 :=
+ARCH_SKIP := $(addprefix kernel/src/,$(ARCH_SKIP_$(ARCH)))
 
 # freestanding kernel flags. the -mno-* soup is because I cant use fpu/sse
 # in the kernel (no context saving yet), and no red zone because interrupts
 # would trash it
+# what both machines want: no libc, no floating point, no surprises
 CFLAGS := -g -Wall -Wextra -std=gnu11 \
 	-ffreestanding -fno-stack-protector -fno-stack-check -fno-lto -fno-PIC \
-	-m64 -march=x86-64 -mno-80387 -mno-mmx -mno-sse -mno-sse2 -mno-red-zone \
-	-mcmodel=kernel -Ikernel/src -Iboot -MMD -MP -fno-omit-frame-pointer
+	-Ikernel/src -Iboot -MMD -MP -fno-omit-frame-pointer \
+	-DTINYOS_ARCH_$(shell echo $(ARCH) | tr a-z A-Z)
 
-LDFLAGS := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld
+# x86: the -mno-* soup is because I cant use fpu/sse in the kernel (no
+# context saving yet), and no red zone because interrupts would trash it
+CFLAGS_x86_64 := -m64 -march=x86-64 -mno-80387 -mno-mmx -mno-sse -mno-sse2 \
+                 -mno-red-zone -mcmodel=kernel
+
+CFLAGS += $(CFLAGS_$(ARCH))
+
+LDFLAGS_x86_64  := -z max-page-size=0x1000 -T kernel/linker.ld
+LDFLAGS := -nostdlib -static $(LDFLAGS_$(ARCH))
 
 NASMFLAGS := -f elf64 -g
 
-CSRC := $(shell find kernel/src -name '*.c')
-ASRC := $(filter-out kernel/src/arch/x86_64/trampoline.asm, \
-          $(shell find kernel/src -name '*.asm'))
-OBJ  := $(patsubst kernel/src/%.c,obj/%.c.o,$(CSRC)) \
-        $(patsubst kernel/src/%.asm,obj/%.asm.o,$(ASRC)) \
-        obj/arch/x86_64/trampoline.c.o
+# the portable half, plus exactly one architecture.
+#
+# this used to be a plain `find kernel/src`, which was correct while
+# there was one architecture and wrong the instant there were three --
+# a build that globs everything is a build that assumes there is only
+# one of everything, which stopped being true the moment arch/none
+# existed -- it was quietly compiled into the x86 kernel.
+CSRC := $(filter-out $(ARCH_SKIP), \
+          $(shell find kernel/src -name '*.c' -not -path 'kernel/src/arch/*')) \
+        $(shell find kernel/src/arch/$(ARCH) -name '*.c' 2>/dev/null)
+ASRC := $(filter-out kernel/src/arch/$(ARCH)/trampoline.asm, \
+          $(shell find kernel/src -name '*.asm' -not -path 'kernel/src/arch/*') \
+          $(shell find kernel/src/arch/$(ARCH) -name '*.asm' 2>/dev/null))
+
+# gnu-as sources. none today -- x86 uses nasm -- and the rule stays
+# because an architecture that wants them should not have to add it back
+SSRC := $(shell find kernel/src/arch/$(ARCH) -name '*.S' 2>/dev/null)
+OBJ  := $(patsubst kernel/src/%.c,$(OBJDIR)/%.c.o,$(CSRC)) \
+        $(patsubst kernel/src/%.asm,$(OBJDIR)/%.asm.o,$(ASRC)) \
+        $(patsubst kernel/src/%.S,$(OBJDIR)/%.S.o,$(SSRC)) \
+        $(if $(filter x86_64,$(ARCH)),$(OBJDIR)/arch/x86_64/trampoline.c.o,) \
 
 .PHONY: all run bootimg clean distclean
 
+# the pc boots from an image philemon wrote. this board is handed an elf
+# by qemu and there is nothing to write an image with, so the kernel
+# itself is the deliverable
 all: $(BOOTIMG)
 
 # two passes, because the symbol table describes addresses and linking
@@ -52,41 +113,60 @@ all: $(BOOTIMG)
 # folding it in shifts .data but cannot move a single function -- and
 # gensyms --check proves that held instead of me just hoping.
 bin/$(KERNEL): $(OBJ) kernel/linker.ld tools/gensyms.py
-	@mkdir -p $(@D) obj
-	@python3 tools/gensyms.py --stub > obj/ksyms.c
-	@$(CC) $(CFLAGS) -c obj/ksyms.c -o obj/ksyms.o
+	@mkdir -p $(@D) $(OBJDIR)
+	@python3 tools/gensyms.py --stub > $(OBJDIR)/ksyms.c
+	@$(CC) $(CFLAGS) -c $(OBJDIR)/ksyms.c -o $(OBJDIR)/ksyms.o
 	@echo '  LD      pass 1 (to find out where everything landed)'
-	@$(LD) $(LDFLAGS) $(OBJ) obj/ksyms.o -o $@.pass1
-	@echo '  GENSYMS obj/ksyms.c'
-	@python3 tools/gensyms.py $@.pass1 > obj/ksyms.c
-	@$(CC) $(CFLAGS) -c obj/ksyms.c -o obj/ksyms.o
+	@$(LD) $(LDFLAGS) $(OBJ) $(OBJDIR)/ksyms.o -o $@.pass1
+	@echo '  GENSYMS $(OBJDIR)/ksyms.c'
+	@python3 tools/gensyms.py $@.pass1 > $(OBJDIR)/ksyms.c
+	@$(CC) $(CFLAGS) -c $(OBJDIR)/ksyms.c -o $(OBJDIR)/ksyms.o
 	@echo '  LD      pass 2 (with the symbols folded in)'
-	@$(LD) $(LDFLAGS) $(OBJ) obj/ksyms.o -o $@
-	@python3 tools/gensyms.py --check $@ obj/ksyms.c
+	@$(LD) $(LDFLAGS) $(OBJ) $(OBJDIR)/ksyms.o -o $@
+	@python3 tools/gensyms.py --check $@ $(OBJDIR)/ksyms.c
 	@rm -f $@.pass1
 
-obj/%.c.o: kernel/src/%.c
+$(OBJDIR)/%.c.o: kernel/src/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-obj/%.asm.o: kernel/src/%.asm
+$(OBJDIR)/%.S.o: kernel/src/%.S
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/%.asm.o: kernel/src/%.asm
 	@mkdir -p $(@D)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 # the code a second cpu wakes up in. it runs in real mode at a fixed low
 # address, which is nowhere the linker would put anything, so it is
 # assembled flat and carried inside the kernel as bytes
-obj/arch/x86_64/trampoline.bin: kernel/src/arch/x86_64/trampoline.asm
+$(OBJDIR)/arch/x86_64/trampoline.bin: kernel/src/arch/x86_64/trampoline.asm
 	@mkdir -p $(@D)
 	$(NASM) -f bin $< -o $@
 
-obj/arch/x86_64/trampoline.c: obj/arch/x86_64/trampoline.bin tools/bin2c.py
+$(OBJDIR)/arch/x86_64/trampoline.c: $(OBJDIR)/arch/x86_64/trampoline.bin tools/bin2c.py
 	@python3 tools/bin2c.py smp_trampoline $< > $@
 
-obj/arch/x86_64/trampoline.c.o: obj/arch/x86_64/trampoline.c
+$(OBJDIR)/arch/x86_64/trampoline.c.o: $(OBJDIR)/arch/x86_64/trampoline.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 -include $(OBJ:.o=.d)
+
+# the ramdisk, carried inside the kernel.
+#
+# on the pc philemon loads the tar into memory and says where it is. qemu
+# loads one elf and nothing else, and finding a second blob means parsing
+# the device tree -- so on this machine the tar is linked in, the same
+# way the smp trampoline is on the other one. it is the difference
+# between a bootloader that was written for this kernel and a bootloader
+# that was not.
+$(OBJDIR)/ramdisk.c: $(RAMDISK) tools/bin2c.py
+	@mkdir -p $(@D)
+	@python3 tools/bin2c.py embedded_ramdisk $< > $@
+
+$(OBJDIR)/ramdisk.c.o: $(OBJDIR)/ramdisk.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
 # ---- userspace ------------------------------------------------------
 #
@@ -158,7 +238,7 @@ bin/boot/philemon.bin: boot/philemon.asm boot/philemon.inc
 	$(NASM) -f bin $< -o $@
 
 bin/boot/philemon64.bin: boot/philemon.c boot/philemon.h boot/philemon.ld
-	@mkdir -p $(@D) obj
+	@mkdir -p $(@D) $(OBJDIR)
 	$(BOOTCC) $(BOOTCFLAGS) -c boot/philemon.c -o obj/philemon.o
 	$(LD) -T boot/philemon.ld -nostdlib -static --no-warn-rwx-segments \
 		obj/philemon.o -o obj/philemon.elf
@@ -230,7 +310,7 @@ disk:
 # gets shot for saying cli.
 
 HOSTCC    := gcc
-HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src -Iboot
+HOSTFLAGS := -std=gnu11 -Wall -Wextra -g -DTINYOS_HOSTED -Ikernel/src -Iboot -DTINYOS_ARCH_X86_64
 
 TEST_BINS := bin/tests/kprintf bin/tests/mm bin/tests/buddy bin/tests/slab \
              bin/tests/vmm bin/tests/gdt \
@@ -415,7 +495,7 @@ ext2-image:
 # now every host suite has passed while the kernel did not link -- disk.c
 # and shell.c are compiled into no host test, so nothing but building
 # the real thing catches a missing function there
-test: checkfmt checkarch bin/tinyos $(USER_PROGS) $(RAMDISK) $(TEST_BINS) \
+test: checkfmt checkarch portable-check bin/tinyos $(USER_PROGS) $(RAMDISK) $(TEST_BINS) \
       fat32-image ext2-image part-images
 	@fail=0; \
 	for t in $(TEST_BINS); do \
@@ -455,6 +535,46 @@ checkfmt:
 .PHONY: checkarch
 checkarch:
 	@python3 tools/checkarch.py
+
+# and the half checkarch cannot see. it greps -- it catches an #include
+# and a line of inline asm, and it cannot catch a portable file that
+# quietly *depends* on something only x86 supplies. this compiles the
+# portable kernel against an architecture that does nothing, which can.
+#
+#   make portable-check LIST=1    and what a port would have to supply
+.PHONY: portable-check
+portable-check:
+	@python3 tools/portable.py $(if $(LIST),--list,)
+
+# ---- one architecture, on its own -----------------------------------
+#
+# compiles kernel/src/arch/$(ARCH)/ and nothing else, which is the only
+# thing that can honestly be said about an architecture with no boot
+# code yet. selftest.c calls every contract exactly once, because the
+# headers are almost all `static inline` -- and an inline nobody calls
+# is one the assembler never reads, so a header full of mistyped system
+# registers would compile clean and say nothing at all.
+ARCH_DIR   := kernel/src/arch/$(ARCH)
+ARCH_CC    := $(CROSS)gcc
+ARCH_UPPER := $(shell echo $(ARCH) | tr a-z A-Z)
+ARCH_FLAGS := -std=gnu11 -Wall -Wextra -g -ffreestanding \
+              -fno-stack-protector -fno-stack-check -fno-omit-frame-pointer \
+              -DTINYOS_ARCH_$(ARCH_UPPER) -Ikernel/src -Iboot -c
+
+.PHONY: arch-check
+arch-check:
+	@command -v $(ARCH_CC) >/dev/null 2>&1 || { \
+	  echo "  arch-check  no $(ARCH_CC) on PATH."; \
+	  echo "              set CROSS= to whatever prefix that architecture uses."; \
+	  exit 1; }
+	@mkdir -p obj/archcheck
+	@echo "  ARCH        $(ARCH), with $(ARCH_CC)"
+	@for f in $(ARCH_DIR)/*.c $(ARCH_DIR)/*.S; do \
+	   [ -e "$$f" ] || continue; \
+	   printf '  CC          %s\n' "$$f"; \
+	   $(ARCH_CC) $(ARCH_FLAGS) "$$f" -o obj/archcheck/`basename $$f`.o || exit 1; \
+	 done
+	@echo "  arch-check  ok -- $(ARCH) compiles. whether it is correct still needs a machine"
 
 # boot the iso and drive the shell over serial. needs qemu
 .PHONY: boottest

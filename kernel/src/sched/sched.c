@@ -80,6 +80,10 @@ static void idle_loop(void *arg) {
     }
 }
 
+uint64_t sched_quantum_ms(void) {
+    return QUANTUM_TICKS * (1000 / CLOCK_TICK_HZ);
+}
+
 void sched_add(struct thread *t) {
     /* the ring, not `current`. this used to ask whether *this core* had
      * a thread, which meant the same thing back when there was only one
@@ -238,7 +242,7 @@ static void schedule(void) {
         context_set_kernel_stack(ktop);
     }
 
-    switch_context(&prev->rsp, &next->rsp);
+    switch_context(&prev->sp, &next->sp);
     /* when I get back here, an unknown amount of time has passed and
      * I am `prev` again. everything above is somebody elses story */
 }

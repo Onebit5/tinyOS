@@ -6,6 +6,7 @@
 #include "mm/kmalloc.h"
 #include "mm/slab.h"
 #include "arch/mmu.h"
+#include "arch/context.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
 #include "arch/irq.h"
@@ -136,29 +137,25 @@ static struct thread *create(const char *name, void (*entry)(void *),
 
         /* and every other core, which is still holding the translation
          * I just took away and has no way of noticing */
-        smp_tlb_shootdown();
+        mmu_shootdown();
     }
 
-    /* fabricate a stack that looks exactly like a thread which is
-     * sitting inside switch_context waiting to be resumed. the pops
-     * over there will eat my six zeroes, and its `ret` will land on
-     * thread_bootstrap. stack top is page aligned, so the return
-     * address slot ends up 16-aligned and bootstrap gets the stack
-     * alignment the abi promises it */
+    /* and a stack that looks like a thread already parked inside
+     * switch_context, waiting to be resumed into thread_bootstrap.
+     *
+     * this file used to build that frame by hand -- six zeroes with a
+     * comment naming each register. it was wrong in a way nothing could
+     * see until there was a second architecture to be wrong on: aarch64
+     * has ten callee-saved registers and returns through one of them
+     * rather than through a slot on the stack.
+     *
+     * stack top is page aligned, so whatever the architecture puts
+     * there lands 16-aligned and bootstrap gets the alignment the abi
+     * promises it */
     uint8_t *stack = pmm_phys_to_virt(phys + PAGE_SIZE);   /* past the guard */
-    uint64_t *sp = (uint64_t *)(stack + THREAD_STACK_PAGES * PAGE_SIZE);
+    uint64_t top = (uint64_t)(stack + THREAD_STACK_PAGES * PAGE_SIZE);
 
-    *--sp = 0;                              /* bootstrap never returns, but if
-                                             * it somehow did, land on 0 loudly */
-    *--sp = (uint64_t)thread_bootstrap;     /* switch_context's ret target */
-    *--sp = 0;                              /* rbp */
-    *--sp = 0;                              /* rbx */
-    *--sp = 0;                              /* r12 */
-    *--sp = 0;                              /* r13 */
-    *--sp = 0;                              /* r14 */
-    *--sp = 0;                              /* r15 */
-
-    t->rsp = (uint64_t)sp;
+    t->sp = context_make_stack(top, thread_bootstrap);
 
     sched_add(t);
     return t;
@@ -219,7 +216,7 @@ void thread_free_stack(struct thread *t) {
         vmm_map_range(vmm_kernel_pml4(), guard, t->stack_phys, PAGE_SIZE,
                       PTE_WRITE | vmm_nx());
         vmm_flush_page(guard);
-        smp_tlb_shootdown();
+        mmu_shootdown();
     }
 
     pmm_free_pages(t->stack_phys, t->stack_pages);

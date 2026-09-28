@@ -450,14 +450,58 @@ that is merely slower; for `cpu_frame_pointer` it is *wrong*, because a
 called function reads its own frame and the backtrace would have started
 one line low, politely reporting itself.
 
-**0.2.21 a second architecture.** aarch64 on qemu's virt board: a
-different uart, a different interrupt controller, a different timer, a
-different mmu, and the same kernel above all four. the point is not that
-anybody needs tinyOS on arm. the point is that the boundary drawn in
-0.2.20 is either real or it is decoration, and this is the only way to
-find out.
+**cancelled — a second architecture.** it holds no version number,
+because it shipped nothing: 0.2.21 below is the next thing to build.
+aarch64 on qemu's virt board: a different uart, a different interrupt controller, a different
+timer, a different mmu, and the same kernel above all four. the point was
+never that anybody needs tinyOS on arm -- it was that the boundary drawn
+in 0.2.20 is either real or it is decoration.
 
-**0.2.22 a live mode, and an installer.** the ramdisk has been kept
+**it was written and it is gone.** the whole of it: the five contracts,
+boot code that drops EL2 to EL1 and builds page tables before the first
+print statement, a pl011, a gicv2, the generic timer, exception vectors,
+a fabricated handoff with the ramdisk linked into the image. it compiled
+-- every C file first try -- and it linked. it never ran, and it was
+never going to run here: **I cannot test it.** the machine I develop on
+has no way to boot an arm kernel, and a second architecture that only
+one of us can build is worse than none, because it rots silently while
+looking finished.
+
+so it is out of the tree rather than sitting there as a promise. it is
+not abandoned as an idea -- when there is hardware, or a setup I can
+actually run it on, it comes back and this entry comes back with it.
+
+**what it found is still here, and that was the point.** three things,
+none of which needed the port to survive in order to stay fixed:
+
+*the scheduler was building an x86 stack frame by hand.* `thread.c`
+fabricated the frame a new thread resumes from -- six zeroes with a
+comment naming each register, and a return address for `ret` to pop --
+in portable code. neither checker could see it: no inline assembly, no
+x86 header, and it compiles perfectly against an architecture that does
+nothing, because it is integers written into memory. only writing the
+second architecture found it. it is `context_make_stack()` now.
+
+*`kmain` was a machine description with a kernel wrapped round it.* the
+gdt, the 8259, the task state segment, the apics and the pci bus, in the
+order they have to happen. three hooks now -- early, late, and the clock
+-- and `main.c` came off the allow list.
+
+*the serial driver was a terminal with a chip stuck to it.* an 8250 is
+not an x86 chip; *reaching* it through a port space is. the escape
+sequence machine stayed in `drivers/`, the `outb`s went to
+`arch/x86_64/uart.c`, and `drivers/serial.c` came off the allow list
+too. that is the question 0.2.20 deferred, answered for one driver.
+
+and the half of the version that never needed arm at all: `arch/none/`,
+an architecture where every function is empty and every constant is a
+plausible lie, and `make portable-check`, which compiles the portable
+kernel against it. thirty-five files build with no machine underneath
+them, and the undefined symbols left over are the porting checklist,
+derived mechanically rather than remembered. that runs anywhere and it
+stays.
+
+**0.2.21 a live mode, and an installer.** the ramdisk has been kept
 since 0.1.11 on the argument that it is what makes the machine work
 when the disk does not. this is the other half of that argument: boot
 from one medium, partition and format another, copy the system onto it,

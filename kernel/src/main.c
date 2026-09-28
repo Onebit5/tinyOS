@@ -2,27 +2,15 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "boot.h"
-#include "arch/x86_64/gdt.h"
-#include "arch/x86_64/idt.h"
-#include "arch/x86_64/pic.h"
-#include "arch/x86_64/interrupts.h"
 #include "arch/irq.h"
-#include "arch/x86_64/smp.h"
-#include "arch/x86_64/tss.h"
-#include "arch/x86_64/syscall.h"
-#include "drivers/serial.h"
+#include "arch/machine.h"
 #include "drivers/console.h"
-#include "drivers/keyboard.h"
-#include "drivers/mouse.h"
 #include "drivers/input.h"
-#include "drivers/pit.h"
-#include "drivers/pci.h"
 #include "lib/kprintf.h"
 #include "lib/panic.h"
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/kmalloc.h"
-#include "mm/vmm.h"
 #include "fs/ramdisk.h"
 #include "fs/disk.h"
 #include "fs/vfs.h"
@@ -126,13 +114,10 @@ void kmain(const struct ph_handoff *handoff) {
      * is not one of philemon's, which is the only check worth making
      * this early -- there is no console and no serial to complain to */
 
-    serial_init();
-    gdt_init();
-    idt_init();
-    pic_init();
-    keyboard_init();
-    mouse_init();
-    serial_input_init();
+    /* the machine, brought up by whoever knows what this machine is.
+     * somewhere to print comes first, inside there, so everything after
+     * it has something to complain to */
+    machine_bring_up_early();
 
     const struct ph_framebuffer *fb = &boot_handoff()->fb;
     if (fb->width == 0) {
@@ -153,14 +138,7 @@ void kmain(const struct ph_handoff *handoff) {
     kprintf("framebuffer : %ux%u @ %u bpp, pitch %lu bytes, at %016lx\n",
             fb->width, fb->height, fb->bpp, fb->pitch, fb->address);
     kprintf("font        : spleen 8x16 (bsd 2-clause)\n");
-    kprintf("gdt         : loaded, tss slot reserved for later\n");
-    kprintf("idt         : 256 gates armed, exceptions get caught now\n");
-    kprintf("pic         : 8259 remapped to vectors 32-47, ghosts filtered\n");
-    kprintf("keyboard    : ps/2 on irq1, me layout, listening\n");
-    kprintf("serial in   : com1 on irq4, the shell answers over the wire too\n");
-    kprintf("timer       : pit channel 0 at %u hz, %ums per tick\n",
-            PIT_HZ, 1000 / PIT_HZ);
-    kprintf("kernel      : loaded at %p\n\n", (void *)kmain);
+    kprintf("kernel      : loaded at %p\n", (void *)kmain);
 
     pmm_init();
     memory_selftest();
@@ -171,21 +149,8 @@ void kmain(const struct ph_handoff *handoff) {
             pmm_total_bytes() / (1024 * 1024),
             kheap_total_bytes() / 1024);
 
-    kprintf("building my own page tables:\n");
-    vmm_init();
-
-    /* needs the pmm for its stacks, so it waits until now */
-    tss_init();
-    idt_set_ist(8, IST_DOUBLE_FAULT);
-    kprintf("  -> tss loaded, double faults land on their own stack\n");
-
-    syscall_init();
-    kprintf("  -> syscall/sysret armed, ring 3 has a way in\n\n");
-
-    /* before the shell reclaims the loader's memory, since the ramdisk
-     * I read this out of is sitting in it */
-    pci_scan();
-    kprintf("pci        : %zu devices on the bus\n", pci_count());
+    /* and the rest of the machine, which needed the allocators */
+    machine_bring_up_late();
 
     /* the first time anything is done with a device I found rather
      * than merely counted. a machine with no disk carries on exactly as
@@ -208,22 +173,11 @@ void kmain(const struct ph_handoff *handoff) {
 
     /* from here on this function is a thread like any other */
     sched_init();
-    pit_init();
 
-    /* and now, if the firmware will say where they are, move every
-     * interrupt off the 8259 and onto the apics. this is lateral on its
-     * own -- the same interrupts by a better road -- and it is the
-     * thing a second cpu would need. if acpi tells me nothing I stay
-     * on the old chip, which works perfectly well */
-    if (!interrupts_use_apic()) {
-        kprintf("interrupts : staying on the 8259 and the pit\n");
-    }
-
-    /* and then wake everything else this machine has. they climb out
-     * into long mode, say which core they are, and halt -- giving them
-     * work needs locks that do not exist yet. before the shell reclaims
-     * the loader's memory, because the page they start on is in it */
-    smp_init(interrupts_acpi(), interrupts_timer_rate());
+    /* the clock that preempts, and the other cores if this machine has
+     * any. after the scheduler, because the first tick wants something
+     * to schedule */
+    machine_start_clock();
 
     /* the console driver has to be able to ask who is writing before
      * anything writes. set before the shells exist, because the first
@@ -245,8 +199,8 @@ void kmain(const struct ph_handoff *handoff) {
      * the sti at the end of this function anyway */
     kprintf_to_console(true);
 
-    kprintf("threads     : the wheel turns, %ums quantum\n",
-            5 * (1000 / PIT_HZ));
+    kprintf("threads     : the wheel turns, %lums quantum\n",
+            sched_quantum_ms());
 
     /* and this is the last thing kmain decides.
      *

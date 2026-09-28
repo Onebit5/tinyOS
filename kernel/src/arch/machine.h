@@ -13,13 +13,40 @@
  * a second architecture does not have to pretend its power switch is a
  * property of its instruction set. */
 
-#if defined(__x86_64__)
-#include "arch/x86_64/machine.h"
+#if defined(TINYOS_ARCH_NONE)
+/* an architecture that does nothing, for `make portable-check`. see
+ * kernel/src/arch/none/README.md -- it exists to find out whether
+ * anything above this line secretly needs a particular machine */
+#  include "arch/none/machine.h"
+#elif defined(TINYOS_ARCH_X86_64) || defined(__x86_64__)
+#  include "arch/x86_64/machine.h"
 #else
-#error "arch/machine.h: no implementation for this architecture"
+#  error "arch/machine.h: no implementation for this architecture"
 #endif
 
 /* the contract, whatever implements it:
+ *
+ *   void machine_bring_up_early(void)
+ *      whatever has to exist before there is memory to allocate from:
+ *      somewhere to print, a table of exception handlers, an interrupt
+ *      controller, the devices that produce keystrokes.
+ *
+ *   void machine_bring_up_late(void)
+ *      and whatever needs the allocators first: page tables, per-core
+ *      state, the way in from userspace, the buses.
+ *
+ *   void machine_start_clock(void)
+ *      the timer that preempts, and the other cores if there are any.
+ *      after the scheduler exists, because the first tick will want to
+ *      schedule something.
+ *
+ *      these three are what `kmain` used to be. it named the 8259, the
+ *      gdt, the task state segment, the apics and the pci bus in the
+ *      order they have to happen, which is fine for a kernel with one
+ *      machine and is the whole of what a kernel with two cannot do.
+ *      what is left in kmain is the part that is the same everywhere:
+ *      take the handoff, find the memory, mount the filesystems, start
+ *      init.
  *
  *   void machine_reset(void)  [noreturn]
  *      start the machine again. does not come back either way: if the

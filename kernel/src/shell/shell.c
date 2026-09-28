@@ -1,4 +1,8 @@
 #include "shell/shell.h"
+/* struct job, which used to arrive by way of one of the x86 headers
+ * below -- a transitive include is a dependency you find out about the
+ * first time somebody stops including something else */
+#include "sched/usermode.h"
 #include "drivers/input.h"
 #include "drivers/console.h"
 #include "drivers/tty.h"
@@ -12,19 +16,42 @@
 #include "mm/vmm.h"
 #include "lib/backtrace.h"
 #include "drivers/rtc.h"
-#include "arch/x86_64/cpuinfo.h"
+/* ---- the commands that describe a pc ---------------------------------
+ *
+ * `cpus`, `ioapic`, the syscall counters and the processor name in
+ * `arcana` are not features of this shell, they are *reports on this
+ * machine* -- an io apic to move interrupts onto, a brand string in a
+ * cpuid leaf, a table of cores the acpi tables described.
+ *
+ * on a board with none of those the honest thing is to say so rather
+ * than to invent a portable-sounding wrapper that returns nothing on
+ * every architecture but one. so they are conditional, and this file
+ * stays on checkarch's allow list where it belongs */
 #include "fs/ramdisk.h"
 #include "fs/disk.h"
 #include "fs/vfs.h"
 #include "fs/path.h"
 #include "drivers/ahci.h"
-#include "arch/x86_64/smp.h"
-#include "sched/usermode.h"
 #include "fs/pipe.h"
 #include "sched/auth.h"
 #include "sched/init.h"
+
+/* and the four that only a pc has. every one of them backs a command
+ * that *reports on this machine* rather than doing anything: the
+ * processor's brand string, the table of cores acpi described, an io
+ * apic to move interrupts onto, and the syscall counters.
+ *
+ * guarding the includes and not the uses would be the usual mistake --
+ * and the first version of this swallowed nine unrelated headers along
+ * with them by accident. only building for something *other* than x86
+ * finds that, because on x86 the block is simply true. `make
+ * portable-check` is what still finds it */
+#if defined(TINYOS_ARCH_X86_64)
+#include "arch/x86_64/cpuinfo.h"
+#include "arch/x86_64/smp.h"
 #include "arch/x86_64/syscall.h"
 #include "arch/x86_64/interrupts.h"
+#endif
 #include "arch/cpu.h"
 #include "drivers/pci.h"
 #include "lib/ksyms.h"
@@ -717,6 +744,11 @@ static void cmd_locks(int argc, char **argv) {
 static void cmd_cpus(int argc, char **argv) {
     (void)argc; (void)argv;
 
+#if !defined(TINYOS_ARCH_X86_64)
+    kprintf("this machine has no firmware table of processors to read. "
+            "%zu core%s scheduling\n", sched_cores_scheduling(),
+            sched_cores_scheduling() == 1 ? " is" : "s are");
+#else
     size_t n = smp_cpu_count();
     if (n == 0) {
         kprintf("the firmware never said how many processors this machine "
@@ -745,6 +777,7 @@ static void cmd_cpus(int argc, char **argv) {
     kprintf("which core each is on -- a thread that is merely ready is on\n");
     kprintf("none of them. there is one run queue and every core picks from\n");
     kprintf("it, so `summon` a few and they land wherever there is room.\n");
+#endif
 }
 
 /* mount a particular partition instead of whichever answered first.
@@ -1315,6 +1348,10 @@ static void cmd_lspci(int argc, char **argv) {
 static void cmd_ioapic(int argc, char **argv) {
     (void)argc; (void)argv;
 
+#if !defined(TINYOS_ARCH_X86_64)
+    kprintf("there are no apics on this machine. the interrupts it has "
+            "arrive the only way they can\n");
+#else
     if (!interrupts_on_apic()) {
         kprintf("interrupts are still on the 8259; there is nothing to "
                 "move them from\n");
@@ -1328,6 +1365,7 @@ static void cmd_ioapic(int argc, char **argv) {
     if (interrupts_use_ioapic()) {
         kprintf("\npress a key. if this echoes, it worked.\n");
     }
+#endif
 }
 
 static void cmd_top(int argc, char **argv) {
@@ -1357,6 +1395,7 @@ static void cmd_top(int argc, char **argv) {
         /* which doors ring 3 actually uses. a syscall nobody calls is
          * worth knowing about too, so the unused ones are left out
          * rather than listed as zero */
+#if defined(TINYOS_ARCH_X86_64)
         kprintf("\nsyscalls\n ");
         bool any = false;
         for (unsigned i = 0; i < SYSCALL_COUNT; i++) {
@@ -1367,6 +1406,7 @@ static void cmd_top(int argc, char **argv) {
             }
         }
         kprintf("%s\n", any ? "" : " none yet");
+#endif
 
         sleep_ms(500);
     }
@@ -1432,7 +1472,18 @@ static void cmd_persona(int argc, char **argv) {
     };
 
     char brand[49];
+#if defined(TINYOS_ARCH_X86_64)
     cpu_brand(brand);
+#else
+    /* cpuid is an x86 instruction and there is no portable equivalent
+     * to reach for -- what other architectures have is a part number
+     * rather than a name somebody chose.
+     *
+     * memcpy rather than strcpy because this kernel's string.h has never
+     * had one: six functions, and every one is there because something
+     * needed it */
+    memcpy(brand, "unknown", sizeof "unknown");
+#endif
 
     size_t cols = 0, rows = 0, w = 0, h = 0;
     console_size(&cols, &rows, &w, &h);

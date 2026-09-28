@@ -32,22 +32,26 @@ ARCH = os.path.join(KERNEL, "arch")
 # files that may still name the architecture, and why.
 #
 # every one of these is a driver for a chip that is only ever found on a
-# pc. they are not moved into arch/x86_64/ because a boundary drawn
-# around drivers before there is a second machine to draw it against is a
-# guess -- 0.2.21 is an aarch64 port and it is the thing that says which
-# of these are "an x86 driver", which are "a driver that happens to use
-# port io", and which are neither.
+# pc, or a file that reports on this hardware by name.
 #
-# what this list buys in the meantime is that the leak is *counted*
-# rather than assumed.
+# the question of which are "an x86 driver" and which merely "happen to
+# use port io" was answered for exactly one of them, and the answer came
+# from writing a second architecture: drivers/serial.c was a terminal
+# with a chip stuck to it, and the terminal half is off this list now.
+#
+# the rest are still here because that port was removed before it could
+# say anything about them. the list is the record of what has not been
+# asked yet, and it is meant to shrink.
+#
+# what it buys in the meantime is that the leak is *counted* rather than
+# assumed -- and see tools/portable.py, which is the half of this that
+# does not grep, and which catches what grep cannot.
 ALLOWED = {
     "drivers/pit.c":      "the 8254 timer, at ports 0x40-0x43 since 1981",
     "drivers/keyboard.c": "ps/2, which is an 8042 at port 0x60",
     "drivers/mouse.c":    "the same 8042, sharing the same port",
     "drivers/rtc.c":      "the cmos clock, at ports 0x70/0x71",
-    "drivers/serial.c":   "an 8250 uart -- the chip is not x86, reaching it by port is",
     "drivers/pci.c":      "configuration space through ports 0xcf8/0xcfc",
-    "main.c":             "kmain brings the machine up, so it names the machine",
     "shell/shell.c":      "`cpus`, `lspci` and `ioapic` report on this hardware by name",
     "mm/vmm.c":           "the nx bit lives in an msr",
     "mm/addrspace.c":     "tlb shootdown is an inter-processor interrupt",

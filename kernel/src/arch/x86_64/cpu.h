@@ -17,6 +17,14 @@
  * for somebody to raise one of them */
 #define CPU_MAX SMP_MAX_CPUS
 
+/* how many times a second the clock this architecture installs will
+ * interrupt. the scheduler needs it to say how long a quantum is in
+ * milliseconds, and that is the only thing above the line that cares --
+ * which is why it is a number here rather than the name of a timer chip
+ * in the portable half, as it was until 0.2.21 */
+#define CLOCK_TICK_HZ SMP_TICK_HZ
+
+
 #ifdef TINYOS_HOSTED
 
 ARCH_INLINE void cpu_relax(void) { }

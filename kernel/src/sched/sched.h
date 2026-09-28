@@ -19,6 +19,14 @@ void sched_yield(void);
 /* block for a while. the cpu goes to somebody who can use it */
 void sleep_ms(uint64_t ms);
 
+/* how long a thread gets before it is interrupted, in milliseconds.
+ *
+ * kmain used to work this out from PIT_HZ, which meant the last thing
+ * the portable boot sequence did was name an x86 timer chip in order to
+ * print one line. the scheduler is the thing that knows how long a
+ * quantum is; whichever clock delivers the ticks is the arch's business */
+uint64_t sched_quantum_ms(void);
+
 /* called from the timer irq. counts down the quantum and preempts */
 void sched_tick(void);
 
